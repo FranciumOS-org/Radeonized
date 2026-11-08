@@ -95,6 +95,7 @@ bool RBAMDFramebuffer::hubpSetup(void)
      * the kernel's own boot-args and RBFBStrmArmed still read 0. Rule 34
      * twice in one milestone: an arm a later initialiser clobbers. */
     strmCalls = 0; strmRefuse = 0; strmRan = 0;
+    phyReady = false; phySweepDiffers = 0;
     strmWrites = 0; strmApplied = 0; strmChangedMask = 0;
     strmInstUsed = 0; strmOtgUsed = 0; strmPixKhzUsed = 0; strmLinkUsed = 0;
     strmPhaseUsed = 0;
@@ -536,6 +537,7 @@ bool RBAMDFramebuffer::hubpSetup(void)
     dioSample();
     dpcspipeSample();
     strencSample();
+    phySample();
     hpdSetupMask   = hpdSinkMask;
     hpdSetupEnMask = hpdEnMask;
     hpdChanges     = 0;

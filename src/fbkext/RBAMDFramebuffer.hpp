@@ -45,6 +45,7 @@ extern "C" {
 #include "rb_dpcspipe.h"
 #include "rb_strenc.h"
 #include "rb_strprog.h"
+#include "rb_dpcsphy.h"
 #include "rb_enc.h"
 #include "rb_digbe.h"
 #include "rb_dpaltq.h"
@@ -555,6 +556,12 @@ private:
     uint32_t           strencActiveH;
     int                strencActiveAgree; /* 1 yes, 0 no, -1 no reference    */
     bool               strencReady;       /* the aperture covered them       */
+    /* 306: the PHY survey. Five instances x five registers, read-only. */
+    bool               phyReady;
+    uint32_t           phySweepDiffers;
+    struct rb_dpcsphy_inst phyInst[RB_DPCSPHY_COUNT];
+    uint32_t           phyVerdict[RB_DPCSPHY_COUNT];
+    uint32_t           phyClkDetValid[RB_DPCSPHY_COUNT];
     /* 304: the MSA derivation and its control. Pipe 0 is the panel's and is
      * the control; pipe 1 is the Type-C pipe. */
     uint32_t           strencOtg[2][8];
@@ -1250,6 +1257,9 @@ private:
     void dioSample(void);
     void dpcspipeSample(void);
     void strencSample(void);
+    /* 306: the RDPCSTX PHY status survey. Read-only; shares dpaltArmed. */
+    void phySample(void);
+    void phyPublish(void);
     uint32_t strmProgram(uint32_t inst, uint32_t tgInst,
                          uint32_t pixKhz, uint32_t linkRate,
                          uint32_t phase);

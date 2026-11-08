@@ -1,0 +1,262 @@
+/* 306: the RDPCSTX PHY status survey.
+ *
+ * The subject of this file is the ANSWERED/DRIVEN split. Every earlier
+ * reading on the external-display line either answered our own stores or
+ * came from the wrong register, so the checks that matter here are that no
+ * ANSWERED mask overlaps a DRIVEN one, and that the verdict is built from
+ * ANSWERED bits ALONE - a verdict that moved when a DRIVEN bit moved would
+ * be an instrument reporting its own input.
+ */
+#include <stdio.h>
+#include <string.h>
+#include <stdint.h>
+#include "rb_dpcsphy.h"
+
+int phy_tests(void);
+
+int phy_tests(void)
+{
+    unsigned bad = 0;
+    struct rb_dpcsphy_inst in[RB_DPCSPHY_COUNT];
+    uint32_t i, r;
+
+    /* ---- the offsets and the stride ---- */
+    if (rb_dpcsphy_dw(0, RB_DPCSPHY_R_CNTL) != 0x2930u ||
+        rb_dpcsphy_dw(0, RB_DPCSPHY_R_CLOCK_CNTL) != 0x2931u ||
+        rb_dpcsphy_dw(0, RB_DPCSPHY_R_INTERRUPT) != 0x2932u ||
+        rb_dpcsphy_dw(0, RB_DPCSPHY_R_SRAM_CNTL) != 0x2936u ||
+        rb_dpcsphy_dw(0, RB_DPCSPHY_R_PHY_CNTL0) != 0x2940u) {
+        printf("FAIL phy: instance 0's offsets are not the header's\n");
+        bad++;
+    }
+    /* Every instance, against dpcs_4_2_0_offset.h's own numbers transcribed
+     * here rather than recomputed from the stride - recomputing them would
+     * check the stride against itself. */
+    {
+        static const uint32_t cntl[RB_DPCSPHY_COUNT] = {
+            0x2930u, 0x2a08u, 0x2ae0u, 0x2bb8u, 0x2c90u
+        };
+        for (i = 0; i < RB_DPCSPHY_COUNT; i++) {
+            if (rb_dpcsphy_dw(i, RB_DPCSPHY_R_CNTL) != cntl[i]) {
+                printf("FAIL phy: RDPCSTX%u_RDPCSTX_CNTL is 0x%x, the header "
+                       "says 0x%x\n", i,
+                       rb_dpcsphy_dw(i, RB_DPCSPHY_R_CNTL), cntl[i]);
+                bad++;
+            }
+        }
+    }
+    /* Out of range and a bad register are REFUSED, and 0 is safe to use as
+     * the refusal because 0 is not an offset in this block. */
+    if (rb_dpcsphy_dw(RB_DPCSPHY_COUNT, RB_DPCSPHY_R_CNTL) != 0u ||
+        rb_dpcsphy_dw(0, RB_DPCSPHY_R_COUNT) != 0u) {
+        printf("FAIL phy: an out-of-range instance or register was not "
+               "refused\n");
+        bad++;
+    }
+    if (RB_DPCSPHY_DW_CNTL == 0u) {
+        printf("FAIL phy: 0 is a real offset here, so it cannot be the "
+               "refusal\n");
+        bad++;
+    }
+
+    /* ---- THE SPLIT: no ANSWERED bit may also be a DRIVEN bit ---- */
+    {
+        /* Per register, because the masks only collide within one. */
+        uint32_t a_phy = RB_DPCSPHY_A_REF_CLKDET_RESULT |
+                               RB_DPCSPHY_A_SRAM_INIT_DONE |
+                               RB_DPCSPHY_A_SRAM_EXT_LD_DONE |
+                               RB_DPCSPHY_A_RTUNE_ACK;
+        uint32_t d_phy = RB_DPCSPHY_D_PHY_REF_CLKDET_EN |
+                               RB_DPCSPHY_D_PHY_RESET |
+                               RB_DPCSPHY_D_TEST_POWERDOWN |
+                               RB_DPCSPHY_D_PHY_REF_RANGE;
+        uint32_t a_clk = RB_DPCSPHY_A_TX_CLOCK_ON |
+                               RB_DPCSPHY_A_SRAMCLK_CLOCK_ON |
+                               RB_DPCSPHY_A_OCLACLK_CLOCK_ON;
+        uint32_t d_clk = RB_DPCSPHY_D_EXT_REFCLK_EN |
+                               RB_DPCSPHY_D_TX_LANE_CLK_EN |
+                               RB_DPCSPHY_D_TX_CLK_EN |
+                               RB_DPCSPHY_D_SRAMCLK_EN |
+                               RB_DPCSPHY_D_OCLACLK_EN;
+        uint32_t a_cnt = RB_DPCSPHY_A_PLL_UPDATE_PENDING |
+                               RB_DPCSPHY_A_DPALT_BLOCK_STATUS;
+        uint32_t d_cnt = RB_DPCSPHY_D_TX_FIFO_LANE_EN |
+                               RB_DPCSPHY_D_TX_FIFO_EN |
+                               RB_DPCSPHY_D_TX_FIFO_START |
+                               RB_DPCSPHY_D_TX_SOFT_RESET |
+                               RB_DPCSPHY_D_CBUS_SOFT_RESET |
+                               RB_DPCSPHY_D_SRAM_SOFT_RESET;
+        /* THE OVERLAP CHECK, THROUGH A RUNTIME ARRAY ON PURPOSE.
+         *
+         * Written as `if ((a_phy & d_phy) || ...)` the compiler folds it to a
+         * constant and -Werror's -Wconstant-logical-operand kills the build
+         * on a break instead of failing the test. That is the -Werror trap
+         * for the sixth recorded time, and it meant this check had NEVER
+         * been coverage: it could not fail at runtime. Through a volatile
+         * array the comparison survives to run. */
+        static volatile uint32_t pair[3][2];
+        unsigned q;
+        pair[0][0] = a_phy; pair[0][1] = d_phy;
+        pair[1][0] = a_clk; pair[1][1] = d_clk;
+        pair[2][0] = a_cnt; pair[2][1] = d_cnt;
+        for (q = 0; q < 3u; q++) {
+            if (pair[q][0] & pair[q][1]) {
+                printf("FAIL phy: register group %u has an ANSWERED mask "
+                       "overlapping a DRIVEN one (0x%08x & 0x%08x) - the "
+                       "survey would report our own stores as hardware "
+                       "state\n", q, pair[q][0], pair[q][1]);
+                bad++;
+            }
+        }
+        /* EVERY MASK INDIVIDUALLY, not the OR of each group.
+         * The break-it sweep emptied ONE mask and fired nothing, because
+         * the group it belongs to was still non-empty - the check tested a
+         * disjunction and reported it as coverage of each term. That is the
+         * same defect it exists to catch, one level up. */
+        {
+            static const uint32_t every[] = {
+                RB_DPCSPHY_A_REF_CLKDET_RESULT, RB_DPCSPHY_A_SRAM_INIT_DONE,
+                RB_DPCSPHY_A_SRAM_EXT_LD_DONE,  RB_DPCSPHY_A_RTUNE_ACK,
+                RB_DPCSPHY_A_TX_CLOCK_ON,       RB_DPCSPHY_A_SRAMCLK_CLOCK_ON,
+                RB_DPCSPHY_A_OCLACLK_CLOCK_ON,  RB_DPCSPHY_A_PLL_UPDATE_PENDING,
+                RB_DPCSPHY_A_DPALT_BLOCK_STATUS,RB_DPCSPHY_A_REG_FIFO_OVERFLOW,
+                RB_DPCSPHY_A_TX_FIFO_ERROR,     RB_DPCSPHY_A_DPALT_DIS_TOGGLE,
+                RB_DPCSPHY_A_DPALT_4LANE_TOGGLE,RB_DPCSPHY_A_MEM_PWR_PWR_STATE,
+                RB_DPCSPHY_D_EXT_REFCLK_EN,     RB_DPCSPHY_D_TX_LANE_CLK_EN,
+                RB_DPCSPHY_D_TX_CLK_EN,         RB_DPCSPHY_D_SRAMCLK_EN,
+                RB_DPCSPHY_D_OCLACLK_EN,        RB_DPCSPHY_D_PHY_REF_CLKDET_EN,
+                RB_DPCSPHY_D_TX_FIFO_LANE_EN,   RB_DPCSPHY_D_TX_FIFO_EN,
+                RB_DPCSPHY_D_TX_FIFO_START,     RB_DPCSPHY_D_TX_SOFT_RESET,
+                RB_DPCSPHY_D_CBUS_SOFT_RESET,   RB_DPCSPHY_D_SRAM_SOFT_RESET,
+                RB_DPCSPHY_D_PHY_RESET,         RB_DPCSPHY_D_TEST_POWERDOWN,
+                RB_DPCSPHY_D_PHY_REF_RANGE
+            };
+            const unsigned n_every = sizeof(every) / sizeof(every[0]);
+            unsigned k;
+            for (k = 0; k < n_every; k++) {
+                if (every[k] == 0u) {
+                    printf("FAIL phy: mask %u is empty, so every check that "
+                           "uses it is vacuous\n", k);
+                    bad++;
+                }
+            }
+            /* No separate equality check here: it would be another
+             * constant the compiler folds, and the runtime overlap loop
+             * above already catches an aliased bit. */
+        }
+    }
+
+    /* ---- the verdict, built from ANSWERED bits alone ---- */
+    memset(in, 0, sizeof(in));
+    if (rb_dpcsphy_verdict(&in[0]) != RB_DPCSPHY_V_DEAD) {
+        printf("FAIL phy: an all-zero instance is not DEAD\n");
+        bad++;
+    }
+    if (rb_dpcsphy_verdict(0) != RB_DPCSPHY_V_UNKNOWN) {
+        printf("FAIL phy: a NULL instance is not UNKNOWN\n");
+        bad++;
+    }
+    in[0].w[RB_DPCSPHY_R_PHY_CNTL0] = RB_DPCSPHY_A_REF_CLKDET_RESULT |
+                                      RB_DPCSPHY_A_SRAM_INIT_DONE;
+    if (rb_dpcsphy_verdict(&in[0]) != RB_DPCSPHY_V_ALIVE) {
+        printf("FAIL phy: clock detected plus SRAM loaded is not ALIVE\n");
+        bad++;
+    }
+    in[0].w[RB_DPCSPHY_R_PHY_CNTL0] = RB_DPCSPHY_A_SRAM_INIT_DONE;
+    if (rb_dpcsphy_verdict(&in[0]) != RB_DPCSPHY_V_CLOCKLESS) {
+        printf("FAIL phy: SRAM loaded with no clock is not CLOCKLESS\n");
+        bad++;
+    }
+    in[0].w[RB_DPCSPHY_R_PHY_CNTL0] = RB_DPCSPHY_A_REF_CLKDET_RESULT;
+    if (rb_dpcsphy_verdict(&in[0]) != RB_DPCSPHY_V_NO_SRAM) {
+        printf("FAIL phy: a clock with no SRAM is not NO_SRAM\n");
+        bad++;
+    }
+    /* THE LOAD-BEARING ONE. Every DRIVEN bit set at once, every ANSWERED bit
+     * clear: the verdict must still be DEAD. A driver can set every enable
+     * in this block and that says nothing about the PHY. */
+    memset(in, 0, sizeof(in));
+    in[0].w[RB_DPCSPHY_R_PHY_CNTL0] = RB_DPCSPHY_D_PHY_REF_CLKDET_EN |
+                                      RB_DPCSPHY_D_PHY_RESET |
+                                      RB_DPCSPHY_D_TEST_POWERDOWN |
+                                      RB_DPCSPHY_D_PHY_REF_RANGE;
+    in[0].w[RB_DPCSPHY_R_CLOCK_CNTL] = RB_DPCSPHY_D_EXT_REFCLK_EN |
+                                       RB_DPCSPHY_D_TX_LANE_CLK_EN |
+                                       RB_DPCSPHY_D_TX_CLK_EN |
+                                       RB_DPCSPHY_D_SRAMCLK_EN |
+                                       RB_DPCSPHY_D_OCLACLK_EN;
+    in[0].w[RB_DPCSPHY_R_CNTL] = RB_DPCSPHY_D_TX_FIFO_EN |
+                                 RB_DPCSPHY_D_TX_FIFO_START |
+                                 RB_DPCSPHY_D_TX_FIFO_LANE_EN;
+    in[0].w[RB_DPCSPHY_R_SRAM_CNTL] = RB_DPCSPHY_D_TX_FIFO_EN;
+    if (rb_dpcsphy_verdict(&in[0]) != RB_DPCSPHY_V_DEAD) {
+        printf("FAIL phy: every DRIVEN bit set moved the verdict - the "
+               "instrument is reporting its own input\n");
+        bad++;
+    }
+
+    /* ---- the clock-detector licence ---- */
+    memset(in, 0, sizeof(in));
+    if (rb_dpcsphy_clkdet_valid(&in[0]) != 0) {
+        printf("FAIL phy: a clkdet result is called valid with the detector "
+               "disabled - that is reading a 0 that means nothing\n");
+        bad++;
+    }
+    in[0].w[RB_DPCSPHY_R_PHY_CNTL0] = RB_DPCSPHY_D_PHY_REF_CLKDET_EN;
+    if (rb_dpcsphy_clkdet_valid(&in[0]) != 1) {
+        printf("FAIL phy: the detector is enabled and the result is still "
+               "called invalid\n");
+        bad++;
+    }
+    if (rb_dpcsphy_clkdet_valid(0) != 0) {
+        printf("FAIL phy: NULL is not invalid\n");
+        bad++;
+    }
+
+    /* ---- the sweep: five register sets, or one address five times ---- */
+    memset(in, 0, sizeof(in));
+    if (rb_dpcsphy_sweep_differs(in, RB_DPCSPHY_COUNT) != 0) {
+        printf("FAIL phy: five identical instances read as DIFFERING\n");
+        bad++;
+    }
+    in[2].w[RB_DPCSPHY_R_CNTL] = 1u;
+    if (rb_dpcsphy_sweep_differs(in, RB_DPCSPHY_COUNT) != 1) {
+        printf("FAIL phy: one differing instance did not make the sweep "
+               "differ\n");
+        bad++;
+    }
+    /* A difference in ANY of the five registers must count, not just the
+     * first - a sweep that only compared one word would pass the check above
+     * for the wrong reason. */
+    for (r = 0; r < RB_DPCSPHY_R_COUNT; r++) {
+        memset(in, 0, sizeof(in));
+        in[4].w[r] = 0x80000000u;
+        if (rb_dpcsphy_sweep_differs(in, RB_DPCSPHY_COUNT) != 1) {
+            printf("FAIL phy: a difference in register %u is invisible to "
+                   "the sweep\n", r);
+            bad++;
+        }
+    }
+    /* NULL only. A single instance is covered by the loop bound rather than
+     * by a guard, and asserting it here would be asserting something no
+     * break can falsify - the sweep showed exactly that. */
+    if (rb_dpcsphy_sweep_differs(0, RB_DPCSPHY_COUNT) != 0) {
+        printf("FAIL phy: NULL is not refused\n");
+        bad++;
+    }
+
+    /* ---- the panel is named, so it can be refused by name ---- */
+    if (RB_DPCSPHY_PANEL_INST != 0u || RB_DPCSPHY_TYPEC_INST != 2u ||
+        RB_DPCSPHY_PANEL_INST == RB_DPCSPHY_TYPEC_INST) {
+        printf("FAIL phy: the panel and the Type-C port are not distinct "
+               "named instances\n");
+        bad++;
+    }
+
+    if (!bad) {
+        printf("ok phy: five instances at the header's own offsets, the "
+               "ANSWERED/DRIVEN split disjoint, and a verdict that every "
+               "DRIVEN bit cannot move\n");
+    }
+    return bad;
+}

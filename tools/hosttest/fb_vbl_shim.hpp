@@ -357,6 +357,10 @@ public:
     uint32_t strmProgram(uint32_t,uint32_t,uint32_t,uint32_t){return 0;}
     void strmPublish(void){}
     void strencSample(void) {}
+    /* 306: the PHY survey's publish, stubbed - the hosttest exercises
+     * rb_dpcsphy.h directly in phy_test.c, not through the VBL path. */
+    void phySample(void) {}
+    void phyPublish(void) {}
     void dpaltSample(void) {}
     /* 2EF: the DP DTO survey, stubbed for the same reason - dtoSample() lives
      * in RBAMDFramebufferHUBP.cpp, which this executable does not compile.
