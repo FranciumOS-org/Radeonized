@@ -535,23 +535,38 @@ never that **the stream enable comes AFTER training**; it was in
 STATUS 1 — it says the experiment could not reach the state where that is
 asked.
 
-**305b SPLIT IT, NOT BOOTED.** `rb_strprog_build()` takes a **phase** and
-`rb_strprog_plan` **returns** the wait points (the `WAIT_*_IDX` constants are
-gone — they differ per phase). **ATTRIBUTE** (`strencprog go`, 10 writes):
-OTG connect, format, colorimetry, MISC, four MSA words, SDP splitting, then
+**305b SPLIT IT AND BOOT 478 PROVED THE SPLIT — AND THE BLOCKER IS
+UNTOUCHED.** `rb_strprog_build()` takes a **phase** and `rb_strprog_plan`
+**returns** the wait points (the `WAIT_*_IDX` constants are gone — they differ
+per phase). **ATTRIBUTE** (`strencprog go`, 10 writes) ends with
 **`DP_VID_STREAM_ENABLE` 0** — not upstream's, and the recovery from 477.
 **UNBLANK** (`strencprog unblank`, 10 writes): ENABLE 0 + wait, M/N primed
 inside GEN_EN 0/1, `DIG_START` pulse, FIFO pulse ending at 0, ENABLE 1 + the
-STATUS read. **Order: `strencprog go` -> `dptrain go tps=2` ->
-`strencprog unblank`.** The phase defaults to ATTRIBUTE everywhere, so a bare
-`go` gets the half that cannot lock the trainer out, and **the load-bearing
-guard is that ATTRIBUTE cannot enable the stream**. Both halves refuse the
-panel, OTG0, a non-zero licence and m_vid 0. Twelve break-it checks, eleven
-caught by a failing test and none by `-Werror`; the twelfth **fired nothing**
-first time — the break was inert (assigned two lines above the code that
-overwrites it, 304's `| 1u` again) — and the sweep also caught the check
-reading `w[idx]` before bounding `idx`, the guard doing what it exists to
-prevent. Framebuffer UUID **5AA98CD9**.
+STATUS read. **Order: `go` -> `dptrain go tps=2` -> `unblank`**, phase
+defaulting to ATTRIBUTE everywhere; the load-bearing guard is that ATTRIBUTE
+**cannot** enable the stream. Twelve break-it checks, eleven caught by a
+failing test and none by `-Werror`; the twelfth **fired nothing** first time
+(the break was inert — 304's `| 1u` again) and the sweep also caught the check
+reading `w[idx]` before bounding `idx`.
+**Boot 478: `dptrain` RAN, no refusal 66** — the ordering defect is fixed, the
+whole chain executed (DTO 0 -> 1; OTG1 scanning; configure 10/10 changed
+`0xf7` with ENABLE left 0; `TP_SEL 0 -> 1`; unblank 10/10 changed `0x374`,
+held FIFO cleared, `CNTL -> 0x00100001`) and **STATUS stayed 0**. But
+**DPCD `0x202` read `0x00` before and after**, so the boot asked whether an
+UNTRAINED link answers STATUS 1 — already answered in 477. **The split was
+real and was not the blocker.** The sink now states the blocker itself:
+**`0x205` = `0x00`, `RECEIVE_PORT_0_STATUS` CLEAR — no sync on the main
+link** — while **`0x204` bit 7 `LINK_STATUS_UPDATED` is SET**, so it noticed
+something. **NEW AND UNEXPLAINED: `DP_VID_M` on DIG2 WILL NOT TAKE A STORE**
+(reads 0 after 9011) while `DP_VID_N` in the same loop, instance and mask
+shape takes `0x8000`; the held-FIFO hypothesis is **dead** (in-boot A/B, both
+states). **The DIG1/DIG3 control FAILED and that is the finding**: they retain
+no stores at all (`0x8000` reads back `0x2000`, the ENABLE bit does not
+survive to the next read), so they do not isolate the variable (rule 39) — but
+with DIG0 live that is the first **per-instance power discrimination** here.
+The kext now publishes **`RBFBStrmW<n>Was`/`Want`/`Got`** per write so a
+dropped store is read directly, not inferred from a changed mask. Framebuffer
+UUID **27BF9539**, not installed.
 
 **302 built the stream encoder READ** — `src/common/rb_strenc.h`, 14 registers
 x 5 instances, BASE_IDX 2, stride 0x100. **The read is the experiment: DIG0 is
@@ -697,11 +712,12 @@ table, which we have on disk); **polling `checkTimestamps()` harder**
 
 **Open:** the rest of the external-display chain — `docs/EXTERNAL-DISPLAY.md`
 for the state, `docs/HANDOFF-NEXT.md` for the next step. **The blocker is not
-named** (301 retired "the analog PHY is off"); the things never
-attempted are a stream on a **trained** DIG2 link (305 wrote the stream in
-boot 477 and the hardware answered STATUS 0; the write list is now split so
-training fits between the halves, **not booted**), a **surface** on pipe 1 and
-a second `IOFramebuffer`. 2F8 added a cost: `tps=3`
+named** (301 retired "the analog PHY is off"); everything
+downstream is blocked on **clock recovery**, which boot 478 had the sink state
+outright (`0x205` bit 0 clear). The things never attempted are a stream on a
+**trained** DIG2 link (the encoder side is done and refuses with STATUS 0 on
+an untrained link), a **surface** on pipe 1 and a second `IOFramebuffer`; also
+open, `DP_VID_M` refusing a store on DIG2. 2F8 added a cost: `tps=3`
 **degrades the sink until a reboot**, which is what 2F7 spent a milestone
 diagnosing. Also open: the **wedge** (work submitted that
 never retires — channel-52 GFX, 3.5 s, the "random lag"; `stamp_ticks` 125666
