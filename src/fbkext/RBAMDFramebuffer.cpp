@@ -591,6 +591,13 @@ bool RBAMDFramebuffer::start(IOService *provider)
          * measured dark, and `rb_dig_refuse()` declines PHY0 by name because
          * that is the eDP panel this desktop is running on. */
         digArmed = argOn("-rbgpufbdig");
+        /* 310c: SET_PHY_FSM. Arms its own dependency rather than documenting
+         * it (rule 34): the before/after survey is the measurement, and that
+         * survey rides -rbgpufbdpalt, so arming fsm without it would be an
+         * experiment whose instrument is off. Set BEFORE dpaltArmed's own
+         * assignment would be setting it before the line that overwrites it -
+         * 305's trap - so it is applied after, below. */
+        fsmArmed = argOn("-rbgpufbfsm");
         /* And it ARMS ITS OWN DEPENDENCY. The command goes over dmubPush,
          * which refuses with code 1 unless the ring half is armed, so
          * `-rbgpufbdig` alone would otherwise refuse for a reason that looks
@@ -605,6 +612,7 @@ bool RBAMDFramebuffer::start(IOService *provider)
          * something - no level, no pipe, no caps query and no transmitter is
          * sent by arming anything. */
         if (digArmed) { dmubBlArmed = true; }
+        if (fsmArmed) { dmubBlArmed = true; }
         /* 2EC: the FE connection, DIG_BE_CNTL.DIG_FE_SOURCE_SELECT - the one
          * step 2E8 established is genuinely ours to write, and the first
          * write this kext makes to the DIG back end.
@@ -751,6 +759,12 @@ bool RBAMDFramebuffer::start(IOService *provider)
          * experiment's arm being part of the experiment, and an arm that a
          * later initialiser clobbers is the same defect one level down. */
         if (strmArmed) { dpaltArmed = true; }
+        /* 310c, and the trap fired on the first draft: this assignment MUST
+         * be after dpaltArmed's own, because dpaltArmed is assigned (not
+         * or-ed) at the line above's neighbour and an earlier `= true` is
+         * simply overwritten. 305 recorded this for strmArmed; the first
+         * draft of 310c put it 155 lines too early and the grep caught it. */
+        if (fsmArmed) { dpaltArmed = true; }
         /* 2EA: the QUERY_DP_ALT sweep, and the TOKEN NAME is rule 30 biting
          * for real rather than being checked and cleared. The obvious
          * `-rbgpufbdpaltq` has `-rbgpufbdpalt` - the line directly above -

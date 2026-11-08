@@ -46,6 +46,7 @@ extern "C" {
 #include "rb_strenc.h"
 #include "rb_strprog.h"
 #include "rb_dpcsphy.h"
+#include "rb_phyfsm.h"
 #include "rb_enc.h"
 #include "rb_digbe.h"
 #include "rb_dpaltq.h"
@@ -560,6 +561,26 @@ private:
     bool               phyReady;
     uint32_t           phySweepDiffers;
     struct rb_dpcsphy_inst phyInst[RB_DPCSPHY_COUNT];
+
+    /* 310c: SET_PHY_FSM. Two snapshots of the whole survey so the subject
+     * and the four controls come from the same before and the same after. */
+    struct rb_dpcsphy_inst fsmBefore[RB_DPCSPHY_COUNT];
+    struct rb_dpcsphy_inst fsmAfter[RB_DPCSPHY_COUNT];
+    bool     fsmArmed {false};
+    uint64_t fsmCalls {0};
+    uint64_t fsmSends {0};
+    uint64_t fsmReplies {0};
+    uint32_t fsmRefuse {RB_PHYFSM_E_NOT_ARMED};
+    uint32_t fsmDecode {RB_PHYFSM_E_NO_REPLY};
+    uint32_t fsmStatus {0};
+    uint32_t fsmStateEcho {0};
+    uint32_t fsmPhyEcho {0};
+    uint32_t fsmChanged {0};
+    uint32_t fsmCtlChanged {0};
+    uint32_t fsmPanelLicence {0};
+    uint32_t fsmVerdict {RB_PHYFSM_V_UNKNOWN};
+    uint32_t fsmStateWant {0};
+    uint32_t fsmPhyWant {RB_PHYFSM_TYPEC_INST};
     uint32_t           phyVerdict[RB_DPCSPHY_COUNT];
     uint32_t           phyClkDetValid[RB_DPCSPHY_COUNT];
     /* 304: the MSA derivation and its control. Pipe 0 is the panel's and is
@@ -1260,6 +1281,8 @@ private:
     /* 306: the RDPCSTX PHY status survey. Read-only; shares dpaltArmed. */
     void phySample(void);
     void phyPublish(void);
+    uint32_t phyFsmExperiment(uint32_t phyid, uint32_t state);
+    void phyFsmPublish(void);
     uint32_t strmProgram(uint32_t inst, uint32_t tgInst,
                          uint32_t pixKhz, uint32_t linkRate,
                          uint32_t phase);

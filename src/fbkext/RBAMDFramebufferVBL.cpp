@@ -1560,6 +1560,40 @@ IOReturn RBAMDFramebuffer::setProperties(OSObject *props)
         }
     }
 
+    /* 310c: SET_PHY_FSM on PHY2. `RBFBFsmGo` carries the STATE and is what
+     * triggers it, so an armed boot nobody has run the tool on has written
+     * nothing - 2zn's shape, and the opposite of `dmubbl dig`/`dto`, which
+     * write with no argument (307 and boot 475 each paid for that).
+     *
+     * The state is REQUIRED rather than defaulted. Whether the firmware
+     * accepts RESET -> RESET_RELEASED directly or wants the ladder is not
+     * established, so a default would be a transition nobody chose on a port
+     * we are trying to bring up. `RBFBFsmPhy` is read BEFORE the trigger
+     * (rule 34: a dial's state at the start is part of the arm) so one call
+     * carries both and no round trip can land between them. */
+    {
+        OSNumber *fp = OSDynamicCast(OSNumber, dict->getObject("RBFBFsmPhy"));
+        if (fp) { fsmPhyWant = fp->unsigned32BitValue(); }
+
+        OSNumber *fg = OSDynamicCast(OSNumber, dict->getObject("RBFBFsmGo"));
+        if (fg) {
+            fsmStateWant = fg->unsigned32BitValue();
+            const uint32_t rc = phyFsmExperiment(fsmPhyWant, fsmStateWant);
+            LOG("RBFBFsmGo phy %u state %u -> refuse %u; reply decode %u "
+                "status %#x phyEcho %u stateEcho %u; changed %#x "
+                "ctlChanged %#x licence %#x; calls %llu sends %llu "
+                "replies %llu. NOT ESTABLISHED: that DMCUB 4.0.15.47 "
+                "implements sub-type 29, that it acts on a DP-alt port, or "
+                "that this transition is legal without the ladder",
+                fsmPhyWant, fsmStateWant, rc, fsmDecode, fsmStatus,
+                fsmPhyEcho, fsmStateEcho, fsmChanged, fsmCtlChanged,
+                fsmPanelLicence, fsmCalls, fsmSends, fsmReplies);
+            phyFsmPublish();
+            dmubPublish();
+            return rc == 0u ? kIOReturnSuccess : kIOReturnNotPermitted;
+        }
+    }
+
     /* 2FA: PROGRAM A SECOND RASTER AND START IT - optc1_program_timing plus
      * optc31_enable_crtc on the pipe whose DP DTO is already running.
      *

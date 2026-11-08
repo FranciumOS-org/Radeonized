@@ -118,7 +118,59 @@ into it.
    a test, including one that asserts it is not 540000.
    Run `./build/out/dmubbl fsm` to see the exact slot; it needs no arm and no
    framebuffer.
-2. **Now ask the user. This is the decision point.** Sending 29 is a **write of a new firmware command**,
+2. ~~Write the send.~~ **DONE in 310c, NOT RUN.** `-rbgpufbfsm`,
+   `src/fbkext/RBAMDFramebufferPhyFsm.cpp`, `dmubbl fsm go <state> [phy]`.
+   Framebuffer UUID **147D6474**, `dmubbl` **FAD8BBBD**. **Neither is
+   installed and nothing has been sent.**
+3. **Now it needs a boot, and that is the user's call.** To run it:
+
+   ```
+   sudo tools/efi.sh bootarg add -rbgpufbfsm
+   sudo tools/fbinstall.sh
+   ```
+
+   then reboot **with the Type-C cable already plugged in** (2FB: plugged in
+   afterwards, every AUX read refuses and the port never got its `AUX_EN`),
+   and in the armed boot, over SSH:
+
+   ```
+   ./build/out/dmubbl fsm
+   ```
+
+   to see the slot without sending, then
+
+   ```
+   ./build/out/dmubbl fsm go 2
+   ```
+
+   for RESET_RELEASED. Check first that the framebuffer UUID **inside the
+   collection** is 147D6474 and that `-rbgpufbfsm` is in this boot's args
+   (rule 15 — 2xx cost nine boots to this exact gap).
+
+   **Batch the boot** (the standing instruction): `dmubbl fsm go 2` first,
+   then `3` SRAM_LOAD_DONE and `10` TX_EN if 2 is answered or inert, then
+   `./build/out/phylook.sh` and `dpcdread 0x202 0x205` to see whether
+   anything downstream changed. Each `go` publishes its own before/after with
+   the four-instance control, so several asks in one boot do not spoil each
+   other — but note that state is cumulative on the hardware, so the ORDER
+   is part of the reading.
+
+   **What each outcome means:**
+   - `decode 0` — DMCUB answered. Sub-type 29 is implemented and reached
+     phyid 2. The status word is reported, not judged; its meaning is not
+     established anywhere readable.
+   - `decode 77 NO_REPLY` — DMCUB consumed the slot and wrote nothing. **That
+     is a result, not a failure**: the first direct execution evidence this
+     line has had, since command 1 has no reply field to ask.
+   - `changed` non-zero with `ctlChanged` 0 — PHY2 moved and the controls held
+     still. That is the thing 307, 309 and 309b all failed to produce.
+   - `ctlChanged` non-zero — **the sample is contaminated**, something else is
+     writing the block, and rule 17 applies.
+   - `refuse 82` — the panel does not read as a brought-up PHY this sample, so
+     the instrument is suspect and the reading would mean nothing. Re-run; if
+     it persists, the survey is broken this boot, not the port.
+
+4. **Then journal it either way.** Sending 29 is a **write of a new firmware command**,
    so it is their decision (the card's rule for SMU message groups, same
    spirit). Say what it changes: one new `DMUB_CMD__VBIOS` command on the ring
    we already drive, **phyid 2 only**, PHY0 refused by name, `status` read back

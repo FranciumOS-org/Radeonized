@@ -65923,3 +65923,131 @@ prints it on every invocation: that DMCUB 4.0.15.47 implements sub-type 29 at
 all, that the firmware acts on it for a DP-alt port, and that RESET ->
 RESET_RELEASED is a legal direct transition rather than one step of a ladder.
 The status word is what would answer the first two.
+
+---
+
+## 310c — THE SEND IS WRITTEN. `-rbgpufbfsm`, `dmubbl fsm go <state>`. Not run.
+
+`src/fbkext/RBAMDFramebufferPhyFsm.cpp`, the `RBFBFsmGo` trigger in
+`setProperties`, `rb_phyfsm_verdict()`, and the `dmubbl fsm go` verb with its
+two-part report. Framebuffer UUID **147D6474**, `dmubbl` **FAD8BBBD**. Neither
+installed; nothing has been sent.
+
+### The arm, and rule 30 discharged with its own control
+
+`-rbgpufbfsm`. **Prefix-scanned against all 122 `-rbgpu*` tokens in the tree**
+— opt-in tokens are not covered by `rb_defaults.h`'s assert, so the scan is
+manual by necessity. No exact duplicate, nothing it prefixes, nothing that
+prefixes it. **The scan's own instrument was validated in the same run**
+against the known `-rbgpufbotg` / `-rbgpufbotgany` trap, which it still finds,
+and against `-rbgpufbdig` as a known-present control (rule 26: a search is an
+instrument). Re-scanned after the token was added: 123 tokens, still no
+collision.
+
+It **arms `-rbgpufbdpalt` itself**, because the before/after PHY survey *is*
+the measurement and arming the experiment without its instrument would be
+rule 34's defect.
+
+**AND THE 305 TRAP FIRED ON THE FIRST DRAFT.** The arm was written at line 615
+as `if (fsmArmed) { dpaltArmed = true; }` — and line 755 is
+`dpaltArmed = argOn("-rbgpufbdpalt");`, a plain assignment that **overwrites
+it**. A grep of every line assigning `dpaltArmed` caught it; the arm now sits
+at line 767, after its own assignment, beside `strmArmed`'s, which is where
+305 put the same fix for the same reason. The card recorded this trap for
+`strmArmed` and I reproduced it 155 lines too early anyway.
+
+### Nothing is written until a state is named
+
+`RBFBFsmGo` carries the **state** and is what triggers the send, so an armed
+boot nobody has run the tool on has written nothing. **The state is REQUIRED,
+with no default**, because whether the firmware accepts
+RESET -> RESET_RELEASED directly or wants the ladder is not established and a
+default would be a transition nobody chose on a port we are bringing up.
+`RBFBFsmPhy` is read **before** the trigger in the same dictionary (rule 34).
+
+In the tool, **`fsm` and `fsm <state>` stay build-only and return before
+`findFB()`; only the literal `go` falls through to the send.** The card names
+`dmubbl dig` and `dmubbl dto` as the two verbs that write with no argument,
+each discovered by somebody typing them to read the usage (307 and boot 475).
+This one cannot be.
+
+### The verdict is TWO things and they are never one number
+
+1. **Did the firmware ANSWER?** `rb_phyfsm_decode()` on the slot `dmubPush`
+   already reads back. `NO_REPLY` means DMCUB left the sentinel — and that is
+   a real answer, the first direct execution evidence this line has had,
+   because command 1 has no reply field to ask.
+2. **Did the PHY MOVE?** The nine-register survey before and after, with
+   PHY0/1/3/4 as the four-instance control.
+
+A reply with no effect and an effect with no reply are different findings and
+either is worth the boot.
+
+### The licence, and it is not vacuous
+
+The send is **declined unless this call's own re-sample shows the live panel
+reading as a brought-up PHY** — `PHY_RESET` clear, `TX_CLOCK_ON` set,
+`TX_FIFO_EN` set, published as a 3-bit `RBFBFsmPanelLicence` against 0x7.
+309b's data is why it carries information: that is exactly the signature
+separating the panel from all four dark instances. `phyReady` is checked
+**separately**, so "the survey did not run" (81) and "it ran and the panel
+reads dead" (82) are different codes. PHY0 is refused by name twice, in the
+builder and again here; dark PHY3 is allowed, because 309 made it the control
+and a control you cannot address is not one (rule 39).
+
+### `rb_phyfsm_verdict()`, and a function with no caller has no coverage
+
+The verdict checks the **controls before any success**: a subject that moved
+while a control moved is `V_CONTAMINATED`, not `V_RELEASED` (rule 17). Five
+outcomes, `V_RELEASED` reserved for PHY_RESET going exactly 1 -> 0 with the
+controls still.
+
+**It was in the working tree with a type error and no caller.** It called
+`rb_dpcsphy_in_reset(&before[...])` — a `uint32_t *` where that function wants
+a `struct rb_dpcsphy_inst *`. It compiled with a warning and would have read
+the wrong memory. **`-Wall` caught it; the hosttest could not have, because
+nothing called the function.** That is rule 48 and rule 46's "a delegate that
+exists is not a delegate that is REACHED" in one line: a function with no
+caller has no coverage whatever tests exist. The bit now comes off
+`RB_DPCSPHY_D_PHY_RESET` directly, and **the kext calls it** rather than
+leaving two loose masks for a reader to combine — while still publishing both
+masks beside the verdict, so the derived number can be checked against its own
+inputs (rule 48's "a statistic must be derivable from what the consumer does
+with it").
+
+### Break-it sweep: 8 new guards, and TWO MORE INSTRUMENT FAILURES
+
+- **X, Y, Z, AA, AC, AD caught by a failing assertion**: contamination
+  excluding the dark control; the release test accepting reset either way; the
+  verdict register moved off PHY_CNTL0; `moved()` degraded from a mask to a
+  bool; `NO_SURVEY` and `NO_LICENCE` merged; lanes 2 -> 4.
+- **AB — "subject bound dropped" — reported FIRED NOTHING, and the sweep was
+  wrong.** It fired an **ASan stack-buffer-overflow** at `rb_phyfsm.h:367`,
+  reached from `phyfsm_test.c:333`, and my classifier only grepped `FAIL` and
+  `error:`. The guard is load-bearing and **ASan is what proves it** — the
+  test's own assertion never runs, because the process aborts first. The
+  classifier now also matches `AddressSanitizer` and `runtime error`. **Second
+  instrument failure of this milestone**, after the `perl` substitution that
+  choked on a `/` in 310b and made no edit at all. Rule 26, twice, inside the
+  mechanism built to satisfy rule 48.
+- **W — "controls checked AFTER the subject" — fires nothing, and MY COMMENT
+  WAS WRONG.** The header claimed *"the ordering is the finding, not a
+  precedence convenience"*. Swapping the two lines changes nothing, and the
+  sweep is right: `ctlMoved` **implies** `anyMoved`, so `!anyMoved` can never
+  be true when a control moved. The order is unobservable. What is actually
+  load-bearing is only that CONTAMINATED precedes the RELEASED test, which
+  break Y covers. The comment is corrected in place to say so. A comment is
+  not a test, and that one was a claim the data refused.
+
+(W's first form — deleting the `ctlMoved` line — hit the **`-Werror` trap for
+the eighth time**: it left the variable set-but-unused and killed the build
+before the test could speak. Re-done as a reorder, it gave the real answer.)
+
+### Not run, and what is still not established
+
+`make kext tools dmubbl fbkext` and `make hosttest` all clean (`grep error:`
+as well as `FAIL`). **Nothing has been sent and the framebuffer is not
+installed.** The log line and the tool both print, every single invocation,
+the three things this cannot establish: that DMCUB 4.0.15.47 implements
+sub-type 29 at all, that the firmware acts on it for a DP-alt port, and that
+RESET -> RESET_RELEASED is legal without the ladder.

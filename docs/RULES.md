@@ -625,6 +625,33 @@ carries no information in the builder (real only in the decoder). **The
 sweep's own instrument failed first** — a `perl` substitution choked on a `/`
 and made no edit, reporting FIRED NOTHING for a break that never happened.
 `dmubbl` UUID **ACDAA6D5**.
+**310c WROTE THE SEND — `-rbgpufbfsm`, `dmubbl fsm go <state>`, NOT RUN.**
+`src/fbkext/RBAMDFramebufferPhyFsm.cpp` + the `RBFBFsmGo` trigger. The token
+was prefix-scanned against all 122 `-rbgpu*` tokens with the known
+`-rbgpufbotg`/`-rbgpufbotgany` trap as the scan's control (rule 30/26); it
+**arms `-rbgpufbdpalt` itself** because the before/after survey IS the
+measurement — **and 305's trap fired on the first draft**, the arm written 155
+lines before `dpaltArmed`'s own plain assignment overwrote it, caught by a grep
+of every assigning line. **Nothing is written until `RBFBFsmGo` names a
+state, and the state has NO DEFAULT** (the ladder question is unsettled); in
+the tool `fsm` and `fsm <state>` return **before `findFB()`** and only the
+literal **`go`** reaches a send, unlike `dmubbl dig`/`dto`. **The verdict is
+two things, never one number:** did DMCUB ANSWER (`rb_phyfsm_decode`, where
+NO_REPLY is itself the first execution evidence this line has had) and did the
+PHY MOVE (nine registers, four instances as control). `rb_phyfsm_verdict()`
+checks the **controls before any success** — `V_CONTAMINATED`, not
+`V_RELEASED`. **The send is declined unless this call's own re-sample shows
+the live panel as a brought-up PHY** (`RBFBFsmPanelLicence` vs 0x7), with
+"survey did not run" (81) and "it ran and the panel reads dead" (82) as
+**different** codes. **`rb_phyfsm_verdict()` was in the tree with a type error
+and no caller** — `-Wall` caught what the hosttest could not, because **a
+function with no caller has no coverage** (rule 46's shape); the kext now
+calls it. 8 new break-it guards: six caught by assertion, **AB caught by
+ASan while my classifier reported FIRED NOTHING** (second instrument failure
+this milestone, after 310b's `perl`), and **W fires nothing because MY COMMENT
+WAS WRONG** — `ctlMoved` implies `anyMoved`, so the order is unobservable;
+corrected in place. The `-Werror` trap for the **eighth** time on W's first
+form. Framebuffer UUID **147D6474**, `dmubbl` **FAD8BBBD**, neither installed.
 **And the CR window is NOT A READ.** `RDPCS_TX_CR_ADDR` (0x2934 + n*0xd8) /
 `CR_DATA` (+1) are plain 16-bit value fields — no busy, no trigger, no status —
 with a second name for the same address (`DPCSSYS_CR<n>_*`) and **no vendored
@@ -875,6 +902,14 @@ unless THIS call's own re-sample shows the MSA derivation reproducing the live
 panel and the target pipe holding a raster. The phase defaults to the
 configure half, which leaves the stream disabled so `dptrain` can run —
 boot 477's refusal 66),
+`-rbgpufbfsm` (**THE SET_PHY_FSM SEND on PHY2**, 310c — arms `-rbgpufbdpalt`
+itself for the before/after survey, and that arm is applied AFTER
+`dpaltArmed`'s own assignment, 305's trap. Nothing is written until
+`RBFBFsmGo` names a **state**, which has **no default**; PHY0 is refused by
+name twice and the send is declined unless this call's own re-sample shows the
+live panel reading as a brought-up PHY. **`dmubbl fsm` and `fsm <state>` are
+BUILD-ONLY and return before `findFB()` — only `dmubbl fsm go <state>`
+sends**, deliberately unlike `dmubbl dig`/`dto`),
 `-rbgpufbraster` (the second raster — OTG timing on pipe 1, 2FA. Nothing is
 written until `otgprog ... go` names a mode, pipe 0 is refused by name in both
 halves, and the write is declined unless this boot's own sample shows the pixel
