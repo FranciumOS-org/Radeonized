@@ -87,7 +87,13 @@ bool RBAMDFramebuffer::hubpSetup(void)
         for (unsigned k = 0; k < 4; k++) { strencDerived[pi][k] = 0; }
     }
     strencMsaMismatch = RB_STRENC_MSA_MISMATCH_ARGS;
-    strmArmed = false; strmCalls = 0; strmRefuse = 0; strmRan = 0;
+    /* NOT strmArmed: it is assigned in start() from the boot-arg at
+     * RBAMDFramebuffer.cpp:647, and hubpSetup() runs AFTER that (:808), so
+     * clearing it here clears the arm. Every other arm bool is deliberately
+     * absent from this block for the same reason - boot 475 had the token in
+     * the kernel's own boot-args and RBFBStrmArmed still read 0. Rule 34
+     * twice in one milestone: an arm a later initialiser clobbers. */
+    strmCalls = 0; strmRefuse = 0; strmRan = 0;
     strmWrites = 0; strmApplied = 0; strmChangedMask = 0;
     strmInstUsed = 0; strmOtgUsed = 0; strmPixKhzUsed = 0; strmLinkUsed = 0;
     strmMVid = 0; strmCntlBefore = 0; strmCntlAfter = 0; strmStatusOff = 0;

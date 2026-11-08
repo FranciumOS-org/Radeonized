@@ -64624,3 +64624,59 @@ which can only say our stores landed.
 **The raster is not persistent** (304, boot 474). Any boot that wants a stream
 on DIG2 must program pipe 1's raster in that same boot, which is why
 refusal 5 names `otgprog` rather than arming it silently.
+
+### 305 — boot 475: the arm was clobbered, and the tool now catches it
+
+**Boot 475.** UUID `09AF971F-8D53-3911-854D-134A96C1BE91` verified **inside
+the live collection** (rule 15), `-rbgpufbstrm` verified present in the
+**kernel's own** `kern.bootargs` with a whole-token test (rule 30), licence
+`RBFBStrencMsaMismatch` **0** again.
+
+**Nothing was written, because `RBFBStrmArmed` read 0 with the token present.**
+
+The flag is assigned in `start()` from the boot-arg at
+`RBAMDFramebuffer.cpp:647`. `hubpSetup()` re-initialised it to `false` at
+`RBAMDFramebufferHUBP.cpp:90`, and `start()` calls `hubpSetup()` at **:808** —
+**after** the parse. So the arm was parsed correctly and then cleared, and the
+write refused with code 50 NOT_ARMED, which is indistinguishable from a
+missing boot-arg if you only read the kext.
+
+**This is rule 34 twice in one milestone.** Earlier in 305 the same class of
+bug was caught statically: `-rbgpufbstrm` sets `dpaltArmed` as its dependency,
+and writing that next to the parse put it 100 lines *before*
+`dpaltArmed = argOn(...)`, which overwrites it. That one was found by reading
+the surrounding code. This one was not, because the clobber is in a different
+file and runs at a different time — and every **other** arm bool is
+deliberately absent from `hubpSetup()`'s init block, which is exactly why they
+survive and this one did not. The run-record fields stay there; `strmArmed` is
+removed, with the reason in the code.
+
+**The fix is cheap. The instrument is the finding.** `strencprog` now reads
+`kern.bootargs` itself and cross-checks the token against `RBFBStrmArmed`,
+reporting a clobber as its own diagnosis in both directions:
+
+```
+arm -rbgpufbstrm: NO  (kernel boot-args: present)
+  *** THE TOKEN IS IN THE KERNEL'S BOOT-ARGS BUT THE KEXT READS NOT ARMED. ***
+  That is not a missing boot-arg - it is the flag being cleared after it was
+  parsed ... Do not re-add the boot-arg; find what writes the flag last.
+```
+
+"Armed" and "the kext thinks it is armed" are two different facts, and a tool
+reading only the second cannot tell a missing token from a clobbered one —
+rule 14's shape, two causes behind one symptom. The check was **verified
+against the live defect**: run in boot 475, against the kext that has the bug,
+it printed the diagnosis above. That is a break-it check the machine performed
+itself, in the configuration that exhibits the defect (rule 39), rather than a
+guard asserted in a configuration where it cannot fire.
+
+Rebuilt: UUID **`F4351B09-8037-3147-B221-D87984F2DC33`**.
+
+**What boot 475 did establish**, beyond the bug: the licence reads 0 in a
+**second boot** (474 and 475), with the same `Base` CONFIRMED and
+`ActiveAgree` 1 behind it. The derivation reproducing the panel is no longer
+an n=1 reading.
+
+And pipe 1 read `DeriveRc` **2** again with `-rbgpufbraster` armed, confirming
+304's finding from the other side: the raster is **not persistent** and the
+arm only permits. It must be programmed in the same boot as the stream.

@@ -1,7 +1,7 @@
 # HANDOFF — what to do now
 
 **State: 305 is built and not yet booted.** Framebuffer UUID
-**`09AF971F-8D53-3911-854D-134A96C1BE91`**. This build can **write** the DP
+**`F4351B09-8037-3147-B221-D87984F2DC33`**. This build can **write** the DP
 stream on DIG2 — the first write this project makes to that block — but only
 when armed, triggered, and licensed by its own sample.
 
@@ -16,9 +16,11 @@ inputs read rather than assumed.
 **The cable must be plugged in at boot** (2FB). Plugged in afterwards every
 AUX read returns refusal 3 and `AUX_EN` reads clear.
 
-```bash
-sudo tools/efi.sh bootarg add -rbgpufbstrm
-```
+**The boot-arg is already added** (boot 475 confirmed it in the kernel's own
+`kern.bootargs`). Boot 475 refused anyway because `hubpSetup()` cleared the
+arm after `start()` parsed it; that is fixed in this build. **Do not re-add
+the token** — `strencprog` now cross-checks it against `kern.bootargs` and
+will say so if the flag is ever clobbered again.
 
 ```bash
 sudo tools/fbinstall.sh
@@ -31,7 +33,7 @@ Then the UUID **inside the collection**, not in `/Library/Extensions` (rule
 kmutil inspect -B /Library/KernelCollections/AuxiliaryKernelExtensions.kc --show-kext-uuids | grep -i rembrandt
 ```
 
-It must read `09AF971F-8D53-3911-854D-134A96C1BE91`. Reboot, then verify the
+It must read `F4351B09-8037-3147-B221-D87984F2DC33`. Reboot, then verify the
 arm **from the running system** — a boot-arg that reads back is not one that
 survived (rule 43):
 
