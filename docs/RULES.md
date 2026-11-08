@@ -605,8 +605,12 @@ name**), `-rbgpufbaux` (native AUX DPCD read **and** write; one token, because
 `-rbgpufbauxw` would have it as a prefix — rule 30. Nothing is written until
 `dpcdwrite` names an **address**, which has no writable default),
 `-rbgpufbdto` (the DP DTO read **and** write, boot 455; opt-in because the
-offsets collide with the DOMAIN block at this kext's base. Nothing is written
-until `dmubbl dto` names a clock, pipe 0 is refused by name in both halves, and
+offsets collide with the DOMAIN block at this kext's base. **`dmubbl dto`
+WRITES WITH NO ARGUMENT** — `khz` defaults to 148500, 2BD's preferred timing
+(`tools/dmubbl.m:1791`), so unlike `dmubbl dig`/`dto`'s siblings there is no
+"names a target first" gate here; this card claimed one until boot 475, where
+a bare `dmubbl dto` run to read the usage programmed pipe 1. Pipe 0 is
+refused by name in both halves, and
 the write is declined unless THIS boot's sample reproduced the panel's pixel
 clock at BASE_IDX 1), `-rbgpufbtrain` (the DP training pattern on the wire;
 arms `-rbgpufbaux` itself, since its verdict comes from the sink. Nothing is
