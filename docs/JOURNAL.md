@@ -65442,3 +65442,115 @@ CW1, version 4.0.15.47. So "what does the firmware require before it will act
 on phyid 2" is a question about the DMCUB image and not about the ROM — and
 the ROM is eliminated as a place to look, cheaply, before a boot was spent on
 it.
+
+---
+
+## 309 / boot 481 — 308'S CANDIDATE IS DEAD, KILLED BY ITS OWN CONTROL
+
+Boot 481, framebuffer **DDFF93EB** verified inside the live collection,
+`-rbgpufbdpalt` / `-rbgpufbdig` / `-rbgpufbaux` and `wdt=-1` present on a
+whole-token scan.
+
+### The licence gate works, and the reading is honest now
+
+Every instance reports **verdict 5 NO_LICENCE**, the live panel included,
+because `REF_CLKDET_EN` is clear on all five. That is the correction 308 made
+to 307's "CLOCKLESS panel", confirmed on hardware: the verdict now declines to
+classify rather than classifying off a dead input.
+
+### 308's SRAM candidate is retired, and the control is why
+
+| | PHY0 live | PHY1 | PHY2 | PHY3 | PHY4 |
+|---|---|---|---|---|---|
+| `PHY_RESET` | 0 | 1 | 1 | 1 | 1 |
+| `SRAM_INIT_DONE` | 1 | **0** | 1 | 1 | 1 |
+| `EXT_LD_DONE` | **1** | 0 | 0 | 0 | 0 |
+| `SRAM_BYPASS` | **1** | 0 | 0 | 0 | 0 |
+| `REF_RANGE` | 0 | 3 | 3 | 3 | **0** |
+
+**`EXT_LD_DONE` and `SRAM_BYPASS` separate the LIVE PANEL from all four dark
+instances, and say nothing whatever about PHY2.** They are the generic
+signature of a PHY that was never brought up — which was already known before
+308 read them. `REF_RANGE` does not even do that: PHY4 is dark and reads the
+panel's 0. And `SRAM_INIT_DONE`, the one 307 leaned on, is set on four of
+five.
+
+The candidate is **dead as a Type-C-specific explanation**, and it died
+because the dark instances were in the same sample. That is what a negative
+control is for, and it is the one part of 308 that worked exactly as designed:
+the instrument eliminated its own hypothesis in a single boot instead of
+surviving on a panel-only comparison.
+
+### THE REAL FINDING OF THE BOOT: THE SURVEY CANNOT SEE ITS OWN SUBJECT
+
+**PHY2 and PHY3 are byte-identical across all five registers** —
+`0x008f00f0`, `0x001019f0`, `0x00000000`, `0x03100000`, `0x10100605` — while
+ROM-attested `QUERY_DP_ALT`, re-run this boot and matching 2E1's mask `0x1c`
+again, reports **PHY2 `alt_disable` 0 / `is_dp4` 0** against **PHY3
+`alt_disable` 1**. So the state that makes PHY2 the port we can drive is
+**not in any register this survey reads**. Five registers, 14 % of the block,
+and none of them carries the distinction the whole milestone is about.
+
+Also reproduced free this boot (rule 44's second sample): **RDPCSPIPE0
+`0x00000000` NOT DISABLED, RDPCSPIPE1 `0x00060000` DISABLED+acked, sweep
+DIFFERS**, identical to boot 471.
+
+### 309: FOUR REGISTERS NAMED FOR THE QUESTION
+
+All read-only, no setter, all 45 offsets script-verified against
+`dpcs_4_2_0_offset.h` with the 0xd8 stride holding for every instance:
+
+- **`RDPCSTX_DPALT_CONTROL_REG`** (`0x2956`) — **`RDPCS_ALLOW_DRIVER_ACCESS`
+  and `RDPCS_DRIVER_ACCESS_BLOCKED`.** "Who owns this" asked of the hardware
+  instead of of a struct. If PHY2 reads BLOCKED where the live panel reads
+  ALLOWED, it accounts for the whole picture with no new mechanism:
+  `PHY_RESET` never clearing, the atom ENABLE moving nothing, and
+  **`DP_VID_M` refusing a store** — which has been unexplained since boot 478
+  and is exactly what a blocked register interface looks like.
+- **`RDPCSTX_DMCU_DPALT_DIS_BLOCK_REG`** (`0x293c`) — DMCU's side, carrying
+  **`FORCE_TX_CLK_DIS`**, which names the state `TX_CLOCK_ON` already reports.
+- **`RDPCSTX_DMCU_DPALT_PHY_CNTL6`** (`0x2955`) — DMCU's shadow of the DPALT
+  fields, a **third** source on `DPALT_DISABLE` beside RDPCSPIPE's (what Linux
+  reads) and RDPCSTX's (301's retired misread). 301 left that an OR over two
+  registers; three sources can name an odd one out.
+- **`RDPCSTX_CNTL2`** (`0x2939`) — `PHY_ENC_TYPE_SEL`, 2FC's `DIO_LINK*_CNTL`
+  question asked at the PHY end.
+
+**All four are UNATTRIBUTED, for a sharper reason than "no caller": their
+writer is DMCU** — neither of the two parties the ANSWERED/DRIVEN split was
+built to separate. A bit DMCU sets is not our store and not the hardware
+reporting its own state. That is the clearest case yet for the U set existing,
+and on an interface whose entire point is that **somebody else owns the PHY**,
+"who wrote this" is the question rather than a detail. There is no setter and
+the ownership register must never get one: a driver that writes
+`ALLOW_DRIVER_ACCESS` to grant itself access is not a driver that was granted
+it.
+
+### 308'S LESSON IS NOW STRUCTURAL, NOT A COMMENT
+
+Every instance publishes **two** diffs: `AccessDiffPanel` against the live
+panel and **`AccessDiffDark` against PHY3**, the USB-C PHY with DP alt
+disabled that read byte-identical to PHY2. A difference holding against the
+panel *alone* is the "never brought up" signature; one holding against **both**
+is PHY2's own. `RB_DPCSPHY_DARK_USBC_INST` is a named constant with that
+reasoning beside it, `SramDiffDark` gives 308's own candidate the same
+treatment retrospectively, and **the hosttest encodes both outcomes as
+separate cases** — including the one that reproduces 308's dead candidate and
+fails if the pair of diffs cannot tell them apart.
+
+### Ten break-it guards, and one invalid break recorded as such
+
+Nine caught first time. The tenth **fired nothing and was not a gap**: it gave
+a `CNTL2` ANSWERED mask a bit belonging to the ownership register, and the
+disjointness check is **per register** by design — `0x1` means four different
+things in four of these nine registers, so a global check would be noise.
+Re-broken *inside* one register it fired immediately. **A break that fires
+nothing because it broke nothing is not missing coverage**, and the
+distinction is now written in the header so the next sweep does not re-learn
+it. (Three earlier sweeps in this file found pairs the *data* could not
+separate; this is the first that found a break the *design* correctly
+ignores.)
+
+`tools/phylook.sh` prints the ownership fields, names which differ under each
+control, and says **"ABSENT — that is not 'the port is not blocked'"** when the
+loaded kext predates the keys. Framebuffer UUID **16CB216D**.
