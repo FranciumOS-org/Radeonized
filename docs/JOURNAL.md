@@ -65236,3 +65236,68 @@ question is therefore **not** another register on our side. It is whether the
 table executes at all — which needs DMCUB's own execution evidence, not a
 mailbox ack — and what else the firmware requires before it will act on
 phyid 2.
+
+### 307 continued — the mailbox is not the suspect, and the payload is confirmed BYTE BY BYTE
+
+Three more free readings off the same boot, which together close the "did it
+even arrive" family.
+
+**1. The bytes on the wire are exactly the derivation.** `dmubbl`'s reply slot
+holds what was written at `0x980`:
+
+```
+sent 80 01 00 3c 02 01 00 02 f0 d2 00 00 03 00 00 f4 00 00 00 00
+got  80 01 00 3c 02 01 00 02 f0 d2 00 00 03 00 00 f4 00 00 00 00
+```
+
+Payload after the 4-byte header: phyid **02**, action **01** ENABLE, digmode
+**00** DP, lanenum **02**, symclk_10khz **`f0 d2`** = **54000**, hpdsel **03**,
+digfe_sel **00**, connobj_id **00**, HPO_instance **`f4`** = **244**. Every
+field matches `rb_dig_typec_enable()` and the source derivation. This is
+stronger than the source check above: the payload is confirmed **in the
+memory DMCUB reads**, not in our intent.
+
+**2. DMCUB CONSUMED IT.** `live WPTR/RPTR 0x9c0 / 0x9c0`, `acks 2 / 0`,
+`sends ok/refused 2 / 0`. The read pointer advanced past our slot.
+
+**3. THE REPLY SLOT CAN NEVER CARRY EXECUTION EVIDENCE, AND THAT IS A SOURCE
+FACT, NOT A LIMITATION OF OURS.** `verdict 2 UNCHANGED - our bytes,
+untouched`. Upstream explains it: `transmitter_control_dmcub_v1_7` ends with
+`dc_wake_and_execute_dmub_cmd(..., **DM_DMUB_WAIT_TYPE_WAIT**)`, while
+`query_dp_alt_from_dmub` (`dcn31_dio_link_encoder.c:139`) uses
+**`WAIT_TYPE_WAIT_WITH_REPLY`**. The DIG1 transmitter control **never asks for
+a reply**, so no `ret_status` is written for it by design. **An earlier draft
+of this handoff made "fetch DMCUB's reply for the dig command" the next step.
+That step does not exist.** Rule 13's own shape: a return value that is never
+produced is not one that came back empty.
+
+**4. The mailbox is eliminated as the suspect, in this boot, with a ROM
+cross-check.** `dmubbl dpaltq` sweeps `QUERY_DP_ALT` over all five PHYs
+through the **same ring**, and it round-trips:
+
+```
+  phy  is_usb  alt_disable  is_dp4  echo  refusal
+   0     0         1          1      0   OK
+   1     0         1          1      1   OK
+   2     1         0          0      2   OK   <== the Type-C port
+   3     1         1          0      3   OK
+   4     1         1          0      4   OK
+```
+
+Ten sends, all OK, the **echo field equals the phy_id on every one** (so the
+replies are per-send and not one stale word), and the `is_usb` mask `0x1c`
+**matches the VBIOS ROM** read independently in 2E1. So in the very boot where
+the ENABLE moved nothing: the ring works, DMCUB dispatches VBIOS sub-commands,
+the reply path works, and **PHY2 still reports DP alt mode GRANTED**
+(`alt_disable` **0**) with `is_dp4` **0** = two lanes, which is the `lanenum`
+we send. The ENABLE did not change the DP-alt state either.
+
+**What is left after this.** A byte-perfect DIG1 transmitter control ENABLE
+for phyid 2 is placed in a ring that demonstrably works, is consumed by a
+DMCUB that demonstrably services VBIOS commands and replies to them, on a port
+that reports DP alt mode granted — and the PHY stays in reset with its clock
+and FIFO off. Nothing between us and the firmware is unaccounted for. The gap
+is **inside the firmware's handling of this command**: either it declines on a
+precondition we have not identified, or the table it runs for a USB-C PHY does
+something other than release reset. That is where the next milestone has to
+start, and it is **not** reachable by sending more of what we already send.

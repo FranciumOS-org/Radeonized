@@ -52,16 +52,44 @@ mechanism.
 
 ## Do this next
 
-1. **Get DMCUB's own execution evidence for the DIG1 transmitter control.**
-   An ack says the slot was consumed; it has said nothing since boot 273. The
-   question is whether the table runs and what it returns. `dmubbl`'s reply
-   slot and verdict already exist for the caps command — the same treatment
-   for `dig` is the reading, and it is **unbooted work**.
-2. **Then: what else does the firmware want before it acts on phyid 2.** The
-   port is in DP alt mode (`QUERY_DP_ALT`, ROM-attested on four boots, PHY2
-   the only USB-C PHY with `alt_disable` 0), the cable was in at boot, AUX2
-   works, EDID read. Something between that and the PHY release is missing,
-   and it is the firmware's side of the line.
+**Everything between us and the firmware is now accounted for**, so do not
+spend a boot re-checking it:
+
+- **The payload is confirmed byte by byte in the memory DMCUB reads** —
+  `02 01 00 02 f0 d2 00 00 03 00 00 f4` = phyid 2, ENABLE, DP, 2 lanes,
+  symclk 54000, hpdsel 3, digfe 0, connobj 0, HPO 244.
+- **DMCUB consumed it** — `WPTR/RPTR 0x9c0/0x9c0`, acks 2/0.
+- **The reply slot cannot carry execution evidence, by design.**
+  `transmitter_control_dmcub_v1_7` uses `DM_DMUB_WAIT_TYPE_WAIT`;
+  `query_dp_alt_from_dmub` uses `WAIT_WITH_REPLY`. The DIG1 transmitter
+  control never asks for a reply, so there is no `ret_status` to fetch. **An
+  earlier draft of this file made that the next step. It does not exist.**
+- **The mailbox is eliminated, same boot, with a ROM cross-check.** The
+  `QUERY_DP_ALT` sweep round-trips on all five PHYs, the echo field matches
+  each phy_id, the `is_usb` mask `0x1c` matches the VBIOS ROM from 2E1, and
+  **PHY2 still reports `alt_disable` 0 / `is_dp4` 0** — DP alt granted, two
+  lanes, unchanged by the ENABLE.
+
+**So the gap is inside the firmware's handling of this command.** Either it
+declines on a precondition we have not identified, or what it runs for a USB-C
+PHY does something other than release reset. Start there, and note that
+**sending more of what we already send cannot answer it.**
+
+Two directions, neither of which needs a boot to begin:
+
+1. **Read the VBIOS atom table itself.** `firmware/680m-vbios.rom` is on disk
+   and `tools/re/vbios_dispobj.py` already parses its display-object table.
+   The `dig1transmittercontrol` command table is in the same ROM. Its own code
+   is the only remaining statement of what the firmware requires for phyid 2 —
+   and the `dmubbl` text notes this ASIC's atom table has **no**
+   `dig1transmittercontrol` entry, which is why 2E2 went to v1_7 over DMUB.
+   **Establish what DMCUB runs for this sub-command before sending it again.**
+2. **Find the precondition from the other side.** The port reports DP alt
+   granted and two lanes, AUX2 works, the cable was in at boot, EDID read, the
+   DTO runs, the raster scans. What a USB-C PHY release needs beyond that —
+   a USB-subsystem handoff, a PHY power state, a SMU/PMFW step — is not named
+   anywhere in the driver, which is itself the finding (there is no acquire in
+   `dcn31_dio_link_encoder.c`).
 
 **Do not write `PHY_RESET`.** `rb_dpcsphy.h` is read-only by design: on this
 chip the bit's owner is the firmware, and on the panel the firmware is what
