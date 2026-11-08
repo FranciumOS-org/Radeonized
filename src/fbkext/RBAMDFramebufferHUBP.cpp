@@ -1125,6 +1125,24 @@ void RBAMDFramebuffer::strencSample(void)
     strencBase = (int)rb_strenc_base_verdict(
         strencWord[RB_STRENC_PANEL_INST][RB_STRENC_R_MSA_PARAM1],
         strencHTotal, strencVTotal);
+
+    /* THE SECOND ADDRESS CHECK, and the one DRR cannot move. The totals both
+     * shift with the refresh ladder - which is why the V half of the check
+     * above needs a window at all - but the ACTIVE raster does not: that is
+     * the whole point of V_BLANK_START_END (rb_otg.h, and the card's note that
+     * V_TOTAL changes without touching the active raster).
+     *
+     * Derived from OTG0's own blank words in THIS sample rather than from the
+     * 1920x1080 constant two files away (rule 25, and rule 44 for the
+     * window). The blank WRAPS - START 2047, END 127, active = START - END -
+     * and rb_strenc.h owns that arithmetic so the hosttest owns it too. */
+    strencActiveW = rb_strenc_active_from_blank(
+        hubpRegs[kRbDmuSeg2 + RB_STRENC_DW_OTG0_H_BLANK]);
+    strencActiveH = rb_strenc_active_from_blank(
+        hubpRegs[kRbDmuSeg2 + RB_STRENC_DW_OTG0_V_BLANK]);
+    strencActiveAgree = rb_strenc_active_agrees(
+        strencWord[RB_STRENC_PANEL_INST][RB_STRENC_R_MSA_PARAM4],
+        strencActiveW, strencActiveH);
 }
 
 /* 2EF: PIPE 0'S LIVE DP PIXEL-CLOCK DTO, AND THE SEGMENT CHECK.

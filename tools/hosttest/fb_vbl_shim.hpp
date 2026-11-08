@@ -338,6 +338,8 @@ public:
     int strencVerdict[5]={0,0,0,0,0};
     int strencSweep=0, strencBase=0;
     uint32_t strencHTotal=0, strencVTotal=0;
+    uint32_t strencActiveW=0, strencActiveH=0;
+    int strencActiveAgree=-1;
     bool strencReady=false;
     void strencSample(void) {}
     void dpaltSample(void) {}

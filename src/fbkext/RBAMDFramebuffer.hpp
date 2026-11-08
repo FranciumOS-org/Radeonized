@@ -548,6 +548,11 @@ private:
     int                strencBase;        /* enum rb_strenc_base: the gate   */
     uint32_t           strencHTotal;      /* the live OTG0 totals this base  */
     uint32_t           strencVTotal;      /* check was made against          */
+    /* The live ACTIVE raster, derived from OTG0's blank words in the same
+     * sample. The second address check, and the only one DRR cannot move. */
+    uint32_t           strencActiveW;
+    uint32_t           strencActiveH;
+    int                strencActiveAgree; /* 1 yes, 0 no, -1 no reference    */
     bool               strencReady;       /* the aperture covered them       */
     uint32_t           hpdStatus[5];   /* RB_HPD_COUNT, last raw words       */
     uint32_t           hpdControl[5];

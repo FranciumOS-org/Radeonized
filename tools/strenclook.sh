@@ -47,6 +47,9 @@ fi
 
 htotal=$(read_key RBFBStrencHTotal)
 vtotal=$(read_key RBFBStrencVTotal)
+activew=$(read_key RBFBStrencActiveW)
+activeh=$(read_key RBFBStrencActiveH)
+agree=$(read_key RBFBStrencActiveAgree)
 
 # THE GATE FIRST. Nothing below it is a reading unless this confirms.
 case "${base:-0}" in
@@ -54,14 +57,21 @@ case "${base:-0}" in
      echo "(default 500 ms); give it a second and re-run."
      exit 3 ;;
   1) echo "BASE CONFIRMED - instance 0's DP_MSA_TIMING_PARAM1 decodes as this"
-     echo "boot's own live OTG0 raster (H_TOTAL ${htotal:-?}, V_TOTAL ${vtotal:-?})."
-     echo "The offsets are right, by a check the chip had to satisfy rather"
-     echo "than by reasoning. Everything below is a real reading." ;;
+     echo "boot's own live OTG0 raster: OTG H_TOTAL ${htotal:-?} / V_TOTAL ${vtotal:-?},"
+     echo "MSA carrying each PLUS ONE (the OTG register holds total-1,"
+     echo "dcn10_optc.c:191; MSA holds the true total,"
+     echo "dcn10_stream_encoder.c:419). The offsets are right, by a check the"
+     echo "chip had to satisfy rather than by reasoning." ;;
   2) echo "BASE REFUSED: H_TOTAL DISAGREES. Instance 0 does not decode as the"
-     echo "live raster, and H_TOTAL does not move with DRR - so this is an"
-     echo "ADDRESS fault, not a timing one. The offsets in rb_strenc.h are"
-     echo "wrong for this chip, or instance 0 is not the panel's."
-     echo "NOTHING BELOW IS A READING. Stop and fix the addresses."
+     echo "live raster, and H_TOTAL does not move with DRR."
+     echo
+     echo "BEFORE CONCLUDING THE ADDRESSES ARE WRONG, CHECK THE OFF-BY-ONE."
+     echo "MSA holds the TRUE total and the OTG register holds total-1, so MSA"
+     echo "must read ${htotal:-?}+1 and ${vtotal:-?}+1. Boot 472 refused here for"
+     echo "exactly that reason and the addresses were correct. If the MSA word"
+     echo "below is off by any other amount, then it is an address fault."
+     echo
+     echo "NOTHING BELOW IS A READING until that is settled."
      exit 4 ;;
   3) echo "BASE: V_TOTAL ODD - H_TOTAL agrees but V_TOTAL is outside the DRR"
      echo "window. Weaker than an H_TOTAL mismatch and reported separately,"
@@ -96,6 +106,24 @@ case "${sweep:-0}" in
      echo "nothing. Treat the per-instance lines below as suspect." ;;
   3) echo "SWEEP REFUSED: bad arguments inside the kext. A bug, not a reading." ;;
   *) echo "SWEEP: unrecognised verdict ${sweep}." ;;
+esac
+
+# THE SECOND ADDRESS CHECK, which DRR cannot move. Printed next to the base
+# verdict because the two fail for different reasons.
+echo
+case "${agree:-}" in
+  1) echo "ACTIVE RASTER AGREES - MSA's HWIDTH/VHEIGHT equal OTG0's own active"
+     echo "window, ${activew:-?} x ${activeh:-?}, derived from the blank registers in the"
+     echo "same sample. This is the stronger of the two address checks: unlike"
+     echo "either total it does NOT move with the DRR ladder, so it needs no"
+     echo "window and no slack." ;;
+  0) echo "ACTIVE RASTER DISAGREES - MSA's HWIDTH/VHEIGHT do not equal OTG0's"
+     echo "active window of ${activew:-?} x ${activeh:-?}. Since this check has no DRR"
+     echo "window to hide behind, a disagreement here is a STRONGER address"
+     echo "signal than the totals. Read the MSA_PARAM4 word below." ;;
+  -1) echo "ACTIVE RASTER: NO REFERENCE - OTG0's blank words did not give a sane"
+      echo "window, so no comparison was made. NOT a disagreement." ;;
+  *) echo "ACTIVE RASTER: key absent or unrecognised (${agree:-none})." ;;
 esac
 
 en=$(read_key RBFBStrencEnMask)

@@ -242,9 +242,37 @@ int strenc_tests(void)
         }
     }
 
-    /* THE BASE CHECK, the gate on everything else. */
+    /* THE BASE CHECK, the gate on everything else.
+     *
+     * THE +1 IS UPSTREAM'S AND IS PINNED AGAINST BOOT 472'S OWN WORD. The OTG
+     * register holds `total - 1` (dcn10_optc.c:191-193) and MSA holds the true
+     * total (dcn10_stream_encoder.c:419-421), so MSA == OTG + 1 on both axes.
+     * The first draft of rb_strenc.h compared them raw; boot 472 refused with
+     * HTOTAL_BAD, reading 2107/1130 against a live 2106/1129. `measured472` is
+     * that word verbatim, so the convention cannot be un-learned by an edit.
+     */
     {
-        const uint32_t panel = (2106u << 16) | 1129u;
+        const uint32_t measured472 = 0x083b046au;   /* boot 472, instance 0 */
+        const uint32_t panel = (2107u << 16) | 1130u;  /* == measured472 */
+
+        if (panel != measured472) {
+            printf("FAIL strenc: the pinned panel word is not boot 472's "
+                   "0x083b046a\n");
+            bad++;
+        }
+        /* The live OTG0 values that boot 472 published alongside it. */
+        if (rb_strenc_base_verdict(measured472, 2106u, 1129u)
+                != RB_STRENC_BASE_CONFIRMED) {
+            printf("FAIL strenc: boot 472's own sample does not CONFIRM\n");
+            bad++;
+        }
+        /* And the raw comparison - the defect itself - must NOT confirm. */
+        if (rb_strenc_base_verdict((2106u << 16) | 1129u, 2106u, 1129u)
+                == RB_STRENC_BASE_CONFIRMED) {
+            printf("FAIL strenc: an MSA word equal to the OTG register "
+                   "confirmed, so the +1 is not being applied\n");
+            bad++;
+        }
 
         if (rb_strenc_base_verdict(panel, 2106u, 1129u)
                 != RB_STRENC_BASE_CONFIRMED) {
@@ -253,7 +281,7 @@ int strenc_tests(void)
         }
         /* H_TOTAL does not move with DRR, so a mismatch there is an address
          * fault and must be reported as the strong code. */
-        if (rb_strenc_base_verdict(panel, 2107u, 1129u)
+        if (rb_strenc_base_verdict(panel, 2108u, 1129u)
                 != RB_STRENC_BASE_HTOTAL_BAD) {
             printf("FAIL strenc: a wrong H_TOTAL is not HTOTAL_BAD\n");
             bad++;
@@ -276,7 +304,7 @@ int strenc_tests(void)
         /* The window is symmetric: a V_TOTAL BELOW the live one by more than
          * the slack is just as odd, and an unsigned subtraction in the wrong
          * order is the classic way that case passes. */
-        if (rb_strenc_base_verdict((2106u << 16) | 1u, 2106u, 1129u)
+        if (rb_strenc_base_verdict((2107u << 16) | 1u, 2106u, 1129u)
                 != RB_STRENC_BASE_VTOTAL_ODD) {
             printf("FAIL strenc: the V_TOTAL window is not symmetric\n");
             bad++;
@@ -300,6 +328,58 @@ int strenc_tests(void)
         if (RB_STRENC_BASE_NOT_SAMPLED != 0 ||
             RB_STRENC_BASE_CONFIRMED == 0) {
             printf("FAIL strenc: BASE_NOT_SAMPLED/CONFIRMED numbering\n");
+            bad++;
+        }
+
+        /* THE SECOND CHECK, which cannot drift: the ACTIVE raster. Boot 472
+         * read 0x07800438 on instance 0 = 1920 x 1080, the panel exactly, and
+         * DRR does not touch it (V_BLANK_START_END is what moves). */
+        /* The live active raster, derived from OTG0's blank word rather than
+         * from a constant. 0x007f07ff is this panel's own H word: START 2047,
+         * END 127, and the blank WRAPS so the active width is START - END.
+         * Getting that subtraction backwards is the obvious error and it would
+         * underflow to a huge number rather than fail visibly. */
+        if (RB_STRENC_DW_OTG0_H_BLANK != 0x1b2bu ||
+            RB_STRENC_DW_OTG0_V_BLANK != 0x1b36u) {
+            printf("FAIL strenc: the OTG0 blank offsets moved\n");
+            bad++;
+        }
+        if (rb_strenc_active_from_blank(0x007f07ffu) != 1920u) {
+            printf("FAIL strenc: the panel's H blank word gives %u, not "
+                   "1920\n", rb_strenc_active_from_blank(0x007f07ffu));
+            bad++;
+        }
+        /* END >= START is not a window; it must give 0 so the caller's
+         * no-reference path takes over, never a wrapped difference. */
+        if (rb_strenc_active_from_blank(0x07ff007fu) != 0u ||
+            rb_strenc_active_from_blank(0u) != 0u ||
+            rb_strenc_active_from_blank(0x00ff00ffu) != 0u) {
+            printf("FAIL strenc: a non-window blank word was not refused\n");
+            bad++;
+        }
+        if (rb_strenc_active_agrees(0x07800438u, 1920u, 1080u) != 1) {
+            printf("FAIL strenc: boot 472's active raster does not agree\n");
+            bad++;
+        }
+        if (rb_strenc_active_agrees(0x07800438u, 1921u, 1080u) != 0 ||
+            rb_strenc_active_agrees(0x07800438u, 1920u, 1081u) != 0) {
+            printf("FAIL strenc: a wrong active size agreed\n");
+            bad++;
+        }
+        /* Halves not swapped: 1080 x 1920 must NOT agree. */
+        if (rb_strenc_active_agrees(0x07800438u, 1080u, 1920u) != 0) {
+            printf("FAIL strenc: the active halves are swapped\n");
+            bad++;
+        }
+        /* Zero is a disagreement, not an agreement; no reference is -1 and
+         * must be distinguishable from both (rule 14). */
+        if (rb_strenc_active_agrees(0u, 1920u, 1080u) != 0) {
+            printf("FAIL strenc: a zero active word agreed\n");
+            bad++;
+        }
+        if (rb_strenc_active_agrees(0x07800438u, 0u, 1080u) != -1 ||
+            rb_strenc_active_agrees(0x07800438u, 1920u, 0u) != -1) {
+            printf("FAIL strenc: a missing active reference is not -1\n");
             bad++;
         }
     }
