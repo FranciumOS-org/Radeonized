@@ -65812,3 +65812,114 @@ The block has ~41 registers per instance (full RDPCSTX2 list now recorded:
 in a future survey as a place firmware might stamp progress — but 309b's
 conclusion stands: **more registers from this file is the same experiment a
 fourth time.** The FSM command is a different kind of question.
+
+---
+
+## 310b — THE COMMAND IS BUILT AND SENDS NOTHING. `make dmubbl`, no boot.
+
+`src/common/rb_phyfsm.h`, `tools/hosttest/phyfsm_test.c`, `dmubbl fsm`.
+**Build-only by construction, not by a gate**: the verb returns before
+`findFB()`, so it never reaches a `setProperties` and cannot touch the chip
+however it is invoked. That is deliberately the opposite of `dmubbl dig` and
+`dmubbl dto`, which WRITE with no argument — 307 and boot 475 each paid for
+that. The send path is **not written**, rather than written and guarded,
+because sending sub-type 29 is a write of a new command to the firmware and is
+the user's decision.
+
+### The payload, derived not guessed
+
+`struct dmub_rb_cmd_transmitter_set_phy_fsm_data` laid out by the C rules
+Linux compiles it with — alignment 4, so two implicit pads and a tail pad:
+
+```
+ 0 phy_id  1 mode  2 lane_num  3 (pad)   4 symclk_100Hz
+ 8 test_mode.mode  9 .pat0  10 .pad[2]  12 state (int32)
+16 status (OUT)   20 pad    21 (tail)   = 24 bytes
+```
+
+**Payload 24.** `query_dp_alt` declares 4 and the transmitter declares 60:
+three commands, three sizes, one union, each sized off its own data struct —
+the deliberate non-normalisation `rb_dpaltq.h` already records. Header comes
+out `0x18001d80`, payload field 24, verified on the built tool.
+
+### THE UNITS: x100, AND MY OWN 310 ENTRY WAS WRONG TWICE
+
+310's journal entry said the two commands "share a field name" and warned of a
+factor of ten. **Both halves were wrong**, and the source says so plainly:
+
+```
+atom v1.7 : symclk_units.symclk_10khz   10 kHz units   54000  = 540 MHz
+command 29: symclk_100Hz                100 Hz units   5400000
+```
+
+Different name, and a factor of **100**. The conversion now lives in
+`rb_phyfsm_symclk_from_10khz()` where a test pins it — including a case that
+asserts the answer is **not** 540000 — rather than in a comment, where the
+first draft of that comment got it wrong in both directions. The entry is
+corrected rather than rewritten.
+
+`mode` is **0** = `ATOM_ENCODER_MODE_DP` (atomfirmware.h:95), the same value as
+`ATOM_TRANSMITTER_DIGMODE_V6_DP`, so the field we want is byte-identical to a
+field we forgot to write (rule 32's shape). `rb_phyfsm_build()` therefore has
+**no default for it** — the caller names it.
+
+### The status sentinel, and the allowlist
+
+`status` is an OUT field, so a firmware that never writes it leaves whatever we
+put there and a prefill of 0 is indistinguishable from a genuine status of 0.
+Prefilled `0xFFFFFFFF`, giving `RB_PHYFSM_E_NO_REPLY` its own code — rule 14 at
+the firmware boundary, `rb_dpaltq.h`'s move, and selectable
+(`RB_PHYFSM_STATUS_LINUX`) so the deviation is testable. A test pins that under
+the Linux-exact zero fill a true status of 0 reads as NO_REPLY: the ambiguity
+does not go away, it only wears the true label.
+
+Target states are an **allowlist** (RESET_RELEASED, SRAM_LOAD_DONE,
+INITIALIZED, CALIBRATED, PLL_EN, TX_EN), so a state added to the enum later is
+refused by default. RESET and POWER_DOWN would undo what we want;
+**TX_EN_TEST_MODE is refused because 2F8 established a wrong pattern degrades
+this sink until a reboot**. `RB_PHYFSM_E_BAD_STATE` (outside the enum) and
+`E_STATE_DENIED` (real, off the list) are **different codes** — a test breaks
+when they are merged. **PHY0 is refused by name**; dark PHY3 is allowed,
+because 309's control instance has to be reachable or the A/B has no control.
+Refusals are 70..79, clear of rb_pg's 20-25, rb_dig's 30-37, rb_dpaltq's 50-55
+and rb_dptx's 66, and a test asserts the range and pairwise distinctness.
+`rb_phyfsm_build()` **writes nothing on any refusal**, with a 0xA5 prefill
+proving it.
+
+### Break-it sweep: 22 guards, 20 caught by a failing test, and TWO RESULTS
+
+Rule 48, one break per guard. **Q and V fired nothing, and both are recorded
+in the header rather than papered over.**
+
+- **Q — held by `-Werror`, not by the test.** Turning the name table's
+  `st >= count` bound into `st >` is caught as a build error: the compiler sees
+  the out-of-bounds read first. So that guard's coverage is the build, and the
+  test is not it. **The `-Werror` trap for the seventh time**, benign this
+  time, but it means one line of `rb_phyfsm_state_name()` has no test standing
+  behind it and the header now says so.
+- **V — the break fires nothing and nothing is wrong.** Writing `state` as a
+  single byte instead of `rb_dmub_put32` is **byte-identical on the wire for
+  every legal value**: the slot is zeroed first and the builder refuses every
+  state >= 17, so no legal value exceeds 255. The distinction carries no
+  information **in the builder**. It is real in the **decoder**, which reads 32
+  bits, and that asymmetry is why the 32-bit write stays. Fourth such pair this
+  project's own data cannot separate.
+
+**And the sweep's own instrument failed first.** Case Q initially reported
+FIRED NOTHING because the `perl -0pi -e "s/\Q...\E/.../"` substitution choked
+on the `/` inside `sizeof(names) / sizeof(names[0])` and **made no edit at
+all** — a break that fires nothing because it broke nothing. Re-run with a
+Python substitution it reported the `-Werror` result immediately. Rule 16 and
+rule 26 in one line: the instrument is a suspect, and a sweep is a search.
+
+### What this changes, and what it does not
+
+It changes **nothing on the chip**. `make kext tools` and `make hosttest` pass
+(`grep error:` as well as `FAIL`; the two matches are test *names* containing
+"failed"). `dmubbl` UUID **ACDAA6D5**.
+
+What is still **not established** remains exactly 310's list, and the tool
+prints it on every invocation: that DMCUB 4.0.15.47 implements sub-type 29 at
+all, that the firmware acts on it for a DP-alt port, and that RESET ->
+RESET_RELEASED is a legal direct transition rather than one step of a ladder.
+The status word is what would answer the first two.

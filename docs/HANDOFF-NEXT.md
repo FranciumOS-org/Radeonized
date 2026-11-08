@@ -106,13 +106,19 @@ into it.
 
 ### Do it in this order
 
-1. **Free, no boot, do it first.** Add the struct, the ten state names and the
-   `status` decode to `dmubbl` as a **read-only addition** — build the command,
-   send nothing. Then **read `dmub_dig_transmitter_control_data_v1_7`'s own
-   symclk field in the source** and settle whether 54000 or 5400000 is right
-   here: the two commands share a field *name* and are different ABIs, and a
-   factor of ten is a wrong PLL rate on the port we are bringing up.
-2. **Then ask the user.** Sending 29 is a **write of a new firmware command**,
+1. ~~Build it without sending.~~ **DONE in 310b.** `src/common/rb_phyfsm.h`,
+   `tools/hosttest/phyfsm_test.c`, `dmubbl fsm [state] [phy]`. It returns
+   before `findFB()`, so it cannot reach a send however it is invoked. Payload
+   24, header `0x18001d80`, PHY0 refused by name, states on an allowlist,
+   `status` prefilled with a sentinel. 22 break-it guards, 20 caught by a
+   failing test, two recorded as results. `dmubbl` UUID ACDAA6D5.
+   **The units question is SETTLED and the earlier note was wrong twice:** the
+   atom field is `symclk_10khz` (54000) and command 29's is `symclk_100Hz`
+   (**5400000**) — a different name and a factor of **100**, not ten. Pinned by
+   a test, including one that asserts it is not 540000.
+   Run `./build/out/dmubbl fsm` to see the exact slot; it needs no arm and no
+   framebuffer.
+2. **Now ask the user. This is the decision point.** Sending 29 is a **write of a new firmware command**,
    so it is their decision (the card's rule for SMU message groups, same
    spirit). Say what it changes: one new `DMUB_CMD__VBIOS` command on the ring
    we already drive, **phyid 2 only**, PHY0 refused by name, `status` read back
