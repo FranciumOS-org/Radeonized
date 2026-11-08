@@ -65005,12 +65005,25 @@ subject in the same sample:
 
 **PHY2 IS HELD IN RESET, AND THAT IS THE BLOCKER'S NAME.** Its PHY firmware
 loaded (`SRAM_INIT_DONE`), so the block is powered and alive; what has not
-happened is the release. **Byte-identical before and after the full chain** —
-DTO, raster, configure, train, unblank — so **the atom transmitter ENABLE
-never takes PHY2 out of reset**, and that is consistent with everything
-downstream: no symbol clock, so DPCD `0x202` reads `0x00` and boot 478's
-`0x205` bit 0 `RECEIVE_PORT_0_STATUS` is clear. The sink is not refusing to
-train; nothing is being sent to train with.
+happened is the release. **Byte-identical before and after the chain this
+boot ran** — DTO, raster, configure, train, unblank — and that is consistent
+with everything downstream: no symbol clock, so DPCD `0x202` reads `0x00` and
+boot 478's `0x205` bit 0 `RECEIVE_PORT_0_STATUS` is clear. The sink is not
+refusing to train; nothing is being sent to train with.
+
+**CORRECTION, CAUGHT IN THE SAME BOOT AND BEFORE IT COST ONE.** The first
+version of this entry wrote "the atom transmitter ENABLE never takes PHY2 out
+of reset". **That is not what this boot measured.** `RBFBDigCalls` and
+`RBFBDigSends` both read **0** in boot 479: `dmubbl dig` was never invoked, so
+**the atom ENABLE is not among the things PHY2 stayed identical across.** The
+boots that did send it (461, 464, 468) never read `PHY_RESET`, and the boot
+that read `PHY_RESET` never sent it — rule 39, an A/B whose two halves are in
+different boots. What boot 479 establishes is only that **PHY2 is in reset
+while the rest of the chain is programmed**. Who is failing to release it is
+*not* established, and the atom ENABLE is still the leading candidate rather
+than an eliminated one. The arm was present (`RBFBDigArmed` Yes) — I read a
+survey published by a periodic sampler (rule 31) and took a programmed chain
+as a *sent* command.
 
 **PHY2 is byte-identical to PHY3**, which was never brought up. The port we
 have granted DP alt mode on, read EDID over, and run a pixel clock for is, at
