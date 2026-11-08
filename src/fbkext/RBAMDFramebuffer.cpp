@@ -632,6 +632,19 @@ bool RBAMDFramebuffer::start(IOService *provider)
          * INVALID and is refused. */
         feArmed = argOn("-rbgpufbfe");
         if (feArmed) { dmubBlArmed = true; }
+        /* 305: THE STREAM WRITE on DIG2. Opt-in, and it arms its own read
+         * dependency (rule 34): the stream-encoder block must be sampled for
+         * the licence to exist at all, and `strencReady` is gated on one of
+         * dpalt/dig/fe. `-rbgpufbstrm` was checked against every existing
+         * token and is neither one nor a prefix of one, and nor is the
+         * derived negative (rule 30; opt-in tokens are not covered by
+         * rb_defaults.h's assertion, so that scan is the check).
+         *
+         * Even armed, NOTHING is written until the tool names a target and
+         * triggers: DIG0 and OTG0 are refused BY NAME in the builder, and
+         * the write is declined unless THIS call's own sample shows the MSA
+         * derivation reproducing the live panel. */
+        strmArmed = argOn("-rbgpufbstrm");
         /* 2EF: the DP DTO pixel-clock READ. Opt-in, and it arms NOTHING
          * else - unlike every DMUB experiment beside it, this writes no
          * register, sends no command and produces nothing on any ring. It is
@@ -732,6 +745,12 @@ bool RBAMDFramebuffer::start(IOService *provider)
          * calls the path "Legacy path, avoid if possible". A boot that does
          * not pass this reads exactly what every boot before it read. */
         dpaltArmed = argOn("-rbgpufbdpalt");
+        /* 305's dependency, armed HERE and not where strmArmed is read:
+         * `dpaltArmed` is ASSIGNED on this line, so setting it earlier is
+         * setting it before the line that overwrites it. Rule 34 is about an
+         * experiment's arm being part of the experiment, and an arm that a
+         * later initialiser clobbers is the same defect one level down. */
+        if (strmArmed) { dpaltArmed = true; }
         /* 2EA: the QUERY_DP_ALT sweep, and the TOKEN NAME is rule 30 biting
          * for real rather than being checked and cleared. The obvious
          * `-rbgpufbdpaltq` has `-rbgpufbdpalt` - the line directly above -

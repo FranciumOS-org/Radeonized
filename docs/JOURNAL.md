@@ -64503,3 +64503,124 @@ block, which is the break-it check the machine performed itself.
 **The gate for the write is satisfied in one boot**: `Base` CONFIRMED,
 `ActiveAgree` 1, instance 0 `RUNNING`, and the derivation reproducing the
 panel exactly. The write set is both known and arithmetically validated.
+
+---
+
+## 305 — the stream write, and a missing step found by reading
+
+**Tag `305`.** Framebuffer UUID `09AF971F-8D53-3911-854D-134A96C1BE91`
+(304 was `4ADE62B7-8AF9-3895-970D-2A0737EF487F`). New opt-in token
+**`-rbgpufbstrm`**; new tool `build/out/strencprog`. **Not yet booted.**
+
+This is the first write this project makes to the DIO stream encoder, and the
+first thing on this line that could put a picture on the wire rather than a
+clock.
+
+### The missing step, found by reading a register instead of assuming
+
+Before building the write set, boot 474's `DIG_FE_CNTL` was read across all
+five instances. **DIG2's `DIG_SOURCE_SELECT` is 0 — OTG0, the panel's pipe.**
+It must be 1.
+
+`enc1_dig_connect_to_otg` (`dcn10_stream_encoder.c:1497`) is one line:
+`REG_UPDATE(DIG_FE_CNTL, DIG_SOURCE_SELECT, tg_inst)` — the **front end to
+OTG** mux, a **plain index**. It appears **nowhere in `src/` or `tools/`** and
+has never been written. Everything this project has done is
+`DIG_BE_CNTL.DIG_FE_SOURCE_SELECT` (2EC), a **different register and field**,
+which `rb_digbe.h:27` records as a **ONE-HOT MASK** and which already cost a
+misread for being read as an index. Two adjacent muxes, opposite encodings —
+rule 33's shape exactly, and the card's "FE connect, done in 2EC" was
+covering the wrong one of the two.
+
+The 0 cannot be distinguished from unprogrammed, because 0 is also the reset
+value — the same ambiguity 2FC hit on the DIO mux, where `ENCODER_TYPE_DIG` is
+zero. The write is correct either way, and `changed` is published beside
+`applied` so a no-op is visible as one (rule 20).
+
+### `src/common/rb_strprog.h` — the list, not the writes
+
+Nineteen writes, built by `rb_strprog_build()` and performed by the caller, so
+the hosttest decides everything the kext decides. Four Linux files for one
+operation, all vendored. Order: **OTG connect, then the attribute, then the
+unblank.**
+
+Three constants were taken off **the panel's own live words** rather than from
+an enum header this tree does not vendor (rule 25): `DP_PIXEL_FORMAT`
+`0x01000000` gives `DP_PIXEL_ENCODING` **0** = RGB444 and
+`DP_COMPONENT_DEPTH` **1** = 8bpc, and `DP_MSA_COLORIMETRY` `0x20000000` gives
+`MISC0` **0x20** = full-range sRGB at 8bpc. Measured on a working stream.
+
+`whole` carries Linux's `REG_SET` against `REG_UPDATE` per write — the four
+MSA timing registers are `REG_SET` and the rest are read-modify-write, and on
+a register holding live state that is not cosmetic. `delay_us` carries the
+`udelay` that follows each write: 1 us after `DIG_START`, 10 after the FIFO
+reset, 100 for the DIG/DP logic to prime.
+
+**The licence.** `rb_strprog_build()` takes `msa_mismatch` and refuses unless
+it is **0** — the derivation reproducing the live panel is the entire basis for
+believing the four MSA words are right (rule 47 asked of a write). It takes the
+**target pipe's** `derive_rc` separately, because "the arithmetic is right"
+and "the target pipe had a raster to apply it to" are different questions and
+get different refusals. Nine refusal codes in the builder, five more in the
+caller, **in disjoint ranges** so one published field carries either without
+"not armed" reading as "the panel was refused" — pinned apart by the hosttest.
+
+**Two values are deliberately NOT written.**
+`DP_VID_STREAM_DIS_DEFER`, retired in 304 on `dcn20_stream_encoder.c:541`'s
+own comment, is excluded and the hosttest **fails if any write touches it**.
+And `DP_VID_M` is **primed, not programmed**: `GEN_EN` is dropped, M and N go
+in, `GEN_EN` is raised, because the panel's own M drifted
+`0xa2a6` -> `0xa2a4` -> `0xa2a7` across boots 472-474. The hosttest pins that
+ordering.
+
+**The FIFO pulse is what clears DIG2's held reset**, by construction rather
+than as a special case: the unblank writes `DP_STEER_FIFO_RESET` 1 then 0, and
+the test fails if the pulse does not end at 0.
+
+### The verdict is bit 16
+
+`RBAMDFramebufferStrm.cpp` performs the list, waits for
+`DP_VID_STREAM_STATUS` to clear after `ENABLE` 0 (bounded, 10 us x 5000 =
+upstream's own budget; a timeout is **refusal 54 and the rest of the sequence
+is not sent**, because carrying on past a draining FIFO is how the next three
+writes land on a block that is still settling), and reads the whole word back
+afterwards. `ENABLE` and `STATUS` are published as two fields, never
+collapsed: bit 0 is what a driver writes and bit 16 is what the hardware
+answers, and this line has lacked that witness since 2EB.
+
+`strmProgram()` **re-samples before it builds**. The published licence is
+periodic and therefore stale by design, and a licence read off a stale
+snapshot is not a licence (rule 31).
+
+### Two bugs caught before any boot
+
+**The arm clobbered its own dependency.** `-rbgpufbstrm` needs the
+stream-encoder read armed, so it sets `dpaltArmed`. Written next to
+`strmArmed`'s parse at `RBAMDFramebuffer.cpp:647`, that assignment is
+**overwritten 100 lines later** by `dpaltArmed = argOn("-rbgpufbdpalt")` at
+:747. Rule 34 is about an experiment's arm being part of the experiment; an
+arm a later initialiser silently clobbers is the same defect one level down.
+Moved to :753, after the assignment.
+
+**A break-it check that fired nothing because the break was inert.** Breaking
+"PARAM3 modified in transit" as `msa->param3 | 1u` changed nothing:
+`0x003c8005` already has bit 0 set. Rule 48 says a break that fires nothing is
+a result — here the result was that the *break* was wrong, not the guard.
+Re-broken as `^ 2u` and caught. Three further guards were caught only by
+`-Werror` (the licence removals left their parameters unused), which is not
+coverage; all three were re-broken in forms that keep the parameter used, and
+all three are now caught by a **failing test**. **Seventeen guards, every one
+caught by a failing test, none by a broken build.**
+
+### Not yet established
+
+Nothing is written until a boot arms `-rbgpufbstrm` and `strencprog go` runs.
+And **a stream is not a picture**: there is no surface on pipe 1, so even
+`RUNNING` means the encoder is carrying a raster whose pixels are whatever the
+unprogrammed HUBP feeds it. The tool says so in its own output. The thing to
+read next is the **sink** — DPCD `0x202` over AUX2 — not our own registers,
+which can only say our stores landed.
+
+**The raster is not persistent** (304, boot 474). Any boot that wants a stream
+on DIG2 must program pipe 1's raster in that same boot, which is why
+refusal 5 names `otgprog` rather than arming it silently.

@@ -345,6 +345,17 @@ public:
     int strencDeriveRc[2]={0,0};
     uint32_t strencDerived[2][4]={{0}};
     uint32_t strencMsaMismatch=0;
+    bool strmArmed=false;
+    uint32_t strmCalls=0, strmRefuse=0, strmRan=0, strmWrites=0;
+    uint32_t strmApplied=0, strmChangedMask=0;
+    uint32_t strmInstUsed=0, strmOtgUsed=0, strmPixKhzUsed=0, strmLinkUsed=0;
+    uint32_t strmMVid=0, strmCntlBefore=0, strmCntlAfter=0, strmStatusOff=0;
+    int strmVerdict=0;
+    uint32_t strmMsaAfter[4]={0,0,0,0};
+    uint32_t strmSteerAfter=0, strmFeAfter=0;
+    uint32_t strmCallInst=2, strmCallOtg=1, strmCallPixKhz=148500, strmCallLink=20;
+    uint32_t strmProgram(uint32_t,uint32_t,uint32_t,uint32_t){return 0;}
+    void strmPublish(void){}
     void strencSample(void) {}
     void dpaltSample(void) {}
     /* 2EF: the DP DTO survey, stubbed for the same reason - dtoSample() lives

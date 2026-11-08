@@ -18,6 +18,7 @@
 #include "rb_dio.h"
 #include "rb_dpcspipe.h"
 #include "rb_strenc.h"
+#include "rb_strprog.h"
 #include "rb_dpcd.h"
 #include "rb_dpdto.h"
 
@@ -378,6 +379,7 @@ void RBAMDFramebuffer::publishVBLState(void)
      * unpublished intermediate is how a substituted value gets narrated as a
      * hardware result (rule 17). */
     setProperty("RBFBStrencMsaMismatch", (uint64_t)strencMsaMismatch, 32);
+    strmPublish();
     for (unsigned pi = 0; pi < 2; pi++) {
         char key[40];
         snprintf(key, sizeof(key), "RBFBStrencP%uDeriveRc", pi);
@@ -1688,6 +1690,48 @@ IOReturn RBAMDFramebuffer::setProperties(OSObject *props)
          * the call that follows, so it publishes and succeeds rather than
          * falling through to an unrelated handler. */
         if (pi || ss) { dtoPublish(); return kIOReturnSuccess; }
+    }
+
+    /* 305: THE STREAM WRITE on DIG2. The dials are read FIRST so all four
+     * are in place before the trigger they govern (rule 34 - a two-call
+     * handover is one that gets run with the first call quietly reverted),
+     * and `RBFBStrmGo` is what triggers, so an armed boot nobody has run the
+     * tool on has written nothing.
+     *
+     * The instance and the pipe DEFAULT to the Type-C pair, not to 0: 0 is
+     * the panel's on both, the builder refuses it by name, and a default that
+     * names the panel is one fat-finger away from the desktop. */
+    {
+        OSNumber *si = OSDynamicCast(OSNumber, dict->getObject("RBFBStrmInst"));
+        if (si) { strmCallInst = si->unsigned32BitValue(); }
+        OSNumber *so = OSDynamicCast(OSNumber, dict->getObject("RBFBStrmOtg"));
+        if (so) { strmCallOtg = so->unsigned32BitValue(); }
+        OSNumber *sk = OSDynamicCast(OSNumber, dict->getObject("RBFBStrmPixKhz"));
+        if (sk) { strmCallPixKhz = sk->unsigned32BitValue(); }
+        OSNumber *sl = OSDynamicCast(OSNumber, dict->getObject("RBFBStrmLinkRate"));
+        if (sl) { strmCallLink = sl->unsigned32BitValue(); }
+
+        OSNumber *sg = OSDynamicCast(OSNumber, dict->getObject("RBFBStrmGo"));
+        if (sg) {
+            const uint32_t rc = strmProgram(strmCallInst, strmCallOtg,
+                                            strmCallPixKhz, strmCallLink);
+            LOG("RBFBStrmGo inst %u otg %u %u kHz rate %u -> refuse %u; "
+                "writes %u applied %u changed %#x mvid %u, cntl %#x->%#x, "
+                "statusOff %u verdict %d ran %u, msa %#x %#x %#x %#x, "
+                "steer %#x fe %#x",
+                strmCallInst, strmCallOtg, strmCallPixKhz, strmCallLink, rc,
+                strmWrites, strmApplied, strmChangedMask, strmMVid,
+                strmCntlBefore, strmCntlAfter, strmStatusOff, strmVerdict,
+                strmRan, strmMsaAfter[0], strmMsaAfter[1], strmMsaAfter[2],
+                strmMsaAfter[3], strmSteerAfter, strmFeAfter);
+            strmPublish();
+            return rc == RB_STRPROG_W_OK ? kIOReturnSuccess
+                                         : kIOReturnNotPermitted;
+        }
+        /* A dial named with no trigger is the setup for the call that
+         * follows, so it publishes and succeeds rather than falling through
+         * to an unrelated handler. */
+        if (si || so || sk || sl) { strmPublish(); return kIOReturnSuccess; }
     }
 
     /* 2A0: the frame-time instrument's own dial, ahead of RBFBPubMs because
