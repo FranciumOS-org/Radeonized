@@ -508,37 +508,50 @@ being the DRR drift). **`DP_VID_M` is hardware-generated on the panel**
 473, so it is a value to **prime**, never to copy. For the sink at 148500 kHz
 over HBR2: `m_vid` **9011**. `tools/strenclook.sh`.
 
-**305 BUILT THE WRITE — 19 writes, not yet booted.** `src/common/rb_strprog.h`
-builds the list and the caller performs it; opt-in **`-rbgpufbstrm`**, tool
-`build/out/strencprog`, UUID `09AF971F`. Order: **OTG connect -> attribute ->
-unblank**. **The licence**: the builder refuses unless `RBFBStrencMsaMismatch`
-is **0**, and takes the TARGET pipe's `derive_rc` separately — "the arithmetic
-is right" and "the pipe had a raster" are different questions. Builder codes
-1..8 and caller codes 50.. are in **disjoint ranges**, pinned apart.
-`DP_VID_STREAM_DIS_DEFER` is **excluded and the hosttest fails if any write
-touches it**; `DP_VID_M` is **primed, not programmed** (`GEN_EN` 0, M/N in,
-`GEN_EN` 1); the FIFO pulse **ends at 0**, which is what clears DIG2's held
-reset by construction. The verdict is **bit 16 STATUS**, published apart from
-bit 0 ENABLE, with a bounded wait whose timeout **refuses and stops the
-sequence** (54). `strmProgram()` **re-samples before building** — a licence off
-a periodic publish is stale by design (rule 31). Three constants came off the
-panel's own live words, not an unvendored enum header (rule 25). Seventeen
-break-it guards, all caught by a **failing test**, none by `-Werror`.
-**A STREAM IS NOT A PICTURE**: no surface on pipe 1, so even RUNNING means the
-encoder carries whatever the unprogrammed HUBP feeds it. **The raster is not
-persistent** — program pipe 1 in the SAME boot (refusal 5 names `otgprog`).
+**305 RAN THE WRITE IN BOOT 477: 19/19 APPLIED, AND STATUS READ 0.** Every
+mechanical part worked — MSA read back exactly, **`DP_STEER_FIFO` 1 -> 0**
+(DIG2's held reset from three boots, cleared by the unblank's own pulse),
+**`DIG_FE_CNTL` -> 1** (`DIG_SOURCE_SELECT` = OTG1, never written before 305),
+`CNTL 0x00100000 -> 0x00100001`, m_vid 9011. **But bit 16 STATUS read 0 —
+VERDICT 2 NO_STATUS**, the first time this line has asked the hardware for a
+stream and been declined. In-sample control: DIG0 ENABLE 1 / STATUS **1**,
+DIG2 ENABLE 1 / STATUS **0**, DIG1/3/4 both 0. **"Read too early" is dead**
+(OTG1 2849 -> 2969 frames = exactly 60.0 Hz, so ~2900 vblanks at STATUS 0).
+**The BE-enable dependency is eliminated**: `dmubbl dig fe noenc` moved DIG2's
+`DIG_BE_EN_CNTL` `0x100 -> 0x101` with a four-instance control; STATUS
+unchanged (`DIG_BE_CNTL` was already `0x20000000`, firmware-set at boot).
+Pipe 1's derived MSA verified independently against CEA-861 1080p60 — HTOTAL
+2200, VTOTAL 1125, HSTART 192, VSTART 41, HSYNC 44, VSYNC 5, 1920x1080, all
+exact, and **the polarity differs from the panel's**, which is why the field
+is known to be read rather than carried over.
 
-**305 ALSO FOUND A STEP NEVER DONE, by reading instead of assuming.** DIG2's
-`DIG_FE_CNTL.DIG_SOURCE_SELECT` reads **0 = OTG0, the panel's pipe**, and must
-be 1. `enc1_dig_connect_to_otg` (`dcn10_stream_encoder.c:1497`) is the **front
-end -> OTG** mux and a **PLAIN INDEX**; it appears nowhere in `src/` or
-`tools/`. Everything this project did is `DIG_BE_CNTL.DIG_FE_SOURCE_SELECT`
-(2EC), a **different register and field** that `rb_digbe.h:27` records as a
-**ONE-HOT MASK** and that already cost a misread. Two adjacent muxes, opposite
-encodings — rule 33's shape, and "FE connect, done in 2EC" was covering the
-wrong one. The 0 is also the reset value, so it cannot be told from
-unprogrammed (2FC's DIO-mux ambiguity); `changed` is published beside
-`applied`.
+**THE WRITE LIST LOCKED OUT ITS OWN NEXT STEP.** `dptrain go tps=2` refused
+**66 `RB_DPTX_W_STREAM_LIVE`**. 305 collapsed `dp_set_stream_attribute` and
+`dp_unblank` into one list, and **they are two functions precisely because
+link training happens between them** — `enable_link_dp` trains, then
+unblanks. The card had "FE connect -> configure -> transmitter ENABLE" and
+never that **the stream enable comes AFTER training**; it was in
+`enable_link_dp` all along. This does **not** say a trained link gives
+STATUS 1 — it says the experiment could not reach the state where that is
+asked.
+
+**305b SPLIT IT, NOT BOOTED.** `rb_strprog_build()` takes a **phase** and
+`rb_strprog_plan` **returns** the wait points (the `WAIT_*_IDX` constants are
+gone — they differ per phase). **ATTRIBUTE** (`strencprog go`, 10 writes):
+OTG connect, format, colorimetry, MISC, four MSA words, SDP splitting, then
+**`DP_VID_STREAM_ENABLE` 0** — not upstream's, and the recovery from 477.
+**UNBLANK** (`strencprog unblank`, 10 writes): ENABLE 0 + wait, M/N primed
+inside GEN_EN 0/1, `DIG_START` pulse, FIFO pulse ending at 0, ENABLE 1 + the
+STATUS read. **Order: `strencprog go` -> `dptrain go tps=2` ->
+`strencprog unblank`.** The phase defaults to ATTRIBUTE everywhere, so a bare
+`go` gets the half that cannot lock the trainer out, and **the load-bearing
+guard is that ATTRIBUTE cannot enable the stream**. Both halves refuse the
+panel, OTG0, a non-zero licence and m_vid 0. Twelve break-it checks, eleven
+caught by a failing test and none by `-Werror`; the twelfth **fired nothing**
+first time — the break was inert (assigned two lines above the code that
+overwrites it, 304's `| 1u` again) — and the sweep also caught the check
+reading `w[idx]` before bounding `idx`, the guard doing what it exists to
+prevent. Framebuffer UUID **5AA98CD9**.
 
 **302 built the stream encoder READ** — `src/common/rb_strenc.h`, 14 registers
 x 5 instances, BASE_IDX 2, stride 0x100. **The read is the experiment: DIG0 is
@@ -618,13 +631,16 @@ written until `dptrain go`; the panel's transmitter is refused by name and the
 write is declined unless the panel's own DP0 reads as a trained link.
 **`tps=1` is a no-op on a dark instance** and **`tps=3`/`tps=4`
 DEGRADE the sink, costing a reboot — the tool refuses them. Use `tps=2`),
-`-rbgpufbstrm` (**THE STREAM WRITE on DIG2**, 305 — arms `-rbgpufbdpalt`
+`-rbgpufbstrm` (**THE STREAM WRITE on DIG2**, 305 — two phases,
+`strencprog go` then **train** then `strencprog unblank`; arms `-rbgpufbdpalt`
 itself for the read the licence depends on, and that arm is applied AFTER
 `dpaltArmed`'s own assignment because setting it earlier is setting it before
 the line that overwrites it. Nothing is written until `strencprog go`; DIG0
 and OTG0 are refused **by name** in both halves, and the write is declined
 unless THIS call's own re-sample shows the MSA derivation reproducing the live
-panel and the target pipe holding a raster),
+panel and the target pipe holding a raster. The phase defaults to the
+configure half, which leaves the stream disabled so `dptrain` can run —
+boot 477's refusal 66),
 `-rbgpufbraster` (the second raster — OTG timing on pipe 1, 2FA. Nothing is
 written until `otgprog ... go` names a mode, pipe 0 is refused by name in both
 halves, and the write is declined unless this boot's own sample shows the pixel
@@ -682,10 +698,10 @@ table, which we have on disk); **polling `checkTimestamps()` harder**
 **Open:** the rest of the external-display chain — `docs/EXTERNAL-DISPLAY.md`
 for the state, `docs/HANDOFF-NEXT.md` for the next step. **The blocker is not
 named** (301 retired "the analog PHY is off"); the things never
-attempted are a **stream** on DIG2 (`dcn30_dio_stream_encoder.c` — 304 has
-the write set derived and its arithmetic validated against the panel, but
-**nothing is written yet and there is still no setter**), a **surface** on
-pipe 1 and a second `IOFramebuffer`. 2F8 added a cost: `tps=3`
+attempted are a stream on a **trained** DIG2 link (305 wrote the stream in
+boot 477 and the hardware answered STATUS 0; the write list is now split so
+training fits between the halves, **not booted**), a **surface** on pipe 1 and
+a second `IOFramebuffer`. 2F8 added a cost: `tps=3`
 **degrades the sink until a reboot**, which is what 2F7 spent a milestone
 diagnosing. Also open: the **wedge** (work submitted that
 never retires — channel-52 GFX, 3.5 s, the "random lag"; `stamp_ticks` 125666

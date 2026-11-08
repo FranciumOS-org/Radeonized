@@ -64712,3 +64712,132 @@ suspect; here the instrument was *fine* and the **description of it** was the
 defect, which no amount of reading the output would have caught. The only
 thing that caught it was checking `RBFBDtoProgRan` afterwards instead of
 assuming a read had read.
+
+---
+
+## 305 / boot 477 — the stream write RAN, and the hardware DECLINED IT
+
+**UUID F4351B09-8037-3147-B221-D87984F2DC33, boot 477, armed `-rbgpufbstrm`,
+cable in at boot, Eco mode.** The whole chain in one boot, each step with its
+in-boot control:
+
+1. `dmubbl dto 148500` → `DPDTO_ENABLE_STATUS` 0 → 1, pipe 1's pixel clock
+   running.
+2. `otgprog go 1080p60` → `OTG1_CONTROL 0x00011201` MASTER_EN, frame count
+   advancing.
+3. `strencprog go` → **19/19 writes applied**, changed mask `0x6d4f7`,
+   m_vid 9011, `DP_VID_STREAM_CNTL 0x00100000 → 0x00100001`.
+
+Everything mechanical worked. The four MSA words read back exactly as derived.
+**`DP_STEER_FIFO` → `0x00000000`** — DIG2's held reset, read set in boots 472,
+473 and 474 and clear on all four other instances, cleared by the unblank's own
+pulse exactly as `rb_strprog.h` claimed it would be, by construction rather
+than as a special case. **`DIG_FE_CNTL` → `0x00000001`** — `DIG_SOURCE_SELECT`
+= 1 = OTG1, the step 305 found by reading and that this project had never
+performed.
+
+Pipe 1's derived MSA, verified independently against CEA-861 1080p60 rather
+than against our own expectation: `0x08980465` (HTOTAL 2200, VTOTAL 1125),
+`0x00c00029` (HSTART 192 = sync 44 + back porch 148, VSTART 41 = 5 + 36),
+`0x002c0005` (HSYNC 44, VSYNC 5, both polarities positive), `0x07800438`
+(1920x1080). Every value exact. **The polarity differs from the panel's**
+(panel VSYNCPOL 1, sink 0), which is the evidence that the field is genuinely
+read off the OTG registers and not carried over from the panel's sample.
+
+**AND `DP_VID_STREAM_STATUS` (bit 16) READ 0. VERDICT 2 = NO_STATUS.** The
+first time on this line the hardware has been asked for a stream and declined.
+That is the witness 302 built the ENABLE/STATUS split for: bit 0 is what a
+driver writes, bit 16 is what the hardware answers, and here they disagree.
+One sample, five instances:
+
+| instance | ENABLE (bit 0) | STATUS (bit 16) |
+|---|---|---|
+| DIG0 — the panel's live stream | 1 | **1** |
+| DIG2 — ours | 1 | **0** |
+| DIG1 / DIG3 / DIG4 | 0 | 0 |
+
+**"Read too early" is dead:** OTG1's frame count went 2849 → 2969 over the two
+seconds around the read — 120 frames, exactly 60.0 Hz — so STATUS was 0 across
+~2900 vblanks, not in the microseconds after the write.
+
+**The back-end-enable dependency was found and eliminated in the same boot.**
+`DIG_BE_EN_CNTL` read DIG0 `0x101` (enabled) against DIG2 `0x100`, which is a
+real difference in the right direction. `DIG_BE_CNTL` was already
+`0x20000000` on DIG2 — firmware-set at boot, and `DigBeDiff` 0 with every
+`Post` key 0 confirms nothing wrote it this boot. `dmubbl dig fe noenc` moved
+DIG2's `DIG_BE_EN_CNTL` `0x100 → 0x101` with the four-instance control
+byte-identical. **STATUS still 0.** So the missing thing is not the back end
+being disabled.
+
+### The finding: THE WRITE LIST LOCKED OUT ITS OWN NEXT STEP
+
+`dptrain go tps=2` then refused with **66 `RB_DPTX_W_STREAM_LIVE`** — "a video
+stream is running on that transmitter". DP2's `LINK_CNTL` reads `0x00000000`:
+no TRAINED, no LINKUP, but a stream requested.
+
+**305 collapsed two upstream functions into one list, and they are two
+functions precisely because link training happens between them.**
+`enable_link_dp` calls `dp_set_stream_attribute`, then trains the link, then
+calls `dp_unblank`. My list ran straight from the attribute writes to
+`DP_VID_STREAM_ENABLE` 1, which is `dp_unblank`'s last act — on an untrained
+link, and with the stream enabled the trainer refuses to run at all.
+
+The card had recorded the order as "FE connect → configure encoder →
+transmitter ENABLE" and never that **the stream enable comes after training**.
+That ordering was available in `enable_link_dp` the whole time: the recurring
+error's "read the evidence already in hand" form again, in the structure of
+the vendored source rather than in a register.
+
+**This does not say a trained link will produce STATUS 1.** It says the
+experiment as built could not reach the state where that question is asked.
+
+### 305b — the split, with the guard the boot bought
+
+`rb_strprog_build()` now takes a **phase**, and `rb_strprog_plan` **returns**
+the two wait points instead of the file naming them as constants
+(`RB_STRPROG_WAIT_OFF_IDX` / `_ON_IDX` are gone): they land in different places
+in the two phases, and a constant naming a position in a list someone reorders
+is the kind that drifts silently — which is exactly what this split would have
+done to them.
+
+- **`RB_STRPROG_PHASE_ATTRIBUTE`** (`strencprog go`, 10 writes): the OTG
+  connect, the pixel format, colorimetry, MISC, the four MSA words,
+  SDP splitting — and then **`DP_VID_STREAM_ENABLE` 0**, which upstream never
+  needs because upstream has never enabled a stream at this point, and we
+  have. That write is the recovery from boot 477's state.
+- **`RB_STRPROG_PHASE_UNBLANK`** (`strencprog unblank`, 10 writes): ENABLE 0 +
+  wait STATUS 0, the M/N priming with GEN_EN dropped and raised around it, the
+  `DIG_START` pulse, the steer FIFO pulse ending at 0, and `ENABLE` 1 with the
+  STATUS read pointed at it.
+
+The order is **`strencprog go` → `dptrain go tps=2` → `strencprog unblank`**,
+and the tool prints it in the no-argument usage.
+
+**The load-bearing new guard is that the ATTRIBUTE phase CANNOT enable the
+stream** — not that the writes are right, which the previous sweep already
+covered, but that the configure half cannot reproduce boot 477's lock-out. The
+phase defaults to ATTRIBUTE in both the kext and the tool, for the same reason
+the instance defaults to 2: the harmless half is the one a bare `go` gets.
+
+Refusals are checked in **both** halves — the panel and OTG0 by name, the MSA
+licence, and m_vid, which only UNBLANK uses but which ATTRIBUTE refuses anyway
+so that a bad m_vid is heard before the link is trained rather than after.
+
+**Twelve break-it checks on the new guards, eleven caught by a failing test
+and zero by `-Werror`.** The twelfth (`wait_off_idx` pointing off the end)
+**fired nothing on the first attempt, and that was a result about the break,
+not the guard**: it assigned the bogus index at the top of the branch, two
+lines above the code that overwrites it — the inert-break error from 304's
+`| 1u` again. Re-broken at the real assignment, it caught.
+
+**And the sweep found a defect in the check itself**: the common per-phase
+check read `p->w[p->wait_off_idx]` *before* testing the index against `p->n` —
+the guard doing the very thing it exists to prevent. Bound first, then value.
+That is the second time this milestone that running the break-it sweep found a
+bug in the test rather than in the code it guards, which is the argument for
+rule 48 stated as cheaply as it ever gets.
+
+**Not booted.** `src/common/rb_strprog.h`, `src/fbkext/*`,
+`tools/hosttest/strprog_test.c` and `tools/strencprog.m` build clean; new
+framebuffer UUID **5AA98CD9-8CFE-33D1-B0D8-A623843C5B29**. The next boot is
+the first chance to ask whether a **trained** link answers STATUS 1.

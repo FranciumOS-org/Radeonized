@@ -1,127 +1,91 @@
-# HANDOFF — what to do now
+# HANDOFF — where this is now, and what to do next
 
-**State: 305 is built and not yet booted.** Framebuffer UUID
-**`F4351B09-8037-3147-B221-D87984F2DC33`**. This build can **write** the DP
-stream on DIG2 — the first write this project makes to that block — but only
-when armed, triggered, and licensed by its own sample.
+## State
 
-Boot 474 passed the gate 304 built: `RBFBStrencMsaMismatch` **0**, `Base`
-CONFIRMED, `ActiveAgree` 1, panel RUNNING, and PARAM3's sync and polarity
-inputs read rather than assumed.
+**305 wrote the stream on DIG2 in boot 477 and the hardware declined it.**
+19/19 writes applied, every mechanical thing worked — the four MSA words read
+back exactly, DIG2's three-boot held `DP_STEER_FIFO` reset cleared by the
+unblank's own pulse, `DIG_FE_CNTL.DIG_SOURCE_SELECT` -> 1 = OTG1 (a step this
+project had never performed), `DP_VID_STREAM_CNTL 0x00100000 -> 0x00100001` —
+and **bit 16 STATUS read 0**. Verdict 2, NO_STATUS. DIG0's live panel stream
+reads ENABLE 1 / STATUS 1 in the same sample; DIG1/3/4 read 0/0.
 
----
+Eliminated in that boot: **reading too early** (~2900 vblanks at STATUS 0,
+OTG1 2849 -> 2969 frames = 60.0 Hz) and **the back end being disabled**
+(`dmubbl dig fe noenc` moved `DIG_BE_EN_CNTL` `0x100 -> 0x101` on DIG2 with a
+four-instance control; STATUS unchanged).
 
-## Step 1 — add the arm, install, boot
+**The finding was that the write list locked out its own next step.**
+`dptrain go tps=2` refused 66 `RB_DPTX_W_STREAM_LIVE`. 305 had collapsed
+`dp_set_stream_attribute` and `dp_unblank` into one list, and upstream keeps
+them apart *because link training runs between them* (`enable_link_dp`).
 
-**The cable must be plugged in at boot** (2FB). Plugged in afterwards every
-AUX read returns refusal 3 and `AUX_EN` reads clear.
+**305b split them. Built, hosttested, not booted.**
 
-**The boot-arg is already added** (boot 475 confirmed it in the kernel's own
-`kern.bootargs`). Boot 475 refused anyway because `hubpSetup()` cleared the
-arm after `start()` parsed it; that is fixed in this build. **Do not re-add
-the token** — `strencprog` now cross-checks it against `kern.bootargs` and
-will say so if the flag is ever clobbered again.
+## Do this next
+
+**1. Install and boot.** Framebuffer UUID **5AA98CD9-8CFE-33D1-B0D8-A623843C5B29**.
 
 ```bash
 sudo tools/fbinstall.sh
 ```
 
-Then the UUID **inside the collection**, not in `/Library/Extensions` (rule
-15, which cost nine boots in 2xx):
+Then reboot **with the Type-C cable plugged in before boot** (2FB: plugged in
+afterwards, every AUX read refuses 3 on a nonexistent engine). `-rbgpufbstrm`
+should already be in the boot-args from boot 475; verify from the running
+system, not from `nvram`:
 
 ```bash
-kmutil inspect -B /Library/KernelCollections/AuxiliaryKernelExtensions.kc --show-kext-uuids | grep -i rembrandt
+sysctl -n kern.bootargs | tr ' \t' '\n\n' | grep -qx -- -rbgpufbstrm && echo ARMED || echo NOT ARMED
 ```
 
-It must read `F4351B09-8037-3147-B221-D87984F2DC33`. Reboot, then verify the
-arm **from the running system** — a boot-arg that reads back is not one that
-survived (rule 43):
+**2. In that boot, in this order — all four steps, same boot.** The raster and
+the clock are **not persistent**; `strencprog` refuses without them.
 
 ```bash
-nvram boot-args | tr ' \t' '\n\n' | grep -qx -- '-rbgpufbstrm' && echo ARMED || echo NOT ARMED
+sudo build/out/dmubbl dto 148500
 ```
-
-## Step 2 — the raster, in this same boot
-
-**The pipe 1 raster is not persistent.** Boot 474 read all eight of its OTG
-words as zero with `-rbgpufbraster` armed, because the arm only permits and
-`otgprog … go` is what writes. So it must be programmed in the same boot as
-the stream, or `strencprog` refuses with code 5 and names this step.
 
 ```bash
-tools/strencprog
+sudo build/out/otgprog go 1080p60
 ```
-
-Read-only. It prints the licence first and writes nothing. Both must hold:
-`RBFBStrencMsaMismatch` **0** and pipe 1's `DeriveRc` **0**. If pipe 1 is not
-0, program its raster with `otgprog` (1920x1080 at 60, the sink's EDID
-preferred timing, 148500 kHz) and the DTO, then run `strencprog` again.
-
-## Step 3 — the stream
 
 ```bash
 sudo build/out/strencprog go
 ```
 
-Defaults are DIG2 from OTG1 at 148500 kHz over HBR2 (`rate=20`), which gives
-`m_vid` 9011 and `n_vid` `0x8000`. DIG0 and OTG0 are refused **by name** in
-both the tool and the kext.
-
-**The verdict is `DP_VID_STREAM_CNTL` bit 16 `STATUS`, not bit 0 `ENABLE`.**
-Bit 0 is what we wrote; bit 16 is what the hardware answers, and upstream
-`REG_WAIT`s on it. The tool prints both separately:
-
-- **VERDICT 1 RUNNING** — ENABLE 1 and STATUS 1. The block says it is carrying
-  a stream. **This is not a picture** (see below).
-- **VERDICT 2 NO_STATUS** — we asked and the hardware did not answer. The most
-  informative single result this line could get: it would be the first time
-  the encoder has been asked for a stream and declined, and the refusal is
-  the hardware's, not ours.
-- **VERDICT 3 NOT_ENABLED** — the write did not take at all. Check
-  `RBFBStrmChanged`.
-- **refusal 54 STATUS_STUCK** — `STATUS` never cleared after `ENABLE` 0 and
-  the rest of the sequence was deliberately **not** sent.
-
-Also read, in the same output: `DP_STEER_FIFO` bit 0 must now be **0** (DIG2's
-held reset, set in boots 472/473/474, is cleared by the unblank's own pulse),
-and `DIG_FE_CNTL` bits 2:0 must now be **1**. That second one has **never been
-written before 305** — see the journal; it was the front-end-to-OTG mux, a
-different register from 2EC's one-hot BE→FE mux, and DIG2 had it pointed at
-the panel's pipe.
-
-## Step 4 — ask the SINK, which is the only witness that counts
-
-Our own registers can only say our stores landed; taking that as the answer is
-rule 20's defect.
-
 ```bash
 sudo build/out/dptrain go tps=2
 ```
 
-Then read DPCD `0x202` over AUX2, **before and after**, since "CR not done" is
-the state it is already in and only a **change** is evidence. `0x202` has read
-`0x00` in every boot that has tried, and the blocker is still unnamed.
+```bash
+sudo build/out/strencprog unblank
+```
 
-**`tps=3` and `tps=4` DEGRADE this sink and the recovery is a REBOOT** (2F8,
-two boots, and all of 2F7 was its aftermath). The tool refuses them. Use
-`tps=2`.
+`strencprog go` leaves `DP_VID_STREAM_ENABLE` 0 on purpose — that is what
+lets `dptrain` run at all. **Never `tps=3` or `tps=4`: they degrade the sink
+until a reboot** (2F8), and the tool refuses them.
 
-## What a RUNNING stream does and does not mean
+**3. The question this boot asks.** `dptrain` has never moved DPCD `0x202`
+off `0x00` — no clock recovery, across boots 459, 461, 464, 468, 469. If it
+still reads `0x00`, the training itself is the blocker and the stream's
+STATUS 0 is downstream of it. If `0x202` finally moves and
+`strencprog unblank` then reads **STATUS 1**, the encoder chain is complete
+and what remains is a **surface** on pipe 1 and a second `IOFramebuffer`.
 
-**A stream is not a picture.** There is no surface on pipe 1 — no HUBP, no
-address, no swizzle — so even STATUS 1 means the encoder is carrying a raster
-whose pixels are whatever the unprogrammed HUBP feeds it. That is a real
-intermediate result and should be recorded as one, not as success and not as
-failure. A second `IOFramebuffer` is also still missing;
-`getDisplayModeCount()` has returned 1 since 2sl.
+Both outcomes are results. Report `RBFBStrmVerdict`, `RBFBStrmCntlAfter` and
+DPCD `0x202` before and after, and keep the four-instance control in the same
+sample.
 
-## Rescue, if the boot goes wrong
+## Rules this step is standing on
 
-- `sudo nvram rbgpu-arm=0` — accelerator off next boot.
-- **`-rbgpuoff`** — the plugin loads and does nothing. The documented rescue.
-- The **boot sentinel** needs no command: a boot that does not survive 60 s
-  makes the next one stock.
-- **Never `kmutil unload` the framebuffer kext — it PANICS** (2sq). Reboot.
-- The Type-C subsystem can die in a way that survives a reboot and a
-  reinstall, cleared only by a **30-second power-key hold** (2DD).
-- The chassis must be in **iGPU-only / Eco mode** (rule 47).
+- **Rule 15** — check the UUID *inside the collection*, not in
+  `/Library/Extensions`:
+  `kmutil inspect -B /Library/KernelCollections/AuxiliaryKernelExtensions.kc --show-kext-uuids | grep -i rembrandt`
+- **Rule 34** — the arm is part of the experiment. `strencprog` cross-checks
+  `-rbgpufbstrm` against `kern.bootargs` itself and says so if the kernel has
+  the token but the kext read NOT ARMED (boot 475's defect).
+- **Rule 47** — Eco / iGPU-only mode in the chassis firmware, and the cable
+  in at boot.
+- **Rule 31** — `RBFBStrm*` is published periodically; `strencprog` re-samples
+  inside the call rather than trusting the published licence.

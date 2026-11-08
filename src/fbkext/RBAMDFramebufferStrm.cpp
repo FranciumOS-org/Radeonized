@@ -43,10 +43,12 @@ static const uint32_t kStrmWaitUs    = 10u;
 static const uint32_t kStrmWaitTries = 5000u;
 
 uint32_t RBAMDFramebuffer::strmProgram(uint32_t inst, uint32_t tgInst,
-                                       uint32_t pixKhz, uint32_t linkRate)
+                                       uint32_t pixKhz, uint32_t linkRate,
+                                       uint32_t phase)
 {
-    struct rb_strprog_write w[RB_STRPROG_MAX_WRITES];
+    struct rb_strprog_plan plan;
     struct rb_strenc_msa msa;
+    const struct rb_strprog_write *w = plan.w;
     uint32_t n = 0, i;
     int rc;
 
@@ -65,6 +67,7 @@ uint32_t RBAMDFramebuffer::strmProgram(uint32_t inst, uint32_t tgInst,
     strmCntlAfter   = 0;
     strmStatusOff   = 0;
     strmMVid        = 0;
+    strmPhaseUsed   = phase;
     strmInstUsed    = inst;
     strmOtgUsed     = tgInst;
     strmPixKhzUsed  = pixKhz;
@@ -97,11 +100,12 @@ uint32_t RBAMDFramebuffer::strmProgram(uint32_t inst, uint32_t tgInst,
      * questions, two different refusals. */
     rc = rb_strprog_build(inst, tgInst, &msa, strencMsaMismatch,
                           strencDeriveRc[1], strmMVid,
-                          w, RB_STRPROG_MAX_WRITES, &n);
+                          (enum rb_strprog_phase)phase, &plan);
     if (rc != RB_STRPROG_OK) {
         strmRefuse = (uint32_t)rc;
         return strmRefuse;
     }
+    n = plan.n;
     strmWrites = n;
 
     /* The instance's own CNTL before anything moves - a captured value needs
@@ -138,7 +142,11 @@ uint32_t RBAMDFramebuffer::strmProgram(uint32_t inst, uint32_t tgInst,
 
         /* After ENABLE 0, upstream WAITS for STATUS to clear before touching
          * the FIFO. Bounded, and a timeout refuses. */
-        if (i == RB_STRPROG_WAIT_OFF_IDX) {
+        /* The wait point comes from the PLAN, not from a constant naming a
+         * position in the list: the two phases put it in different places,
+         * and a hardcoded index is the kind that drifts silently when the
+         * list is reordered (which is exactly what the split just did). */
+        if (plan.wait_off_idx >= 0 && i == (uint32_t)plan.wait_off_idx) {
             uint32_t t;
             for (t = 0; t < kStrmWaitTries; t++) {
                 const uint32_t c = hubpRegs[kRbDmuSeg2Strm + w[i].dw];
@@ -193,6 +201,7 @@ void RBAMDFramebuffer::strmPublish(void)
     setProperty("RBFBStrmWrites",  (uint64_t)strmWrites, 32);
     setProperty("RBFBStrmApplied", (uint64_t)strmApplied, 32);
     setProperty("RBFBStrmChanged", (uint64_t)strmChangedMask, 32);
+    setProperty("RBFBStrmPhase",   (uint64_t)strmPhaseUsed, 32);
     setProperty("RBFBStrmInst",    (uint64_t)strmInstUsed, 32);
     setProperty("RBFBStrmOtg",     (uint64_t)strmOtgUsed, 32);
     setProperty("RBFBStrmPixKhz",  (uint64_t)strmPixKhzUsed, 32);

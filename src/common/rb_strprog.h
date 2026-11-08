@@ -86,7 +86,8 @@ enum rb_strprog_err {
     RB_STRPROG_E_DERIVE  = 5,  /* the target pipe's own derivation refused   */
     RB_STRPROG_E_MVID    = 6,  /* m_vid 0 - never a valid M                 */
     RB_STRPROG_E_OTG0    = 7,  /* tg_inst 0 - the panel's pipe, BY NAME     */
-    RB_STRPROG_E_OTG     = 8   /* tg_inst outside the mux field             */
+    RB_STRPROG_E_OTG     = 8,  /* tg_inst outside the mux field             */
+    RB_STRPROG_E_PHASE   = 9   /* not a phase this file knows               */
 };
 
 /* Refusals the CALLER adds, above the builder's 1..8 so one published field
@@ -119,13 +120,37 @@ struct rb_strprog_write {
 
 #define RB_STRPROG_MAX_WRITES 24u
 
-/* Index of the two writes the caller must bracket with a REG_WAIT / readback
- * on DP_VID_STREAM_CNTL bit 16 STATUS. Bit 0 is what a driver writes and bit
- * 16 is what the HARDWARE answers; upstream REG_WAITs on the second and this
- * line has lacked that witness since 2EB, so the caller is told exactly where
- * the two moments are rather than being left to find them. */
-#define RB_STRPROG_WAIT_OFF_IDX  13u  /* after ENABLE 0: wait STATUS == 0 */
-#define RB_STRPROG_WAIT_ON_IDX   18u  /* after ENABLE 1: read STATUS back */
+/* THE TWO PHASES, AND WHY THEY ARE TWO.
+ *
+ * Upstream has two functions, not one: `dp_set_stream_attribute` configures
+ * the encoder and `dp_unblank` turns the stream on, and LINK TRAINING HAPPENS
+ * BETWEEN THEM (`enable_link_dp` trains, then unblanks). 305 collapsed both
+ * into one nineteen-write list ending in `DP_VID_STREAM_ENABLE` 1, and boot
+ * 477 paid for it: with the stream enabled, `dptrain` refuses with
+ * RB_DPTX_W_STREAM_LIVE (66), "a video stream is running on that
+ * transmitter". The chain locked itself out of its own next step.
+ *
+ * So the phases are separate operations here too, and the ATTRIBUTE phase
+ * deliberately ends by writing ENABLE 0 - which upstream never needs, because
+ * upstream has never enabled a stream at this point, and we may have. That is
+ * the recovery from boot 477's state.
+ *
+ * The caller runs: ATTRIBUTE -> train the link -> UNBLANK. */
+enum rb_strprog_phase {
+    RB_STRPROG_PHASE_ATTRIBUTE = 0,
+    RB_STRPROG_PHASE_UNBLANK   = 1
+};
+
+/* The built plan. The two wait points are RETURNED rather than hardcoded as
+ * indexes into the list: they differ per phase, and a constant naming a
+ * position in a list that someone will reorder is exactly the kind that
+ * drifts silently. -1 means "this phase has no such wait". */
+struct rb_strprog_plan {
+    struct rb_strprog_write w[RB_STRPROG_MAX_WRITES];
+    uint32_t n;
+    int wait_off_idx;   /* after this write, wait for STATUS == 0 */
+    int wait_on_idx;    /* after this write, read STATUS back     */
+};
 
 static inline uint32_t rb_strprog_shift(uint32_t mask)
 {
@@ -140,15 +165,15 @@ static inline uint32_t rb_strprog_field(uint32_t mask, uint32_t v)
     return (v << rb_strprog_shift(mask)) & mask;
 }
 
-/* Build the write list for one instance. Returns RB_STRPROG_OK and sets *n,
- * or a refusal code with *n = 0 - a refused build never leaves a partial
- * list, because a partially applied stream write is worse than none.
+/* Build one phase's write list. Returns RB_STRPROG_OK, or a refusal code with
+ * plan->n = 0 - a refused build never leaves a partial list, because a
+ * partially applied stream write is worse than none.
  *
- * `msa_mismatch` is rb_strenc_msa_mismatch()'s value for PIPE 0 in THIS
- * boot's sample: the derivation checked against the live panel. Zero is the
- * licence to write. `derive_rc` is rb_strenc_derive_msa()'s code for the
- * TARGET pipe, which is a different question - the panel says the arithmetic
- * is right, the target pipe says it had a raster to apply it to.
+ * `msa_mismatch` is rb_strenc_msa_mismatch() for PIPE 0 in THIS boot's
+ * sample: the derivation checked against the live panel. Zero is the licence
+ * to write. `derive_rc` is rb_strenc_derive_msa()'s code for the TARGET pipe,
+ * which is a different question - the panel says the arithmetic is right, the
+ * target pipe says it had a raster to apply it to.
  */
 static inline int rb_strprog_build(uint32_t inst,
                                    uint32_t tg_inst,
@@ -156,16 +181,19 @@ static inline int rb_strprog_build(uint32_t inst,
                                    uint32_t msa_mismatch,
                                    int derive_rc,
                                    uint32_t m_vid,
-                                   struct rb_strprog_write *w,
-                                   uint32_t max,
-                                   uint32_t *n)
+                                   enum rb_strprog_phase phase,
+                                   struct rb_strprog_plan *plan)
 {
     uint32_t c = 0;
     const uint32_t base = inst * RB_STRENC_INST_STRIDE;
 
-    if (n) { *n = 0; }
-    if (!msa || !w || !n || max < RB_STRPROG_MAX_WRITES) {
-        return RB_STRPROG_E_ARGS;
+    if (!msa || !plan) { return RB_STRPROG_E_ARGS; }
+    plan->n = 0;
+    plan->wait_off_idx = -1;
+    plan->wait_on_idx = -1;
+    if (phase != RB_STRPROG_PHASE_ATTRIBUTE &&
+        phase != RB_STRPROG_PHASE_UNBLANK) {
+        return RB_STRPROG_E_PHASE;
     }
     /* DIG0 is the panel's live working DP stream - the control every
      * experiment on this line is measured against. Refused BY NAME here, and
@@ -175,7 +203,7 @@ static inline int rb_strprog_build(uint32_t inst,
     /* OTG0 drives the panel. Connecting another front end to it is how a
      * working desktop gets taken down by a write meant for a dark port. */
     if (tg_inst == 0u) { return RB_STRPROG_E_OTG0; }
-    if (tg_inst > (RB_STRPROG_M_DIG_SOURCE_SEL >> 0)) { return RB_STRPROG_E_OTG; }
+    if (tg_inst > RB_STRPROG_M_DIG_SOURCE_SEL) { return RB_STRPROG_E_OTG; }
 
     if (msa_mismatch != 0u) { return RB_STRPROG_E_MSA; }
     if (derive_rc != (int)RB_STRENC_DERIVE_OK) { return RB_STRPROG_E_DERIVE; }
@@ -183,104 +211,117 @@ static inline int rb_strprog_build(uint32_t inst,
 
 #define RB_STRPROG_ADD(reg, msk, val, whl, dly, txt)                        \
     do {                                                                    \
-        if (c >= max) { *n = 0; return RB_STRPROG_E_ARGS; }                 \
-        w[c].dw = (reg) + base; w[c].mask = (msk); w[c].value = (val);      \
-        w[c].whole = (whl); w[c].delay_us = (dly); w[c].what = (txt); c++;  \
+        if (c >= RB_STRPROG_MAX_WRITES) { plan->n = 0;                      \
+            return RB_STRPROG_E_ARGS; }                                     \
+        plan->w[c].dw = (reg) + base; plan->w[c].mask = (msk);              \
+        plan->w[c].value = (val); plan->w[c].whole = (whl);                 \
+        plan->w[c].delay_us = (dly); plan->w[c].what = (txt); c++;          \
     } while (0)
 
-    /* --- 0. enc1_dig_connect_to_otg (dcn10_stream_encoder.c:1497).
-     * A PLAIN INDEX, not the one-hot mask the BE-to-FE mux uses. Never
-     * written by this project before 305. */
-    RB_STRPROG_ADD(RB_STRENC_DW_DIG_FE_CNTL, RB_STRPROG_M_DIG_SOURCE_SEL,
-                   rb_strprog_field(RB_STRPROG_M_DIG_SOURCE_SEL, tg_inst),
-                   0u, 0u, "DIG_FE_CNTL.DIG_SOURCE_SELECT");
+    if (phase == RB_STRPROG_PHASE_ATTRIBUTE) {
+        /* enc1_dig_connect_to_otg (dcn10_stream_encoder.c:1497). A PLAIN
+         * INDEX, not the one-hot mask the BE-to-FE mux uses. Never written by
+         * this project before 305. */
+        RB_STRPROG_ADD(RB_STRENC_DW_DIG_FE_CNTL, RB_STRPROG_M_DIG_SOURCE_SEL,
+                       rb_strprog_field(RB_STRPROG_M_DIG_SOURCE_SEL, tg_inst),
+                       0u, 0u, "DIG_FE_CNTL.DIG_SOURCE_SELECT");
 
-    /* --- 1. enc1_stream_encoder_dp_set_stream_attribute
-     * (dcn10_stream_encoder.c:245). Only the RGB444/8bpc/sRGB path; every
-     * YCbCr and VSC-SDP branch upstream takes is unreachable here because
-     * the three constants are the panel's own measured values. */
-    RB_STRPROG_ADD(RB_STRENC_DW_PIXEL_FORMAT,
-                   RB_STRPROG_M_PIXEL_ENCODING | RB_STRPROG_M_COMPONENT_DEPTH,
-                   rb_strprog_field(RB_STRPROG_M_PIXEL_ENCODING,
-                                    RB_STRPROG_PIXEL_ENCODING_RGB444) |
-                   rb_strprog_field(RB_STRPROG_M_COMPONENT_DEPTH,
-                                    RB_STRPROG_COMPONENT_DEPTH_8BPC),
-                   0u, 0u, "DP_PIXEL_FORMAT RGB444 8bpc");
-    /* REG_SET: upstream zeroes the rest of this register (:432). */
-    RB_STRPROG_ADD(RB_STRENC_DW_MSA_COLORIM, RB_STRPROG_M_MSA_MISC0,
-                   rb_strprog_field(RB_STRPROG_M_MSA_MISC0,
-                                    RB_STRPROG_MSA_MISC0_8BPC_SRGB),
-                   1u, 0u, "DP_MSA_COLORIMETRY MISC0 8bpc sRGB");
-    RB_STRPROG_ADD(RB_STRENC_DW_MSA_MISC, RB_STRPROG_M_MSA_MISC_CLR,
-                   0u, 0u, 0u, "DP_MSA_MISC1 bits 6,7 clear");
-    RB_STRPROG_ADD(RB_STRENC_DW_MSA_PARAM1, 0xffffffffu, msa->param1,
-                   1u, 0u, "DP_MSA_TIMING_PARAM1 HTOTAL/VTOTAL");
-    RB_STRPROG_ADD(RB_STRENC_DW_MSA_PARAM2, 0xffffffffu, msa->param2,
-                   1u, 0u, "DP_MSA_TIMING_PARAM2 HSTART/VSTART");
-    RB_STRPROG_ADD(RB_STRENC_DW_MSA_PARAM3, 0xffffffffu, msa->param3,
-                   1u, 0u, "DP_MSA_TIMING_PARAM3 sync widths/polarities");
-    RB_STRPROG_ADD(RB_STRENC_DW_MSA_PARAM4, 0xffffffffu, msa->param4,
-                   1u, 0u, "DP_MSA_TIMING_PARAM4 HWIDTH/VHEIGHT");
-    /* enc2's one extra write (dcn20_stream_encoder.c:577). SST, single
-     * stream, no splitting - so 0, and it is written rather than left alone
-     * because "already 0" and "not programmed" are the same word. */
-    RB_STRPROG_ADD(RB_STRENC_DW_SEC_FRAMING4, RB_STRPROG_M_SDP_SPLITTING,
-                   0u, 0u, 0u, "DP_SEC_FRAMING4.DP_SST_SDP_SPLITTING 0");
+        /* enc1_stream_encoder_dp_set_stream_attribute
+         * (dcn10_stream_encoder.c:245). Only the RGB444/8bpc/sRGB path; every
+         * YCbCr and VSC-SDP branch upstream takes is unreachable here because
+         * the three constants are the panel's own measured values. */
+        RB_STRPROG_ADD(RB_STRENC_DW_PIXEL_FORMAT,
+                       RB_STRPROG_M_PIXEL_ENCODING | RB_STRPROG_M_COMPONENT_DEPTH,
+                       rb_strprog_field(RB_STRPROG_M_PIXEL_ENCODING,
+                                        RB_STRPROG_PIXEL_ENCODING_RGB444) |
+                       rb_strprog_field(RB_STRPROG_M_COMPONENT_DEPTH,
+                                        RB_STRPROG_COMPONENT_DEPTH_8BPC),
+                       0u, 0u, "DP_PIXEL_FORMAT RGB444 8bpc");
+        /* REG_SET: upstream zeroes the rest of this register (:432). */
+        RB_STRPROG_ADD(RB_STRENC_DW_MSA_COLORIM, RB_STRPROG_M_MSA_MISC0,
+                       rb_strprog_field(RB_STRPROG_M_MSA_MISC0,
+                                        RB_STRPROG_MSA_MISC0_8BPC_SRGB),
+                       1u, 0u, "DP_MSA_COLORIMETRY MISC0 8bpc sRGB");
+        RB_STRPROG_ADD(RB_STRENC_DW_MSA_MISC, RB_STRPROG_M_MSA_MISC_CLR,
+                       0u, 0u, 0u, "DP_MSA_MISC1 bits 6,7 clear");
+        RB_STRPROG_ADD(RB_STRENC_DW_MSA_PARAM1, 0xffffffffu, msa->param1,
+                       1u, 0u, "DP_MSA_TIMING_PARAM1 HTOTAL/VTOTAL");
+        RB_STRPROG_ADD(RB_STRENC_DW_MSA_PARAM2, 0xffffffffu, msa->param2,
+                       1u, 0u, "DP_MSA_TIMING_PARAM2 HSTART/VSTART");
+        RB_STRPROG_ADD(RB_STRENC_DW_MSA_PARAM3, 0xffffffffu, msa->param3,
+                       1u, 0u, "DP_MSA_TIMING_PARAM3 sync widths/polarities");
+        RB_STRPROG_ADD(RB_STRENC_DW_MSA_PARAM4, 0xffffffffu, msa->param4,
+                       1u, 0u, "DP_MSA_TIMING_PARAM4 HWIDTH/VHEIGHT");
+        /* enc2's one extra write (dcn20_stream_encoder.c:577). SST, single
+         * stream, no splitting - written rather than left alone because
+         * "already 0" and "not programmed" are the same word. */
+        RB_STRPROG_ADD(RB_STRENC_DW_SEC_FRAMING4, RB_STRPROG_M_SDP_SPLITTING,
+                       0u, 0u, 0u, "DP_SEC_FRAMING4.DP_SST_SDP_SPLITTING 0");
+        /* NOT upstream's: leave the stream DISABLED so the link can be
+         * trained. Boot 477's refusal 66 is the reason this write exists. */
+        RB_STRPROG_ADD(RB_STRENC_DW_VID_STREAM_CNTL, RB_STRPROG_M_STREAM_ENABLE,
+                       0u, 0u, 0u,
+                       "DP_VID_STREAM_ENABLE 0 - leave it trainable");
+        plan->wait_off_idx = (int)(c - 1u);
+    } else {
+        /* enc2_stream_encoder_dp_unblank (dcn20_stream_encoder.c:468).
+         * Upstream's own first act is to make sure the stream is off and WAIT
+         * for STATUS to follow, before resetting the steer FIFO. */
+        RB_STRPROG_ADD(RB_STRENC_DW_VID_STREAM_CNTL, RB_STRPROG_M_STREAM_ENABLE,
+                       0u, 0u, 0u, "DP_VID_STREAM_ENABLE 0 (then wait STATUS 0)");
+        plan->wait_off_idx = (int)(c - 1u);
 
-    /* --- 2. enc2_stream_encoder_dp_unblank (dcn20_stream_encoder.c:468).
-     * M/N first, with GEN_EN dropped while the initial values go in: the
-     * auto-measurement needs one full 0x8000 symbol cycle to kick in, which
-     * is why M is PRIMED and not programmed. The panel's own M drifted
-     * 0xa2a6 -> 0xa2a4 -> 0xa2a7 across boots 472-474, which is what
-     * GEN_EN does and the reason none of those values may be copied. */
-    RB_STRPROG_ADD(RB_STRENC_DW_VID_TIMING, RB_STRPROG_M_VID_M_N_GEN_EN,
-                   0u, 0u, 0u, "DP_VID_TIMING.M_N_GEN_EN 0");
-    RB_STRPROG_ADD(RB_STRENC_DW_VID_N, RB_STRPROG_M_VID_N,
-                   rb_strprog_field(RB_STRPROG_M_VID_N, RB_STRENC_N_VID),
-                   0u, 0u, "DP_VID_N 0x8000");
-    RB_STRPROG_ADD(RB_STRENC_DW_VID_M, RB_STRPROG_M_VID_M,
-                   rb_strprog_field(RB_STRPROG_M_VID_M, m_vid),
-                   0u, 0u, "DP_VID_M primed");
-    /* n_multiply is 0: it is 1 only for YCbCr420 or two-pixel-per-container
-     * modes (is_two_pixels_per_containter, :459), and this is RGB444 SST. */
-    RB_STRPROG_ADD(RB_STRENC_DW_VID_TIMING,
-                   RB_STRPROG_M_VID_M_N_GEN_EN | RB_STRPROG_M_VID_N_MUL,
-                   rb_strprog_field(RB_STRPROG_M_VID_M_N_GEN_EN, 1u),
-                   0u, 0u, "DP_VID_TIMING.M_N_GEN_EN 1, N_MUL 0");
+        /* M/N with GEN_EN dropped while the initial values go in: the auto
+         * measurement needs one full 0x8000 symbol cycle to kick in, which is
+         * why M is PRIMED and not programmed. The panel's own M drifted
+         * 0xa2a6 -> 0xa2a4 -> 0xa2a7 across boots 472-474, which is what
+         * GEN_EN does and the reason none of those values may be copied. */
+        RB_STRPROG_ADD(RB_STRENC_DW_VID_TIMING, RB_STRPROG_M_VID_M_N_GEN_EN,
+                       0u, 0u, 0u, "DP_VID_TIMING.M_N_GEN_EN 0");
+        RB_STRPROG_ADD(RB_STRENC_DW_VID_N, RB_STRPROG_M_VID_N,
+                       rb_strprog_field(RB_STRPROG_M_VID_N, RB_STRENC_N_VID),
+                       0u, 0u, "DP_VID_N 0x8000");
+        RB_STRPROG_ADD(RB_STRENC_DW_VID_M, RB_STRPROG_M_VID_M,
+                       rb_strprog_field(RB_STRPROG_M_VID_M, m_vid),
+                       0u, 0u, "DP_VID_M primed");
+        /* n_multiply is 0: it is 1 only for YCbCr420 or two-pixel-per-
+         * container modes (is_two_pixels_per_containter, :459), and this is
+         * RGB444 SST. */
+        RB_STRPROG_ADD(RB_STRENC_DW_VID_TIMING,
+                       RB_STRPROG_M_VID_M_N_GEN_EN | RB_STRPROG_M_VID_N_MUL,
+                       rb_strprog_field(RB_STRPROG_M_VID_M_N_GEN_EN, 1u),
+                       0u, 0u, "DP_VID_TIMING.M_N_GEN_EN 1, N_MUL 0");
 
-    /* Index 13: disable, then the caller WAITS ON BIT 16, not bit 0. */
-    RB_STRPROG_ADD(RB_STRENC_DW_VID_STREAM_CNTL, RB_STRPROG_M_STREAM_ENABLE,
-                   0u, 0u, 0u, "DP_VID_STREAM_ENABLE 0 (then wait STATUS 0)");
+        /* DIG_START 1 then 0 resets the FIFO (:519-525). */
+        RB_STRPROG_ADD(RB_STRENC_DW_DIG_FE_CNTL, RB_STRPROG_M_DIG_START,
+                       rb_strprog_field(RB_STRPROG_M_DIG_START, 1u),
+                       0u, 1u, "DIG_FE_CNTL.DIG_START 1");
+        RB_STRPROG_ADD(RB_STRENC_DW_DIG_FE_CNTL, RB_STRPROG_M_DIG_START,
+                       0u, 0u, 0u, "DIG_FE_CNTL.DIG_START 0");
 
-    /* DIG_START 1 then 0 resets the FIFO (:519-525). */
-    RB_STRPROG_ADD(RB_STRENC_DW_DIG_FE_CNTL, RB_STRPROG_M_DIG_START,
-                   rb_strprog_field(RB_STRPROG_M_DIG_START, 1u),
-                   0u, 1u, "DIG_FE_CNTL.DIG_START 1");
-    RB_STRPROG_ADD(RB_STRENC_DW_DIG_FE_CNTL, RB_STRPROG_M_DIG_START,
-                   0u, 0u, 0u, "DIG_FE_CNTL.DIG_START 0");
+        /* The steer FIFO pulse (:529-534). THIS IS WHAT CLEARS DIG2'S HELD
+         * RESET, by construction rather than as a special case: boots 472,
+         * 473 and 474 all read DP_STEER_FIFO_RESET set on DIG2 and clear on
+         * the other four, and boot 477 confirmed the pulse ends it at 0. */
+        RB_STRPROG_ADD(RB_STRENC_DW_STEER_FIFO, RB_STRPROG_M_STEER_RESET,
+                       rb_strprog_field(RB_STRPROG_M_STEER_RESET, 1u),
+                       0u, 10u, "DP_STEER_FIFO_RESET 1");
+        RB_STRPROG_ADD(RB_STRENC_DW_STEER_FIFO, RB_STRPROG_M_STEER_RESET,
+                       0u, 0u, 100u, "DP_STEER_FIFO_RESET 0");
 
-    /* The steer FIFO pulse (:529-534). THIS IS WHAT CLEARS DIG2'S HELD
-     * RESET, by construction rather than as a special case: boot 472, 473 and
-     * 474 all read DP_STEER_FIFO_RESET set on DIG2 and clear on the other
-     * four, and the unblank's own pulse ends with it 0. */
-    RB_STRPROG_ADD(RB_STRENC_DW_STEER_FIFO, RB_STRPROG_M_STEER_RESET,
-                   rb_strprog_field(RB_STRPROG_M_STEER_RESET, 1u),
-                   0u, 10u, "DP_STEER_FIFO_RESET 1");
-    RB_STRPROG_ADD(RB_STRENC_DW_STEER_FIFO, RB_STRPROG_M_STEER_RESET,
-                   0u, 0u, 100u, "DP_STEER_FIFO_RESET 0");
-
-    /* Index 18: enable, then the caller READS BIT 16 BACK. Nothing here
-     * programs DP_VID_STREAM_DIS_DEFER: DIG2 reads 0 against 2 everywhere
-     * else in three boots, but dcn20_stream_encoder.c:541 says the register
-     * "has no effect on enable transition" and upstream stopped writing it,
-     * so it is retired as a candidate and must be left alone. */
-    RB_STRPROG_ADD(RB_STRENC_DW_VID_STREAM_CNTL, RB_STRPROG_M_STREAM_ENABLE,
-                   rb_strprog_field(RB_STRPROG_M_STREAM_ENABLE, 1u),
-                   0u, 0u, "DP_VID_STREAM_ENABLE 1 (then read STATUS)");
+        /* Nothing here programs DP_VID_STREAM_DIS_DEFER: DIG2 reads 0 against
+         * 2 everywhere else in three boots, but dcn20_stream_encoder.c:541
+         * says the register "has no effect on enable transition" and upstream
+         * stopped writing it, so it is retired and left alone. */
+        RB_STRPROG_ADD(RB_STRENC_DW_VID_STREAM_CNTL, RB_STRPROG_M_STREAM_ENABLE,
+                       rb_strprog_field(RB_STRPROG_M_STREAM_ENABLE, 1u),
+                       0u, 0u, "DP_VID_STREAM_ENABLE 1 (then read STATUS)");
+        plan->wait_on_idx = (int)(c - 1u);
+    }
 
 #undef RB_STRPROG_ADD
 
-    *n = c;
+    plan->n = c;
     return RB_STRPROG_OK;
 }
 

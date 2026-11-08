@@ -1710,16 +1710,25 @@ IOReturn RBAMDFramebuffer::setProperties(OSObject *props)
         if (sk) { strmCallPixKhz = sk->unsigned32BitValue(); }
         OSNumber *sl = OSDynamicCast(OSNumber, dict->getObject("RBFBStrmLinkRate"));
         if (sl) { strmCallLink = sl->unsigned32BitValue(); }
+        /* THE PHASE. 0 = ATTRIBUTE (configure, leave the stream disabled so
+         * the link can be trained), 1 = UNBLANK (turn it on). It defaults to
+         * ATTRIBUTE because that is the half that cannot lock the trainer
+         * out, and it is read here with the other dials so all five are in
+         * place before the trigger (rule 34). */
+        OSNumber *sp = OSDynamicCast(OSNumber, dict->getObject("RBFBStrmPhase"));
+        if (sp) { strmCallPhase = sp->unsigned32BitValue(); }
 
         OSNumber *sg = OSDynamicCast(OSNumber, dict->getObject("RBFBStrmGo"));
         if (sg) {
             const uint32_t rc = strmProgram(strmCallInst, strmCallOtg,
-                                            strmCallPixKhz, strmCallLink);
-            LOG("RBFBStrmGo inst %u otg %u %u kHz rate %u -> refuse %u; "
+                                            strmCallPixKhz, strmCallLink,
+                                            strmCallPhase);
+            LOG("RBFBStrmGo phase %u inst %u otg %u %u kHz rate %u -> refuse %u; "
                 "writes %u applied %u changed %#x mvid %u, cntl %#x->%#x, "
                 "statusOff %u verdict %d ran %u, msa %#x %#x %#x %#x, "
                 "steer %#x fe %#x",
-                strmCallInst, strmCallOtg, strmCallPixKhz, strmCallLink, rc,
+                strmCallPhase, strmCallInst, strmCallOtg, strmCallPixKhz,
+                strmCallLink, rc,
                 strmWrites, strmApplied, strmChangedMask, strmMVid,
                 strmCntlBefore, strmCntlAfter, strmStatusOff, strmVerdict,
                 strmRan, strmMsaAfter[0], strmMsaAfter[1], strmMsaAfter[2],
@@ -1731,7 +1740,7 @@ IOReturn RBAMDFramebuffer::setProperties(OSObject *props)
         /* A dial named with no trigger is the setup for the call that
          * follows, so it publishes and succeeds rather than falling through
          * to an unrelated handler. */
-        if (si || so || sk || sl) { strmPublish(); return kIOReturnSuccess; }
+        if (si || so || sk || sl || sp) { strmPublish(); return kIOReturnSuccess; }
     }
 
     /* 2A0: the frame-time instrument's own dial, ahead of RBFBPubMs because

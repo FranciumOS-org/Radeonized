@@ -28,6 +28,7 @@
 #include "rb_dpalt.h"
 #include "rb_dpcspipe.h"
 #include "rb_strenc.h"
+#include "rb_strprog.h"
 #include "rb_dpdto.h"
 #include "rb_drr.h"
 #include "rb_dcn_deny.h"
@@ -96,6 +97,7 @@ bool RBAMDFramebuffer::hubpSetup(void)
     strmCalls = 0; strmRefuse = 0; strmRan = 0;
     strmWrites = 0; strmApplied = 0; strmChangedMask = 0;
     strmInstUsed = 0; strmOtgUsed = 0; strmPixKhzUsed = 0; strmLinkUsed = 0;
+    strmPhaseUsed = 0;
     strmMVid = 0; strmCntlBefore = 0; strmCntlAfter = 0; strmStatusOff = 0;
     strmVerdict = 0; strmSteerAfter = 0; strmFeAfter = 0;
     for (unsigned k = 0; k < 4; k++) { strmMsaAfter[k] = 0; }
@@ -108,6 +110,10 @@ bool RBAMDFramebuffer::hubpSetup(void)
     strmCallOtg    = 1u;
     strmCallPixKhz = 148500u;
     strmCallLink   = RB_STRENC_LINK_RATE_HBR2;
+    /* The PHASE defaults to ATTRIBUTE: the half that leaves the stream
+     * disabled, so a `go` with no phase named cannot lock the link trainer
+     * out the way boot 477's single list did. */
+    strmCallPhase  = (uint32_t)RB_STRPROG_PHASE_ATTRIBUTE;
     dtoReady = false;
     dtoExpectedHz = 0;
     dtoRefSrc = RB_DPDTO_REF_SRC_NONE;
