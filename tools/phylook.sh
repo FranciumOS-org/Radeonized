@@ -15,6 +15,32 @@ IOREG="env -u DYLD_INSERT_LIBRARIES ioreg -rl -c RBAMDFramebuffer"
 
 get() { $IOREG 2>/dev/null | grep "\"$1\" = " | head -1 | sed 's/.*= //'; }
 
+# THE KEXT PUBLISHES THESE AS NUMBERS, SO IOREG PRINTS THEM IN DECIMAL
+# (rule 26's NVRAM clause, one level over: the reader is an instrument too).
+# A 32-bit register word read as decimal is unreadable and invites a misread
+# of exactly the kind 301 spent five boots on, so the conversion happens here
+# rather than in the eye. An empty or non-numeric value prints as ABSENT, not
+# as 0 - a missing key read as a number is rule 14's -1/0xffffffff trap.
+hexof() {
+  case "$1" in
+    ''|*[!0-9]*) printf 'ABSENT (key not published - NOT a zero word)' ; return ;;
+  esac
+  printf '0x%08x' "$1"
+}
+
+# Decode a word against a mask list, printing only the bits that are SET.
+# Takes: word, then name=mask pairs. Prints nothing when no listed bit is set,
+# which is itself the reading on a dark instance.
+dec() {
+  W=$1; shift
+  OUT=''
+  for P in "$@"; do
+    N=${P%%=*}; M=${P#*=}
+    if [ $(( W & M )) -ne 0 ]; then OUT="$OUT $N"; fi
+  done
+  if [ -n "$OUT" ]; then printf '          set:%s\n' "$OUT"; fi
+}
+
 ARMED=$(get RBFBPhyArmed)
 READY=$(get RBFBPhyReady)
 SWEEP=$(get RBFBPhySweep)
@@ -70,15 +96,48 @@ for I in 0 1 2 3 4; do
     2) VS="2 = CLOCKLESS (firmware loaded, detector says no clock)" ;;
     3) VS="3 = NO_SRAM (clock detected, firmware NOT loaded)" ;;
     4) VS="4 = ALIVE (reference clock detected AND SRAM init done)" ;;
+    5) VS="5 = NO_LICENCE (the clock detector is OFF - there is nothing to
+                            classify, and this is the reading on every
+                            instance in boot 479, the panel included)" ;;
     *) VS="$V = unknown code" ;;
   esac
   printf "  PHY%s  %s\n" "$I" "$TAG"
   printf "        verdict             %s\n" "$VS"
-  printf "        RDPCSTX_CNTL        %s\n" "$(get RBFBPhy${I}Cntl)"
-  printf "        RDPCSTX_CLOCK_CNTL  %s\n" "$(get RBFBPhy${I}ClockCntl)"
-  printf "        RDPCSTX_INTERRUPT   %s\n" "$(get RBFBPhy${I}Intr)"
-  printf "        RDPCS_TX_SRAM_CNTL  %s\n" "$(get RBFBPhy${I}SramCntl)"
-  printf "        RDPCSTX_PHY_CNTL0   %s\n" "$(get RBFBPhy${I}PhyCntl0)"
+  if [ "$I" = "0" ] && [ "$V" != "5" ] && [ "$CV" != "1" ]; then
+    printf "        *** THE PANEL IS LIVE AND THIS VERDICT IS NOT 5. The\n"
+    printf "        loaded kext PREDATES the licence gate, so it classified\n"
+    printf "        on an input whose licence had failed - the defect boot\n"
+    printf "        479 found, not a reading about the panel. Read the raw\n"
+    printf "        words below instead. ***\n"
+  fi
+  WC=$(get RBFBPhy${I}Cntl);      WK=$(get RBFBPhy${I}ClockCntl)
+  WI=$(get RBFBPhy${I}Intr);      WS=$(get RBFBPhy${I}SramCntl)
+  WP=$(get RBFBPhy${I}PhyCntl0)
+
+  printf "        RDPCSTX_CNTL        %s\n" "$(hexof "$WC")"
+  case "$WC" in ''|*[!0-9]*) ;; *)
+    dec "$WC" A:PLL_UPDATE_PENDING=1024 A:DPALT_BLOCK_STATUS=1073741824 \
+             D:TX_FIFO_LANE_EN=61440 D:TX_FIFO_EN=33554432 \
+             D:TX_FIFO_START=67108864 D:TX_SOFT_RESET=2147483648 ;;
+  esac
+  printf "        RDPCSTX_CLOCK_CNTL  %s\n" "$(hexof "$WK")"
+  case "$WK" in ''|*[!0-9]*) ;; *)
+    dec "$WK" A:TX_CLOCK_ON=1024 A:SRAMCLK_CLOCK_ON=16384 \
+             A:OCLACLK_CLOCK_ON=4194304 D:EXT_REFCLK_EN=1 \
+             D:TX0_3_CLK_EN=240 D:TX_CLK_EN=512 D:SRAMCLK_EN=8192 \
+             D:OCLACLK_EN=2097152 ;;
+  esac
+  printf "        RDPCSTX_INTERRUPT   %s\n" "$(hexof "$WI")"
+  case "$WI" in ''|*[!0-9]*) ;; *)
+    dec "$WI" A:TX_FIFO_ERROR_STICKY=240 A:REG_FIFO_OVERFLOW_STICKY=1 ;;
+  esac
+  printf "        RDPCS_TX_SRAM_CNTL  %s\n" "$(hexof "$WS")"
+  printf "        RDPCSTX_PHY_CNTL0   %s\n" "$(hexof "$WP")"
+  case "$WP" in ''|*[!0-9]*) ;; *)
+    dec "$WP" A:REF_CLKDET_RESULT=33554432 A:SRAM_INIT_DONE=268435456 \
+             A:SRAM_EXT_LD_DONE=536870912 A:RTUNE_ACK=262144 \
+             D:REF_CLKDET_EN=16777216 D:PHY_RESET=1 D:TEST_POWERDOWN=8 ;;
+  esac
   if [ "$CV" = "1" ]; then
     printf "        clkdet result is BELIEVABLE (the detector is enabled)\n"
   else
@@ -128,4 +187,16 @@ WHAT A PHY2 OF "ALIVE" WOULD AND WOULD NOT SAY: that the PHY sees a clock and
 has its firmware. NOT that it is driving our link, and not that the sink will
 see symbols. DPCD 0x202 over AUX2 is the only thing that answers that, and it
 has read 0x00 in six boots (459, 461, 464, 468, 469, 478).
+
+A:  is an ANSWERED bit - the hardware put it there.
+D:  is a DRIVEN bit - it says ONLY that software wrote it.
+A bit absent from a "set:" line is clear. A register whose whole line is
+missing had no listed bit set, which on a dark instance is the reading.
+
+BOOT 479 RECORDED A LIMIT OF ITS OWN DATA, found by the break-it sweep: in
+that sample A:TX_CLOCK_ON and D:TX_CLK_EN are set together on the panel and
+clear together on PHY2, and so are D:TX_FIFO_EN and D:TX_FIFO_LANE_EN. So
+those words pin the FINDING - the panel's PHY is out of reset with its clock
+and FIFO up and PHY2's is not - but they do NOT pin which bit of each pair
+carries it. Separating them needs a boot where one is set without the other.
 NOTE

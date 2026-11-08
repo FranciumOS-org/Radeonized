@@ -147,27 +147,38 @@ int phy_tests(void)
     }
 
     /* ---- the verdict, built from ANSWERED bits alone ---- */
+    /* THE LICENCE GATE. An all-zero instance has the detector DISABLED, so
+     * it is NO_LICENCE, not DEAD. Boot 479 is why: the old function called
+     * the panel's own live PHY CLOCKLESS off a bit nobody had enabled. */
     memset(in, 0, sizeof(in));
+    if (rb_dpcsphy_verdict(&in[0]) != RB_DPCSPHY_V_NO_LICENCE) {
+        printf("FAIL phy: a disabled detector did not refuse the verdict\n");
+        bad++;
+    }
+    in[0].w[RB_DPCSPHY_R_PHY_CNTL0] = RB_DPCSPHY_D_PHY_REF_CLKDET_EN;
     if (rb_dpcsphy_verdict(&in[0]) != RB_DPCSPHY_V_DEAD) {
-        printf("FAIL phy: an all-zero instance is not DEAD\n");
+        printf("FAIL phy: detector on with nothing answering is not DEAD\n");
         bad++;
     }
     if (rb_dpcsphy_verdict(0) != RB_DPCSPHY_V_UNKNOWN) {
         printf("FAIL phy: a NULL instance is not UNKNOWN\n");
         bad++;
     }
-    in[0].w[RB_DPCSPHY_R_PHY_CNTL0] = RB_DPCSPHY_A_REF_CLKDET_RESULT |
+    in[0].w[RB_DPCSPHY_R_PHY_CNTL0] = RB_DPCSPHY_D_PHY_REF_CLKDET_EN |
+                                      RB_DPCSPHY_A_REF_CLKDET_RESULT |
                                       RB_DPCSPHY_A_SRAM_INIT_DONE;
     if (rb_dpcsphy_verdict(&in[0]) != RB_DPCSPHY_V_ALIVE) {
         printf("FAIL phy: clock detected plus SRAM loaded is not ALIVE\n");
         bad++;
     }
-    in[0].w[RB_DPCSPHY_R_PHY_CNTL0] = RB_DPCSPHY_A_SRAM_INIT_DONE;
+    in[0].w[RB_DPCSPHY_R_PHY_CNTL0] = RB_DPCSPHY_D_PHY_REF_CLKDET_EN |
+                                      RB_DPCSPHY_A_SRAM_INIT_DONE;
     if (rb_dpcsphy_verdict(&in[0]) != RB_DPCSPHY_V_CLOCKLESS) {
         printf("FAIL phy: SRAM loaded with no clock is not CLOCKLESS\n");
         bad++;
     }
-    in[0].w[RB_DPCSPHY_R_PHY_CNTL0] = RB_DPCSPHY_A_REF_CLKDET_RESULT;
+    in[0].w[RB_DPCSPHY_R_PHY_CNTL0] = RB_DPCSPHY_D_PHY_REF_CLKDET_EN |
+                                      RB_DPCSPHY_A_REF_CLKDET_RESULT;
     if (rb_dpcsphy_verdict(&in[0]) != RB_DPCSPHY_V_NO_SRAM) {
         printf("FAIL phy: a clock with no SRAM is not NO_SRAM\n");
         bad++;
@@ -192,6 +203,79 @@ int phy_tests(void)
     if (rb_dpcsphy_verdict(&in[0]) != RB_DPCSPHY_V_DEAD) {
         printf("FAIL phy: every DRIVEN bit set moved the verdict - the "
                "instrument is reporting its own input\n");
+        bad++;
+    }
+
+    /* ---- the three bits boot 479 actually answered, with the panel's own
+     * live values and PHY2's as the two cases ---- */
+    memset(in, 0, sizeof(in));
+    in[0].w[RB_DPCSPHY_R_PHY_CNTL0]  = 0xb0100004u;  /* PHY0, boot 479 */
+    in[0].w[RB_DPCSPHY_R_CLOCK_CNTL] = 0x00117ff0u;
+    in[0].w[RB_DPCSPHY_R_CNTL]       = 0x028ff0f0u;
+    in[2].w[RB_DPCSPHY_R_PHY_CNTL0]  = 0x10100605u;  /* PHY2, boot 479 */
+    in[2].w[RB_DPCSPHY_R_CLOCK_CNTL] = 0x001019f0u;
+    in[2].w[RB_DPCSPHY_R_CNTL]       = 0x008f00f0u;
+    if (rb_dpcsphy_in_reset(&in[0]) != 0 ||
+        rb_dpcsphy_tx_clock_on(&in[0]) != 1 ||
+        rb_dpcsphy_tx_fifo_en(&in[0]) != 1) {
+        printf("FAIL phy: the panel's own boot-479 words do not decode as a "
+               "released PHY with its clock and FIFO on\n");
+        bad++;
+    }
+    if (rb_dpcsphy_in_reset(&in[2]) != 1 ||
+        rb_dpcsphy_tx_clock_on(&in[2]) != 0 ||
+        rb_dpcsphy_tx_fifo_en(&in[2]) != 0) {
+        printf("FAIL phy: PHY2's own boot-479 words do not decode as a PHY "
+               "held in reset with no clock and no FIFO\n");
+        bad++;
+    }
+    /* The two must DISAGREE on all three, or the pair proves nothing. */
+    if (rb_dpcsphy_in_reset(&in[0]) == rb_dpcsphy_in_reset(&in[2]) ||
+        rb_dpcsphy_tx_clock_on(&in[0]) == rb_dpcsphy_tx_clock_on(&in[2]) ||
+        rb_dpcsphy_tx_fifo_en(&in[0]) == rb_dpcsphy_tx_fifo_en(&in[2])) {
+        printf("FAIL phy: the panel and PHY2 agree on a bit the finding "
+               "rests on them disagreeing about\n");
+        bad++;
+    }
+    /* BOOT 479'S OWN WORDS CANNOT SEPARATE THESE MASKS FROM THEIR
+     * NEIGHBOURS, and the break-it sweep is what showed it: swapping
+     * TX_CLOCK_ON for the DRIVEN TX_CLK_EN, or TX_FIFO_EN for the per-lane
+     * enables, FIRED NOTHING, because in that sample each pair moves
+     * together on both instances. So the real words pin the FINDING but not
+     * the BIT. These synthetic words pin the bit - each sets exactly one
+     * member of a pair - and without them the accessors could read the wrong
+     * neighbour for ever. */
+    memset(in, 0, sizeof(in));
+    in[0].w[RB_DPCSPHY_R_CLOCK_CNTL] = RB_DPCSPHY_A_TX_CLOCK_ON;
+    in[1].w[RB_DPCSPHY_R_CLOCK_CNTL] = RB_DPCSPHY_D_TX_CLK_EN;
+    if (rb_dpcsphy_tx_clock_on(&in[0]) != 1 ||
+        rb_dpcsphy_tx_clock_on(&in[1]) != 0) {
+        printf("FAIL phy: tx_clock_on does not read TX_CLOCK_ON alone - it "
+               "answers the DRIVEN TX_CLK_EN\n");
+        bad++;
+    }
+    memset(in, 0, sizeof(in));
+    in[0].w[RB_DPCSPHY_R_CNTL] = RB_DPCSPHY_D_TX_FIFO_EN;
+    in[1].w[RB_DPCSPHY_R_CNTL] = RB_DPCSPHY_D_TX_FIFO_LANE_EN;
+    if (rb_dpcsphy_tx_fifo_en(&in[0]) != 1 ||
+        rb_dpcsphy_tx_fifo_en(&in[1]) != 0) {
+        printf("FAIL phy: tx_fifo_en does not read TX_FIFO_EN alone - it "
+               "answers the per-lane enables\n");
+        bad++;
+    }
+    memset(in, 0, sizeof(in));
+    in[0].w[RB_DPCSPHY_R_PHY_CNTL0] = RB_DPCSPHY_D_PHY_RESET;
+    in[1].w[RB_DPCSPHY_R_PHY_CNTL0] = RB_DPCSPHY_D_TEST_POWERDOWN;
+    if (rb_dpcsphy_in_reset(&in[0]) != 1 ||
+        rb_dpcsphy_in_reset(&in[1]) != 0) {
+        printf("FAIL phy: in_reset does not read PHY_RESET alone\n");
+        bad++;
+    }
+
+    if (rb_dpcsphy_in_reset(0) != -1 || rb_dpcsphy_tx_clock_on(0) != -1 ||
+        rb_dpcsphy_tx_fifo_en(0) != -1) {
+        printf("FAIL phy: NULL does not refuse with -1 - a 0 would read as "
+               "'not in reset' (rule 14)\n");
         bad++;
     }
 
