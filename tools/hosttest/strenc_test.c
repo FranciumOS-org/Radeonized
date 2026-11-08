@@ -454,6 +454,258 @@ int strenc_tests(void)
         }
     }
 
+    /* ---- 304: the MSA derivation, against boot 473's own sample ----
+     *
+     * HONESTY NOTE, and it decides what this test may claim. Of the eight
+     * OTG words the derivation consumes, boot 473 measured exactly four:
+     * H_TOTAL 2106, H_BLANK 0x007f07ff, V_TOTAL 1129, V_BLANK 0x0014044c.
+     * The sync widths and the two polarity bits were NOT read; they are
+     * back-derived here FROM the MSA words so the case can run at all.
+     *
+     * So PARAM1, PARAM2 and PARAM4 below are a genuine hardware check -
+     * measured OTG in, measured MSA out. PARAM3 is NOT: its inputs came
+     * from its expected output, and asserting it against that output is
+     * circular (rule 17 - never narrate a substituted value as a hardware
+     * result). PARAM3's hardware check is the in-boot control, which reads
+     * OTG_H_SYNC_A and OTG_V_SYNC_A for real. What this case pins for
+     * PARAM3 is the arithmetic and the field placement, nothing more. */
+    {
+        struct rb_strenc_raster r;
+        struct rb_strenc_msa d;
+        enum rb_strenc_derive rc;
+        /* boot 473, instance 0, measured: */
+        const uint32_t live_param1 = 0x083b046au;
+        const uint32_t live_param2 = 0x007f0014u;
+        const uint32_t live_param4 = 0x07800438u;
+        const uint32_t live_param3 = 0x003c8005u;  /* back-derived inputs */
+
+        r.h_total     = 2106u;          /* measured */
+        r.h_blank     = 0x007f07ffu;    /* measured */
+        r.v_total     = 1129u;          /* measured */
+        r.v_blank     = 0x0014044cu;    /* measured */
+        r.h_sync      = (60u << 16);    /* back-derived from PARAM3 */
+        r.v_sync      = (5u << 16);     /* back-derived from PARAM3 */
+        r.h_sync_cntl = 0u;             /* back-derived: HSYNCPOL 0 */
+        r.v_sync_cntl = 1u;             /* back-derived: VSYNCPOL 1 */
+
+        rc = rb_strenc_derive_msa(&r, &d);
+        if (rc != RB_STRENC_DERIVE_OK) {
+            printf("FAIL strenc: the panel's own raster was refused (%d)\n",
+                   (int)rc);
+            bad++;
+        } else {
+            /* The three that are a real hardware check. */
+            if (d.param1 != live_param1) {
+                printf("FAIL strenc: derived PARAM1 0x%08x != measured "
+                       "0x%08x\n", d.param1, live_param1);
+                bad++;
+            }
+            if (d.param2 != live_param2) {
+                printf("FAIL strenc: derived PARAM2 0x%08x != measured "
+                       "0x%08x - HSTART is H_BLANK_END and VSTART is "
+                       "V_BLANK_END\n", d.param2, live_param2);
+                bad++;
+            }
+            if (d.param4 != live_param4) {
+                printf("FAIL strenc: derived PARAM4 0x%08x != measured "
+                       "0x%08x\n", d.param4, live_param4);
+                bad++;
+            }
+            /* Arithmetic and field placement only - see the note. */
+            if (d.param3 != live_param3) {
+                printf("FAIL strenc: PARAM3 arithmetic 0x%08x != 0x%08x\n",
+                       d.param3, live_param3);
+                bad++;
+            }
+        }
+
+        /* The mismatch mask must be zero on that sample, and must name the
+         * individual word when one is wrong. */
+        {
+            uint32_t live4[4];
+            live4[0] = live_param1; live4[1] = live_param2;
+            live4[2] = live_param3; live4[3] = live_param4;
+            if (rb_strenc_msa_mismatch(&d, live4) != 0u) {
+                printf("FAIL strenc: the mask flagged a word that agrees\n");
+                bad++;
+            }
+            live4[2] ^= 1u;
+            if (rb_strenc_msa_mismatch(&d, live4) != 4u) {
+                printf("FAIL strenc: the mask did not name PARAM3 alone\n");
+                bad++;
+            }
+            live4[2] ^= 1u;
+            live4[0] ^= 1u;
+            if (rb_strenc_msa_mismatch(&d, live4) != 1u) {
+                printf("FAIL strenc: the mask did not name PARAM1 alone\n");
+                bad++;
+            }
+            if (rb_strenc_msa_mismatch(&d, 0) !=
+                    RB_STRENC_MSA_MISMATCH_ARGS) {
+                printf("FAIL strenc: a NULL live word list was not a "
+                       "distinct code\n");
+                bad++;
+            }
+            if (RB_STRENC_MSA_MISMATCH_ARGS <= 0xfu) {
+                printf("FAIL strenc: the args code collides with a real "
+                       "four-bit mismatch mask\n");
+                bad++;
+            }
+        }
+
+        /* The off-by-one must be LOAD-BEARING: an OTG register already
+         * holding the true total must not produce the measured MSA word. */
+        {
+            struct rb_strenc_msa d2;
+            r.h_total = 2107u;
+            if (rb_strenc_derive_msa(&r, &d2) == RB_STRENC_DERIVE_OK &&
+                d2.param1 == live_param1) {
+                printf("FAIL strenc: the +1 is not load-bearing\n");
+                bad++;
+            }
+            r.h_total = 2106u;
+        }
+
+        /* Every refusal reachable, and each its own code. */
+        {
+            struct rb_strenc_msa d2;
+            struct rb_strenc_raster q;
+            if (rb_strenc_derive_msa(0, &d2) != RB_STRENC_DERIVE_NO_ARGS ||
+                rb_strenc_derive_msa(&r, 0) != RB_STRENC_DERIVE_NO_ARGS) {
+                printf("FAIL strenc: NULL args not refused\n");
+                bad++;
+            }
+            q = r; q.h_total = 0u;
+            if (rb_strenc_derive_msa(&q, &d2) != RB_STRENC_DERIVE_TOTAL_ZERO) {
+                printf("FAIL strenc: a zero total was not refused\n");
+                bad++;
+            }
+            q = r; q.v_blank = 0u;
+            if (rb_strenc_derive_msa(&q, &d2) != RB_STRENC_DERIVE_BLANK_ZERO) {
+                printf("FAIL strenc: a zero blank was not refused\n");
+                bad++;
+            }
+            /* END >= START - the wrap that is not a raster. */
+            q = r; q.h_blank = (2047u << 16) | 127u;
+            if (rb_strenc_derive_msa(&q, &d2) != RB_STRENC_DERIVE_BLANK_ORDER) {
+                printf("FAIL strenc: an inverted blank was not refused\n");
+                bad++;
+            }
+            /* active >= total. */
+            q = r; q.h_total = 100u; q.h_blank = (1u << 16) | 2047u;
+            if (rb_strenc_derive_msa(&q, &d2) != RB_STRENC_DERIVE_ACTIVE_OVER) {
+                printf("FAIL strenc: active over total was not refused\n");
+                bad++;
+            }
+            q = r; q.h_sync = 0u;
+            if (rb_strenc_derive_msa(&q, &d2) != RB_STRENC_DERIVE_SYNC_ZERO) {
+                printf("FAIL strenc: a zero sync width was not refused\n");
+                bad++;
+            }
+            /* optc writes START = 0; anything else is not its raster. */
+            q = r; q.v_sync = (5u << 16) | 3u;
+            if (rb_strenc_derive_msa(&q, &d2) !=
+                    RB_STRENC_DERIVE_SYNC_START_SET) {
+                printf("FAIL strenc: a non-zero sync START was not "
+                       "refused\n");
+                bad++;
+            }
+            if (RB_STRENC_DERIVE_OK != 0) {
+                printf("FAIL strenc: OK is not zero\n");
+                bad++;
+            }
+        }
+
+        /* A refused derivation must not have touched the output. */
+        {
+            struct rb_strenc_msa d3;
+            struct rb_strenc_raster q = r;
+            d3.param1 = 0xdeadbeefu; d3.param2 = 0xdeadbeefu;
+            d3.param3 = 0xdeadbeefu; d3.param4 = 0xdeadbeefu;
+            q.h_total = 0u;
+            (void)rb_strenc_derive_msa(&q, &d3);
+            if (d3.param1 != 0xdeadbeefu || d3.param4 != 0xdeadbeefu) {
+                printf("FAIL strenc: a refused derivation wrote output\n");
+                bad++;
+            }
+        }
+
+        /* The polarity bits must be independent and in the right halves. */
+        {
+            struct rb_strenc_msa dh, dv;
+            struct rb_strenc_raster q = r;
+            q.h_sync_cntl = 1u; q.v_sync_cntl = 0u;
+            if (rb_strenc_derive_msa(&q, &dh) != RB_STRENC_DERIVE_OK ||
+                !(dh.param3 & RB_STRENC_MSA_HSYNCPOL) ||
+                (dh.param3 & RB_STRENC_MSA_VSYNCPOL)) {
+                printf("FAIL strenc: HSYNCPOL did not land alone\n");
+                bad++;
+            }
+            q.h_sync_cntl = 0u; q.v_sync_cntl = 1u;
+            if (rb_strenc_derive_msa(&q, &dv) != RB_STRENC_DERIVE_OK ||
+                (dv.param3 & RB_STRENC_MSA_HSYNCPOL) ||
+                !(dv.param3 & RB_STRENC_MSA_VSYNCPOL)) {
+                printf("FAIL strenc: VSYNCPOL did not land alone\n");
+                bad++;
+            }
+            /* Only bit 0 of the CNTL word is the polarity. */
+            q.h_sync_cntl = 0xfffffffeu; q.v_sync_cntl = 0xfffffffeu;
+            if (rb_strenc_derive_msa(&q, &dv) != RB_STRENC_DERIVE_OK ||
+                (dv.param3 & RB_STRENC_MSA_HSYNCPOL) ||
+                (dv.param3 & RB_STRENC_MSA_VSYNCPOL)) {
+                printf("FAIL strenc: a neighbouring CNTL bit leaked into "
+                       "the polarity\n");
+                bad++;
+            }
+        }
+    }
+
+    /* ---- 304: the unblank's M/N ----
+     *
+     * The panel is the control here too, and it is a check on the FORMULA,
+     * not on a value we would write: DP_VID_M_N_GEN_EN is set on instance 0,
+     * so the panel's DP_VID_M is hardware-generated and drifts (0xa2a6 in
+     * boot 472, 0xa2a4 in boot 473). The formula must land near it without
+     * being asserted equal to it. */
+    {
+        uint32_t m;
+        /* The panel: eDP at HBR, pixel clock ~342.0-343.1 MHz. */
+        m = rb_strenc_m_vid(342012u, RB_STRENC_LINK_RATE_HBR);
+        if (m < 41000u || m > 42000u) {
+            printf("FAIL strenc: m_vid %u is nowhere near the panel's live "
+                   "0xa2a4 (41636)\n", m);
+            bad++;
+        }
+        /* The same clock at HBR2 must be half of it, which is what makes
+         * the link rate load-bearing rather than decorative. */
+        if (rb_strenc_m_vid(342012u, RB_STRENC_LINK_RATE_HBR2) !=
+                m / 2u) {
+            printf("FAIL strenc: the link rate does not scale m_vid\n");
+            bad++;
+        }
+        /* The sink: 148500 kHz over HBR2. */
+        if (rb_strenc_m_vid(148500u, RB_STRENC_LINK_RATE_HBR2) != 9011u) {
+            printf("FAIL strenc: m_vid(148500, HBR2) = %u want 9011\n",
+                   rb_strenc_m_vid(148500u, RB_STRENC_LINK_RATE_HBR2));
+            bad++;
+        }
+        /* Refusals: 0 is never a valid M. */
+        if (rb_strenc_m_vid(0u, RB_STRENC_LINK_RATE_HBR2) != 0u ||
+            rb_strenc_m_vid(148500u, 0u) != 0u) {
+            printf("FAIL strenc: m_vid did not refuse a zero input\n");
+            bad++;
+        }
+        /* 64-bit: the numerator passes 2^32 well before the field does. */
+        if (rb_strenc_m_vid(600000u, RB_STRENC_LINK_RATE_HBR2) != 36408u) {
+            printf("FAIL strenc: m_vid overflowed 32 bits\n");
+            bad++;
+        }
+        if (RB_STRENC_N_VID != 0x8000u) {
+            printf("FAIL strenc: N_VID moved off 0x8000\n");
+            bad++;
+        }
+    }
+
     if (!bad) {
         printf("ok strenc: %u instances x %d registers, the base check and "
                "the ENABLE/STATUS split\n",

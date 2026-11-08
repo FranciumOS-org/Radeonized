@@ -554,6 +554,13 @@ private:
     uint32_t           strencActiveH;
     int                strencActiveAgree; /* 1 yes, 0 no, -1 no reference    */
     bool               strencReady;       /* the aperture covered them       */
+    /* 304: the MSA derivation and its control. Pipe 0 is the panel's and is
+     * the control; pipe 1 is the Type-C pipe. */
+    uint32_t           strencOtg[2][8];
+    int                strencDeriveRc[2];
+    uint32_t           strencDerived[2][4];
+    uint32_t           strencMsaMismatch;
+
     uint32_t           hpdStatus[5];   /* RB_HPD_COUNT, last raw words       */
     uint32_t           hpdControl[5];
     bool               hpdReady;       /* the aperture covered the registers */

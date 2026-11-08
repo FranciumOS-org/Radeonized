@@ -207,6 +207,91 @@ PY
     i=$((i + 1))
 done
 
+# ---- 304: the MSA derivation, and the panel as its control ----
+#
+# THE PRODUCT IS PRINTED FIRST AND THE VERDICT IS NEVER RECOMPUTED HERE
+# (2C0's defect). The kext decided it; this reads it.
+echo "=== 304: THE MSA DERIVATION, CHECKED AGAINST THE PANEL"
+echo
+
+MM=$(ioreg -rl -c RBAMDFramebuffer 2>/dev/null |
+     sed -n 's/.*"RBFBStrencMsaMismatch" = \([0-9-]*\).*/\1/p' | head -1)
+
+if [ -z "$MM" ]; then
+    echo "  RBFBStrencMsaMismatch ABSENT."
+    echo
+    echo "  This build does not publish it, or the framebuffer loaded is not"
+    echo "  this one. Check the UUID INSIDE THE COLLECTION before reading"
+    echo "  anything else (rule 15):"
+    echo "    kmutil inspect -B /Library/KernelCollections/AuxiliaryKernelExtensions.kc \\"
+    echo "      --show-kext-uuids | grep -i rembrandt"
+    exit 1
+fi
+
+case "$MM" in
+0)
+    echo "  MISMATCH 0 - THE DERIVATION REPRODUCES THE PANEL BIT FOR BIT."
+    echo
+    echo "  All four MSA words derived from OTG0's eight registers equal"
+    echo "  DIG0's four live words, in one sample. The arithmetic that would"
+    echo "  program DIG2 is correct on hardware that is actually running a DP"
+    echo "  stream - which is the only thing that licenses writing it"
+    echo "  anywhere (rule 47 asked of a write)."
+    ;;
+16)
+    echo "  MISMATCH 16 - THE DERIVATION WAS REFUSED, not disagreed with."
+    echo "  Read RBFBStrencP0DeriveRc for which refusal: 1 no args, 2 total"
+    echo "  zero, 3 blank zero, 4 blank END >= START, 5 active zero,"
+    echo "  6 active >= total, 7 sync width zero, 8 sync START non-zero,"
+    echo "  9 field overflow. 'Could not derive' is NOT 'derived and agreed'."
+    ;;
+*)
+    echo "  MISMATCH $MM - THE DERIVATION DISAGREES WITH THE PANEL."
+    echo
+    echo "  The mask names the word: 1 PARAM1, 2 PARAM2, 4 PARAM3, 8 PARAM4,"
+    echo "  summed. Compare RBFBStrencP0Msa1..4 against RBFBStrenc0R03..R06."
+    echo
+    echo "  BEFORE CONCLUDING THE ADDRESSES ARE WRONG, CHECK THE CONVENTIONS."
+    echo "  Boot 472 refused this way for the off-by-one alone: the OTG"
+    echo "  register holds 'total - 1' and MSA holds the true total. If only"
+    echo "  PARAM3 (bit 2) disagrees, suspect the sync fields specifically -"
+    echo "  the hosttest could never check those against hardware, because"
+    echo "  boot 473 never read the sync registers and their test inputs were"
+    echo "  back-derived from the expected output. THIS BOOT is their first"
+    echo "  real check, so a PARAM3-only mismatch is a genuine finding and"
+    echo "  not a regression."
+    ;;
+esac
+echo
+
+for pi in 0 1; do
+    [ "$pi" = 0 ] && echo "  --- pipe 0 (the panel's, the control)" \
+                  || echo "  --- pipe 1 (Type-C; derived but NOT checkable)"
+    RC=$(ioreg -rl -c RBAMDFramebuffer 2>/dev/null |
+         sed -n "s/.*\"RBFBStrencP${pi}DeriveRc\" = \([0-9-]*\).*/\1/p" | head -1)
+    echo "      DeriveRc ${RC:-ABSENT}  (0 = OK)"
+    for k in 0 1 2 3 4 5 6 7; do
+        V=$(ioreg -rl -c RBAMDFramebuffer 2>/dev/null |
+            sed -n "s/.*\"RBFBStrencP${pi}Otg${k}\" = \([0-9-]*\).*/\1/p" | head -1)
+        [ -z "$V" ] && continue
+        NAME=$(echo "H_TOTAL H_BLANK_START_END H_SYNC_A H_SYNC_A_CNTL V_TOTAL V_BLANK_START_END V_SYNC_A V_SYNC_A_CNTL" | cut -d' ' -f$((k + 1)))
+        printf "      OTG %-20s 0x%08x\n" "$NAME" "$V"
+    done
+    for k in 1 2 3 4; do
+        V=$(ioreg -rl -c RBAMDFramebuffer 2>/dev/null |
+            sed -n "s/.*\"RBFBStrencP${pi}Msa${k}\" = \([0-9-]*\).*/\1/p" | head -1)
+        [ -z "$V" ] && continue
+        printf "      derived MSA_TIMING_PARAM%d  0x%08x\n" "$k" "$V"
+    done
+    echo
+done
+
+echo "  Pipe 1's derivation is printed because it is what a write would use."
+echo "  It has NO control: there is no running stream on DIG2 to compare it"
+echo "  against. An unchecked intermediate is published rather than hidden"
+echo "  so it cannot later be narrated as a hardware result (rule 17)."
+echo
+
 echo "HOW TO READ THIS"
 echo
 echo "Instance 0 MUST come back RUNNING. It is the panel; it is lit; if it"

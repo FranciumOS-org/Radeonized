@@ -361,6 +361,38 @@ void RBAMDFramebuffer::publishVBLState(void)
             setProperty(key, (uint64_t)strencWord[i][r], 64);
         }
     }
+
+    /* 304: the MSA derivation and its control.
+     *
+     * RBFBStrencMsaMismatch IS THE PRODUCT. 0 means the derivation reproduced
+     * DIG0's four live MSA words bit for bit, which is the only thing that
+     * licenses applying the same arithmetic to DIG2 (rule 47 asked of a
+     * write). A non-zero value is a MASK of which word disagrees - bit 0
+     * PARAM1, bit 1 PARAM2, bit 2 PARAM3, bit 3 PARAM4 - and 0x10 means the
+     * derivation itself was refused, so "could not derive" never reads as
+     * "derived and agreed". Published as a mask and not a count, because
+     * RBFBAuxEn and RBFBHpdSink were masks read as indexes (rule 33).
+     *
+     * The derived words are published for BOTH pipes even though only pipe
+     * 0's is checkable, because pipe 1's is what a write would use and an
+     * unpublished intermediate is how a substituted value gets narrated as a
+     * hardware result (rule 17). */
+    setProperty("RBFBStrencMsaMismatch", (uint64_t)strencMsaMismatch, 32);
+    for (unsigned pi = 0; pi < 2; pi++) {
+        char key[40];
+        snprintf(key, sizeof(key), "RBFBStrencP%uDeriveRc", pi);
+        setProperty(key, (uint64_t)strencDeriveRc[pi], 32);
+        for (unsigned k = 0; k < 4; k++) {
+            snprintf(key, sizeof(key), "RBFBStrencP%uMsa%u", pi, k + 1u);
+            setProperty(key, (uint64_t)strencDerived[pi][k], 64);
+            }
+        for (unsigned k = 0; k < 8; k++) {
+            /* The raw OTG words, index to name in tools/strenclook.sh for the
+             * same one-mapping reason as the register rows above. */
+            snprintf(key, sizeof(key), "RBFBStrencP%uOtg%u", pi, k);
+            setProperty(key, (uint64_t)strencOtg[pi][k], 64);
+        }
+    }
     /* 2EF: pipe 0's live DP pixel-clock DTO at BASE_IDX 1, with the same four
      * offsets at BASE_IDX 2 as the alias control. dtoSample() returns
      * immediately unless the boot armed -rbgpufbdto, so an unarmed boot pays

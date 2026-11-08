@@ -64310,3 +64310,143 @@ Before any of it: `RBFBStrencBase` must read **CONFIRMED** and
 `RBFBStrencActiveAgree` must read **1** in the same boot (rule 47 asked of a
 write), which boot 473 is the test of — the build that was just corrected has
 never run.
+
+---
+
+## 304 — boot 473 passed the gate, and the MSA derivation found its control
+
+**Tag `304`.** Framebuffer UUID `4ADE62B7-8AF9-3895-970D-2A0737EF487F`
+(303 was `D4D18678-93E7-3CB3-9360-CD48C6406A0F`). Read-only; no setter exists
+yet and no new boot-arg token was added.
+
+### Boot 473 — the corrected build's first read, and it confirmed everything
+
+303's build refused for a convention, not an address fault. With the `+1` in
+place, boot 473 returned, in one sample:
+
+- `BASE CONFIRMED`. OTG0 `H_TOTAL` 2106 / `V_TOTAL` 1129 raw, MSA carrying
+  2107 / 1130 — each the register plus one, as `dcn10_optc.c:191` against
+  `dcn10_stream_encoder.c:419` says it must.
+- `ACTIVE RASTER AGREES`, 1920x1080, derived from OTG0's own blank words in
+  the same sample. The stronger of the two checks: DRR cannot move it.
+- `SWEEP: DIFFERS` — five distinct registers, not one address read five times.
+- `ENABLE` / `STATUS` / `RUNNING` masks all `0x01`. DIG0 `RUNNING`,
+  DIG1-4 `OFF`.
+- **DIG2's MSA registers all blank**, reproduced.
+
+**Both DIG2 differences now have two boots** (472 and 473), which is what rule
+44 requires of a configuration claim:
+
+| register | DIG0 (panel) | DIG1/3/4 | DIG2 |
+|---|---|---|---|
+| `DP_STEER_FIFO` | `0x00000000` | `0x00000000` | **`0x00000001`** reset held |
+| `DP_VID_STREAM_CNTL` | `0x00010201` | `0x00100200` | **`0x00100000`** DIS_DEFER 0 |
+
+`DP_SEC_FRAMING4` is `0x20000000` on all five, so that is the reset value.
+
+**One of the two differences is now retired as a candidate blocker, on source
+grounds and for free.** `dcn20_stream_encoder.c:541` carries upstream's own
+comment: *"We used to program DP_VID_STREAM_DIS_DEFER = 2 here, but this
+register has no effect on enable transition! HW always guarantees VID_STREAM
+enable at start of next frame, and this is not programmable."* So DIG2's
+`DIS_DEFER` 0 against everything else's 2 is real and firmware-written, and
+**cannot be what stops a picture** — and the write set must not program it.
+The held `DP_STEER_FIFO_RESET` survives as the only live candidate of the two,
+and the unblank's own pulse covers it by construction.
+
+**`DP_VID_M` on instance 0 moved between boots**: `0x0000a2a6` (472) →
+`0x0000a2a4` (473), a 2-count difference, with everything else on instance 0
+byte-identical across the pair. `DP_VID_TIMING` is `0x00000100` =
+`DP_VID_M_N_GEN_EN` set, so M is **hardware-generated** on the panel and tracks
+the live clock. That is not noise and it is not a value to copy — it is
+evidence the panel's stream is genuinely running rather than a static
+snapshot, and a reason the write may only ever *prime* M.
+
+### The derivation — every MSA field comes out of six OTG registers
+
+Inverting `optc1_program_timing` (`dcn10_optc.c:189-250`) into
+`enc1_stream_encoder_dp_set_stream_attribute`
+(`dcn10_stream_encoder.c:422-460`) collapses further than expected:
+
+    h_front_porch = h_total     - BLANK_START
+    h_active      = BLANK_START - BLANK_END
+    h_back_porch  = h_blank - h_front_porch - h_sync_width = BLANK_END - SYNC_END
+    MSA_HSTART    = h_sync_width + h_back_porch            = BLANK_END
+
+**`MSA_HSTART` is just `OTG_H_BLANK_END`, and `MSA_VSTART` is just
+`OTG_V_BLANK_END`.** The sync widths are `OTG_*_SYNC_A_END` directly, and the
+polarity bit transfers **unchanged** because optc and MSA both store the
+negation of the same flag (`dcn10_optc.c:217` vs
+`dcn10_stream_encoder.c:448`). Totals are the register plus one; `HWIDTH` /
+`VHEIGHT` are blank `START - END`.
+
+Checked against boot 473's measured words before a line of it was written:
+HSTART 127 = `H_BLANK_END` 127, VSTART 20 = `V_BLANK_END` 20, PARAM4
+1920x1080, PARAM1 `0x083b046a`. All four reproduce exactly.
+
+`src/common/rb_strenc.h` gains `rb_strenc_derive_msa()` (eight words in, four
+out, **output written only on OK** so a refused derivation cannot be half
+applied), nine distinct refusal codes, `rb_strenc_msa_mismatch()` returning a
+**mask of which word disagrees** (0x10 = could not derive, kept above the
+four-bit range so it cannot be confused with a real mismatch), and
+`rb_strenc_m_vid()`.
+
+**The M/N formula was validated against the panel before use.**
+`dcn20_stream_encoder.c:476-512`: `n_vid` is always `0x8000` and
+`m_vid = N * pix_khz / (link_rate * 27000)`. At the panel's ~342 MHz over HBR
+(`link_rate` 10) that gives **41508** against a live `0xa2a4` = **41636**,
+0.3% — and the residual is exactly the DRR drift measured above. So the panel
+is eDP at HBR, not HBR2, and the formula is right. For the sink at 148500 kHz
+over HBR2: `m_vid` **9011**, `n_vid` `0x8000`.
+
+### What the hosttest may and may not claim
+
+`tools/hosttest/strenc_test.c` pins boot 473's own sample — and the honesty
+note in it decides what the case is worth. Of the eight OTG words the
+derivation consumes, **boot 473 measured exactly four**: `H_TOTAL`,
+`H_BLANK_START_END`, `V_TOTAL`, `V_BLANK_START_END`. The sync widths and both
+polarity bits were never read, so the test back-derives them **from the MSA
+words**. PARAM1, PARAM2 and PARAM4 are therefore a genuine hardware check,
+measured OTG in and measured MSA out. **PARAM3 is not**: its inputs came from
+its own expected output, and asserting it against that output is circular
+(rule 17). What the test pins for PARAM3 is the arithmetic and the field
+placement, nothing more — and the journal says so rather than the test
+quietly counting as four-for-four.
+
+**Fourteen break-it checks, every one caught by a FAILING test** and none only
+by `-Werror` (rule 48's trap, grepped for in stdout *and* stderr): HSTART off
+`H_BLANK_END`, VSTART off `V_BLANK_END`, each `+1` removed separately, the
+blank-order guard inert, active-over-total inert, the sync-START guard inert,
+the sync-width guard inert, polarity taking the whole word instead of bit 0,
+the polarity halves swapped, a refused derivation writing output anyway, the
+mismatch mask collapsed to a bool, `m_vid` losing 64-bit width, and `m_vid`
+ignoring the link rate. The `+1` is also pinned as **load-bearing**: an OTG
+register already holding the true total must not produce boot 473's MSA word.
+
+### The in-boot control, which is the experiment
+
+`strencSample()` now reads **both pipes'** eight OTG words (stride `0x80`;
+highest address pipe 1's `OTG_V_SYNC_A_CNTL` at `0x1bb8`, below the `0x254f`
+bound already computed, so the aperture needed nothing new), derives four MSA
+words for each, and compares **pipe 0's derivation against DIG0's four live
+words bit for bit in the same sample**.
+
+That comparison is the point. DIG0 is a working DP stream fed by OTG0, so it
+tests the arithmetic on hardware that is actually running one — and it is
+**PARAM3's first real check**, the first sample in which the sync widths and
+the polarity bits are read rather than assumed. Published as
+`RBFBStrencMsaMismatch` (0 = all four agree), with both pipes'
+`DeriveRc`, raw OTG words and derived MSA words beside it. Pipe 1's derivation
+has **no control** — there is no running stream on DIG2 to compare it against —
+and is published rather than hidden precisely so it cannot later be narrated as
+a hardware result.
+
+`tools/strenclook.sh` prints the mismatch verdict first, never recomputes it,
+and on a PARAM3-only mismatch says explicitly that this is a genuine finding
+rather than a regression, because the hosttest could never have caught it.
+
+**Still not established:** that either DIG2 difference is the blocker. DIG2 is
+the only instance with a cable attached (rule 47) and no stream has ever been
+programmed there, so a held FIFO reset cannot be shown to block symbols that do
+not exist. **Next:** boot this, and if `RBFBStrencMsaMismatch` is 0 the write
+set is both known and arithmetically validated.

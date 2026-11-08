@@ -488,4 +488,240 @@ static inline uint32_t rb_strenc_running_mask(const uint32_t *cntl,
     return m;
 }
 
+/* ===================================================================== *
+ *  304 - the MSA derivation, and the panel as its control.
+ *
+ *  Every field DP_MSA_TIMING_PARAM1..4 wants is recoverable from six OTG
+ *  registers of the pipe that will feed the stream, by inverting
+ *  optc1_program_timing (dcn10_optc.c:189-250) into
+ *  enc1_stream_encoder_dp_set_stream_attribute (dcn10_stream_encoder.c:422-460).
+ *
+ *  optc writes, per axis:
+ *      H_TOTAL        = h_total - 1                       (:191)
+ *      H_SYNC_A       START = 0, END = h_sync_width       (:195)
+ *      H_BLANK START  = h_total - h_front_porch           (:201)
+ *      H_BLANK END    = BLANK_START - h_active            (:205)
+ *      H_SYNC_A_CNTL  POL = !HSYNC_POSITIVE_POLARITY      (:217)
+ *  and the MSA write wants:
+ *      HTOTAL      = h_total
+ *      HSTART      = h_sync_width + h_back_porch
+ *      HSYNCWIDTH  = h_sync_width
+ *      HSYNCPOLARITY = !HSYNC_POSITIVE_POLARITY
+ *      HWIDTH      = h_active (borders folded in)
+ *
+ *  Substituting h_blank, h_front_porch and h_back_porch out collapses the
+ *  whole of HSTART to a single register field:
+ *
+ *      h_front_porch = h_total      - BLANK_START
+ *      h_active      = BLANK_START  - BLANK_END
+ *      h_blank       = h_total      - h_active
+ *      h_back_porch  = h_blank - h_front_porch - h_sync_width
+ *                    = BLANK_END - SYNC_END
+ *      HSTART        = h_sync_width + h_back_porch
+ *                    = SYNC_END + (BLANK_END - SYNC_END)
+ *                    = BLANK_END                     <-- just the field
+ *
+ *  So MSA_HSTART is OTG_H_BLANK_END and MSA_VSTART is OTG_V_BLANK_END, and
+ *  the polarity bit transfers unchanged because optc and MSA both store the
+ *  NEGATION of the same flag.
+ *
+ *  Verified against the live panel before any of this was written (boot 473):
+ *      HSTART  127  == OTG0 H_BLANK_END  127
+ *      VSTART   20  == OTG0 V_BLANK_END   20
+ *      PARAM4  1920x1080 == blank START - END on both axes
+ *
+ *  THIS IS WHY THERE IS A CONTROL AND NOT JUST A DERIVATION. DIG0 is a live,
+ *  working DP stream fed by OTG0, so deriving OTG0 -> MSA and requiring the
+ *  result to equal DIG0's four live words BIT FOR BIT tests the arithmetic
+ *  on hardware, in the same sample, before it is applied to DIG2. A
+ *  derivation that cannot reproduce the panel does not get to program the
+ *  external port (rule 47 asked of a write, rule 45's "its own instrument").
+ * ===================================================================== */
+
+/* Per-pipe OTG registers, stride 0x80, BASE_IDX 2. Instance 0 is the
+ * panel's and is the control; instance 1 is the Type-C pipe. */
+#define RB_STRENC_OTG_STRIDE        0x80u
+#define RB_STRENC_DW_OTG_H_TOTAL      0x1b2au
+#define RB_STRENC_DW_OTG_H_BLANK      0x1b2bu
+#define RB_STRENC_DW_OTG_H_SYNC       0x1b2cu
+#define RB_STRENC_DW_OTG_H_SYNC_CNTL  0x1b2du
+#define RB_STRENC_DW_OTG_V_TOTAL      0x1b2fu
+#define RB_STRENC_DW_OTG_V_BLANK      0x1b36u
+#define RB_STRENC_DW_OTG_V_SYNC       0x1b37u
+#define RB_STRENC_DW_OTG_V_SYNC_CNTL  0x1b38u
+
+#define RB_STRENC_SYNC_START_MASK   0x00007fffu
+#define RB_STRENC_SYNC_END_MASK     0x7fff0000u
+#define RB_STRENC_SYNC_POL          0x00000001u
+#define RB_STRENC_TOTAL_MASK        0x00007fffu
+
+/* MSA field masks (dcn_3_1_2_sh_mask.h, DP0_DP_MSA_TIMING_PARAM*). */
+#define RB_STRENC_MSA_VTOTAL_MASK   0x0000ffffu
+#define RB_STRENC_MSA_HTOTAL_MASK   0xffff0000u
+#define RB_STRENC_MSA_VSTART_MASK   0x0000ffffu
+#define RB_STRENC_MSA_HSTART_MASK   0xffff0000u
+#define RB_STRENC_MSA_VSYNCW_MASK   0x00007fffu
+#define RB_STRENC_MSA_VSYNCPOL      0x00008000u
+#define RB_STRENC_MSA_HSYNCW_MASK   0x7fff0000u
+#define RB_STRENC_MSA_HSYNCPOL      0x80000000u
+#define RB_STRENC_MSA_VHEIGHT_MASK  0x0000ffffu
+#define RB_STRENC_MSA_HWIDTH_MASK   0xffff0000u
+
+/* One pipe's raster, as eight raw words read in one sample. */
+struct rb_strenc_raster {
+    uint32_t h_total;      /* OTG_H_TOTAL          - holds h_total - 1 */
+    uint32_t h_blank;      /* OTG_H_BLANK_START_END                    */
+    uint32_t h_sync;       /* OTG_H_SYNC_A                             */
+    uint32_t h_sync_cntl;  /* OTG_H_SYNC_A_CNTL                        */
+    uint32_t v_total;      /* OTG_V_TOTAL          - holds v_total - 1 */
+    uint32_t v_blank;      /* OTG_V_BLANK_START_END                    */
+    uint32_t v_sync;       /* OTG_V_SYNC_A                             */
+    uint32_t v_sync_cntl;  /* OTG_V_SYNC_A_CNTL                        */
+};
+
+struct rb_strenc_msa {
+    uint32_t param1;
+    uint32_t param2;
+    uint32_t param3;
+    uint32_t param4;
+};
+
+/* Every way the derivation can decline. A refusal is a CODE and every path
+ * out says something (rule 14); nothing here returns a bool. */
+enum rb_strenc_derive {
+    RB_STRENC_DERIVE_OK             = 0,
+    RB_STRENC_DERIVE_NO_ARGS        = 1,
+    RB_STRENC_DERIVE_TOTAL_ZERO     = 2,  /* pipe not programmed at all     */
+    RB_STRENC_DERIVE_BLANK_ZERO     = 3,
+    RB_STRENC_DERIVE_BLANK_ORDER    = 4,  /* END >= START: not a raster     */
+    RB_STRENC_DERIVE_ACTIVE_ZERO    = 5,
+    RB_STRENC_DERIVE_ACTIVE_OVER    = 6,  /* active >= total                */
+    RB_STRENC_DERIVE_SYNC_ZERO      = 7,
+    RB_STRENC_DERIVE_SYNC_START_SET = 8,  /* optc programs START = 0 (:195) */
+    RB_STRENC_DERIVE_FIELD_OVERFLOW = 9   /* would not fit its MSA field    */
+};
+
+static inline uint32_t rb_strenc_sync_start(uint32_t w)
+{ return w & RB_STRENC_SYNC_START_MASK; }
+
+static inline uint32_t rb_strenc_sync_end(uint32_t w)
+{ return (w & RB_STRENC_SYNC_END_MASK) >> 16u; }
+
+static inline uint32_t rb_strenc_blank_start(uint32_t w)
+{ return w & RB_STRENC_BLANK_START_MASK; }
+
+static inline uint32_t rb_strenc_blank_end(uint32_t w)
+{ return (w & RB_STRENC_BLANK_END_MASK) >> 16u; }
+
+/* Derive the four MSA words from one pipe's eight OTG words. Writes *out
+ * ONLY on RB_STRENC_DERIVE_OK, so a refused derivation cannot be half
+ * applied. */
+static inline enum rb_strenc_derive rb_strenc_derive_msa(
+        const struct rb_strenc_raster *r, struct rb_strenc_msa *out)
+{
+    uint32_t ht, vt, hb_s, hb_e, vb_s, vb_e;
+    uint32_t h_act, v_act, hsw, vsw, hpol, vpol;
+
+    if (!r || !out) { return RB_STRENC_DERIVE_NO_ARGS; }
+
+    /* The +1 that refused boot 472: the OTG register holds `total - 1` and
+     * MSA holds the true total (dcn10_optc.c:191 vs
+     * dcn10_stream_encoder.c:419). */
+    ht = (r->h_total & RB_STRENC_TOTAL_MASK);
+    vt = (r->v_total & RB_STRENC_TOTAL_MASK);
+    if (ht == 0u || vt == 0u) { return RB_STRENC_DERIVE_TOTAL_ZERO; }
+    ht += 1u;
+    vt += 1u;
+
+    hb_s = rb_strenc_blank_start(r->h_blank);
+    hb_e = rb_strenc_blank_end(r->h_blank);
+    vb_s = rb_strenc_blank_start(r->v_blank);
+    vb_e = rb_strenc_blank_end(r->v_blank);
+    if (hb_s == 0u || vb_s == 0u) { return RB_STRENC_DERIVE_BLANK_ZERO; }
+    if (hb_e >= hb_s || vb_e >= vb_s) { return RB_STRENC_DERIVE_BLANK_ORDER; }
+
+    h_act = hb_s - hb_e;
+    v_act = vb_s - vb_e;
+    if (h_act == 0u || v_act == 0u) { return RB_STRENC_DERIVE_ACTIVE_ZERO; }
+    if (h_act >= ht || v_act >= vt) { return RB_STRENC_DERIVE_ACTIVE_OVER; }
+
+    /* optc writes START = 0 on both sync registers (dcn10_optc.c:195, :233).
+     * A non-zero start means this is not a raster optc programmed, so the
+     * inversion below does not apply to it. */
+    if (rb_strenc_sync_start(r->h_sync) != 0u ||
+        rb_strenc_sync_start(r->v_sync) != 0u) {
+        return RB_STRENC_DERIVE_SYNC_START_SET;
+    }
+    hsw = rb_strenc_sync_end(r->h_sync);
+    vsw = rb_strenc_sync_end(r->v_sync);
+    if (hsw == 0u || vsw == 0u) { return RB_STRENC_DERIVE_SYNC_ZERO; }
+
+    /* Both sides store the negation of the same flag, so the bit transfers
+     * unchanged (dcn10_optc.c:217 vs dcn10_stream_encoder.c:448). */
+    hpol = r->h_sync_cntl & RB_STRENC_SYNC_POL;
+    vpol = r->v_sync_cntl & RB_STRENC_SYNC_POL;
+
+    if (ht > 0xffffu || vt > 0xffffu ||
+        hb_e > 0xffffu || vb_e > 0xffffu ||
+        h_act > 0xffffu || v_act > 0xffffu ||
+        hsw > 0x7fffu || vsw > 0x7fffu) {
+        return RB_STRENC_DERIVE_FIELD_OVERFLOW;
+    }
+
+    out->param1 = ((ht << 16u) & RB_STRENC_MSA_HTOTAL_MASK) |
+                  (vt & RB_STRENC_MSA_VTOTAL_MASK);
+    /* HSTART = H_BLANK_END, VSTART = V_BLANK_END - the collapse above. */
+    out->param2 = ((hb_e << 16u) & RB_STRENC_MSA_HSTART_MASK) |
+                  (vb_e & RB_STRENC_MSA_VSTART_MASK);
+    out->param3 = ((hsw << 16u) & RB_STRENC_MSA_HSYNCW_MASK) |
+                  (hpol ? RB_STRENC_MSA_HSYNCPOL : 0u) |
+                  (vsw & RB_STRENC_MSA_VSYNCW_MASK) |
+                  (vpol ? RB_STRENC_MSA_VSYNCPOL : 0u);
+    out->param4 = ((h_act << 16u) & RB_STRENC_MSA_HWIDTH_MASK) |
+                  (v_act & RB_STRENC_MSA_VHEIGHT_MASK);
+    return RB_STRENC_DERIVE_OK;
+}
+
+/* The control. Returns a bitmask of which PARAMs disagree with the live
+ * words, bit N for param N+1; 0 means all four agree bit for bit. A
+ * disagreement is reported per word rather than as a bool so the journal
+ * records WHICH field the arithmetic got wrong. */
+#define RB_STRENC_MSA_MISMATCH_ARGS  0x10u
+static inline uint32_t rb_strenc_msa_mismatch(const struct rb_strenc_msa *d,
+                                               const uint32_t *live4)
+{
+    uint32_t m = 0;
+
+    if (!d || !live4) { return RB_STRENC_MSA_MISMATCH_ARGS; }
+    if (d->param1 != live4[0]) { m |= 1u; }
+    if (d->param2 != live4[1]) { m |= 2u; }
+    if (d->param3 != live4[2]) { m |= 4u; }
+    if (d->param4 != live4[3]) { m |= 8u; }
+    return m;
+}
+
+/* ---- the unblank's M/N (dcn20_stream_encoder.c:476-512) ---- */
+
+#define RB_STRENC_N_VID             0x8000u
+#define RB_STRENC_LINK_REF_KHZ      27000u
+#define RB_STRENC_LINK_RATE_HBR     10u   /* 2.70 Gbps */
+#define RB_STRENC_LINK_RATE_HBR2    20u   /* 5.40 Gbps */
+
+/* m_vid = N * pixel_khz / (link_rate * 27000), in 64-bit because the
+ * numerator passes 2^32 at any real pixel clock. Returns 0 on bad input,
+ * which the caller must treat as a refusal: 0 is never a valid M. */
+static inline uint32_t rb_strenc_m_vid(uint32_t pix_khz, uint32_t link_rate)
+{
+    uint64_t num;
+    uint32_t den;
+
+    if (pix_khz == 0u || link_rate == 0u) { return 0u; }
+    den = link_rate * RB_STRENC_LINK_REF_KHZ;
+    if (den == 0u) { return 0u; }
+    num = (uint64_t)RB_STRENC_N_VID * (uint64_t)pix_khz;
+    num /= (uint64_t)den;
+    if (num == 0u || num > 0x00ffffffu) { return 0u; }  /* DP_VID_M is 24 bits */
+    return (uint32_t)num;
+}
+
 #endif /* RB_STRENC_H */

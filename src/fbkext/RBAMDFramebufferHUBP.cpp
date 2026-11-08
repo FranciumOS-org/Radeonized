@@ -81,6 +81,12 @@ bool RBAMDFramebuffer::hubpSetup(void)
     dpaltReady = false;
     dpcspipeReady = false;
     strencReady = false;
+    for (unsigned pi = 0; pi < 2; pi++) {
+        strencDeriveRc[pi] = (int)RB_STRENC_DERIVE_NO_ARGS;
+        for (unsigned k = 0; k < 8; k++) { strencOtg[pi][k] = 0; }
+        for (unsigned k = 0; k < 4; k++) { strencDerived[pi][k] = 0; }
+    }
+    strencMsaMismatch = RB_STRENC_MSA_MISMATCH_ARGS;
     dtoReady = false;
     dtoExpectedHz = 0;
     dtoRefSrc = RB_DPDTO_REF_SRC_NONE;
@@ -1143,6 +1149,68 @@ void RBAMDFramebuffer::strencSample(void)
     strencActiveAgree = rb_strenc_active_agrees(
         strencWord[RB_STRENC_PANEL_INST][RB_STRENC_R_MSA_PARAM4],
         strencActiveW, strencActiveH);
+
+    /* ---- 304: THE DERIVATION, AND THE PANEL AS ITS CONTROL ----
+     *
+     * Read both pipes' eight OTG words, derive the four MSA words each pipe
+     * would need, and - the whole point - compare PIPE 0's derivation against
+     * DIG0's four LIVE MSA words, bit for bit, in this same sample. DIG0 is a
+     * working DP stream fed by OTG0, so that comparison tests the arithmetic
+     * on hardware before any of it is applied to DIG2.
+     *
+     * Nothing here writes. The highest address touched is pipe 1's
+     * OTG_V_SYNC_A_CNTL at 0x1b38 + 0x80 = 0x1bb8, below rb_strenc_dw_max()
+     * 0x254f, so the aperture bound already computed for the register block
+     * covers these too.
+     *
+     * The hosttest could only pin PARAM1/2/4 against real hardware: boot 473
+     * never read the sync registers, so PARAM3's inputs there were
+     * back-derived from its own expected output, which is circular (rule 17).
+     * THIS is PARAM3's hardware check - the first sample in which the sync
+     * widths and the two polarity bits are read rather than assumed. */
+    for (unsigned pi = 0; pi < 2; pi++) {
+        const uint32_t off = pi * RB_STRENC_OTG_STRIDE;
+        struct rb_strenc_raster r;
+        struct rb_strenc_msa d;
+
+        r.h_total     = hubpRegs[kRbDmuSeg2 + RB_STRENC_DW_OTG_H_TOTAL + off];
+        r.h_blank     = hubpRegs[kRbDmuSeg2 + RB_STRENC_DW_OTG_H_BLANK + off];
+        r.h_sync      = hubpRegs[kRbDmuSeg2 + RB_STRENC_DW_OTG_H_SYNC + off];
+        r.h_sync_cntl = hubpRegs[kRbDmuSeg2 + RB_STRENC_DW_OTG_H_SYNC_CNTL + off];
+        r.v_total     = hubpRegs[kRbDmuSeg2 + RB_STRENC_DW_OTG_V_TOTAL + off];
+        r.v_blank     = hubpRegs[kRbDmuSeg2 + RB_STRENC_DW_OTG_V_BLANK + off];
+        r.v_sync      = hubpRegs[kRbDmuSeg2 + RB_STRENC_DW_OTG_V_SYNC + off];
+        r.v_sync_cntl = hubpRegs[kRbDmuSeg2 + RB_STRENC_DW_OTG_V_SYNC_CNTL + off];
+
+        strencOtg[pi][0] = r.h_total;     strencOtg[pi][1] = r.h_blank;
+        strencOtg[pi][2] = r.h_sync;      strencOtg[pi][3] = r.h_sync_cntl;
+        strencOtg[pi][4] = r.v_total;     strencOtg[pi][5] = r.v_blank;
+        strencOtg[pi][6] = r.v_sync;      strencOtg[pi][7] = r.v_sync_cntl;
+
+        strencDeriveRc[pi] = (int)rb_strenc_derive_msa(&r, &d);
+        if (strencDeriveRc[pi] == (int)RB_STRENC_DERIVE_OK) {
+            strencDerived[pi][0] = d.param1; strencDerived[pi][1] = d.param2;
+            strencDerived[pi][2] = d.param3; strencDerived[pi][3] = d.param4;
+        } else {
+            for (unsigned k = 0; k < 4; k++) { strencDerived[pi][k] = 0; }
+        }
+
+        /* The control, pipe 0 only. A mismatch mask naming WHICH of the four
+         * words disagrees, not a bool, so a wrong field is identified rather
+         * than merely reported (rule 14). */
+        if (pi == RB_STRENC_PANEL_INST) {
+            if (strencDeriveRc[pi] != (int)RB_STRENC_DERIVE_OK) {
+                strencMsaMismatch = RB_STRENC_MSA_MISMATCH_ARGS;
+            } else {
+                uint32_t live4[4];
+                live4[0] = strencWord[RB_STRENC_PANEL_INST][RB_STRENC_R_MSA_PARAM1];
+                live4[1] = strencWord[RB_STRENC_PANEL_INST][RB_STRENC_R_MSA_PARAM2];
+                live4[2] = strencWord[RB_STRENC_PANEL_INST][RB_STRENC_R_MSA_PARAM3];
+                live4[3] = strencWord[RB_STRENC_PANEL_INST][RB_STRENC_R_MSA_PARAM4];
+                strencMsaMismatch = rb_strenc_msa_mismatch(&d, live4);
+            }
+        }
+    }
 }
 
 /* 2EF: PIPE 0'S LIVE DP PIXEL-CLOCK DTO, AND THE SEGMENT CHECK.

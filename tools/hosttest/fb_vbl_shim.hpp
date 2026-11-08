@@ -341,6 +341,10 @@ public:
     uint32_t strencActiveW=0, strencActiveH=0;
     int strencActiveAgree=-1;
     bool strencReady=false;
+    uint32_t strencOtg[2][8]={{0}};
+    int strencDeriveRc[2]={0,0};
+    uint32_t strencDerived[2][4]={{0}};
+    uint32_t strencMsaMismatch=0;
     void strencSample(void) {}
     void dpaltSample(void) {}
     /* 2EF: the DP DTO survey, stubbed for the same reason - dtoSample() lives
