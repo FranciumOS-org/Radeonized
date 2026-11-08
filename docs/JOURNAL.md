@@ -65554,3 +65554,125 @@ ignores.)
 `tools/phylook.sh` prints the ownership fields, names which differ under each
 control, and says **"ABSENT — that is not 'the port is not blocked'"** when the
 loaded kext predates the keys. Framebuffer UUID **16CB216D**.
+
+---
+
+## 309b / boot 482 — THE OWNERSHIP CANDIDATE IS DEAD, AND SO IS THE SURVEY AS A METHOD
+
+Boot 482, framebuffer **16CB216D** verified inside the live collection,
+`-rbgpufbdpalt` / `-rbgpufbdig` / `-rbgpufbaux` and `wdt=-1` present,
+`RBFBPhy2AllowDrvAccess` published (so the keys were read, not absent).
+
+### The answer, and it is a negative
+
+```
+PHY   DPALT_CTRL  DIS_BLOCK   CNTL2       DMCU_CNTL6
+0     0x00000000  0x00000000  0x00000000  0x00110000   <- the live panel
+1     0x00000000  0x00000000  0x00000000  0x00020000
+2     0x00000000  0x00000000  0x00000001  0x00063333   <- the Type-C port
+3     0x00000000  0x00000000  0x00000001  0x00063333
+4     0x00000000  0x00000000  0x00000001  0x00063333
+```
+
+**`RDPCSTX_DPALT_CONTROL_REG` reads `0x00000000` on all five instances,
+including the live working panel.** `ALLOW_DRIVER_ACCESS` 0 and
+`DRIVER_ACCESS_BLOCKED` 0 everywhere. **The panel is driving a 1080p link
+right now with ALLOW_DRIVER_ACCESS clear**, so that field cannot mean "the
+driver may not touch this PHY" on this part — it carries no information here,
+and the positive control is what establishes it. Rule 48's shape: a term that
+reads the same on the working instance and the dead one is not a term.
+`DMCU_DPALT_DIS_BLOCK_REG` is `0` on all five too, so `FORCE_TX_CLK_DIS` is
+**not** why `TX_CLOCK_ON` is clear on PHY2.
+
+**So "PHY2's register interface is blocked" is dead.** It was the best
+candidate this line has had — it would have explained `PHY_RESET` never
+clearing, the atom ENABLE moving nothing and `DP_VID_M` refusing a store with
+one mechanism — and it is simply not what the hardware says.
+
+### The third source answered, and it retires 0x00063333 a SECOND way
+
+`RDPCSTX_DMCU_DPALT_PHY_CNTL6` on PHY2 reads **`0x00063333`** — the exact word
+301 retired as a misread off `RDPCSTX2_PHY_CNTL6`. Decoded against
+`dpcs_4_2_0_sh_mask.h`: `TX0..3_PSTATE` **3** each, `MPLL_EN` **0**,
+`DPALT_DISABLE` **1**, `DPALT_DISABLE_ACK` **1**, `REF_CLK_EN`/`REQ` 0. The
+panel's `0x00110000` is `PSTATE` **0**, `DPALT_DP4` 1, `REF_CLK_REQ` 1,
+`DISABLE` **0**.
+
+So DMCU's shadow **agrees with RDPCSTX and contradicts ROM-attested
+`QUERY_DP_ALT`**, which says PHY2 `alt_disable` **0**. Two sources each side.
+But the control settles it: **PHY2, PHY3 and PHY4 read `0x00063333`
+IDENTICALLY**, while `QUERY_DP_ALT` separates them — PHY2 granted, PHY3 and
+PHY4 disabled. **A register that reads the same on a granted port and a
+disabled port is not reporting per-port grant state.** That is a *new and
+independent* argument for 301's retirement: not "wrong register for UNIPHY_C"
+but **"cannot be grant state, because it does not vary with grant."** Every
+field in this register is named `_RESERVED` upstream, which was the hint.
+
+`PSTATE` 3 on all three USB-C PHYs against 0 on the panel is real but is
+**USB-C-ness, not working-ness**: PHY1 is dark, non-USB-C, and reads PSTATE 0.
+A USB-C PHY idling at P3 is expected, and identical on the port we can drive
+and the two we cannot.
+
+### `CNTL2` and `ENC_TYPE_SEL`: nothing
+
+`CR_CONVERT_FIFO_EMPTY` set on PHY2/3/4 and clear on PHY0/1 — USB-C versus
+not, again. **`PHY_ENC_TYPE_SEL` is 0 on all five**, and 2FC already
+established `ENCODER_TYPE_DIG` **is** zero, so unprogrammed and DIG are
+indistinguishable. No finding available, exactly as 2FC predicted for the
+DIO-side register.
+
+### THE EXTENDED A/B: THE ATOM ENABLE MOVES NONE OF THE NINE
+
+307 ran this across three registers. Boot 482 ran it across **nine**, the
+PSTATE/MPLL/DPALT fields and the ownership pair included. `dmubbl dig`,
+`refusal 0`, `target PHY2`, `ran 1`:
+
+```
+                 before      after
+Cntl             0x008f00f0  0x008f00f0
+ClockCntl        0x001019f0  0x001019f0
+Intr             0x00000000  0x00000000
+SramCntl         0x03100000  0x03100000
+PhyCntl0         0x10100605  0x10100605
+Cntl2            0x00000001  0x00000001
+DisBlock         0x00000000  0x00000000
+DmcuCntl6        0x00063333  0x00063333
+DpAltCtrl        0x00000000  0x00000000
+```
+
+**Byte-identical, all nine**, with PHY0/1/3/4 unmoved as the control. The atom
+transmitter ENABLE changes nothing anywhere in the part of this block we can
+see.
+
+### THE METHOD IS WHAT FAILED, AND THAT IS THE FINDING
+
+**Nothing in nine registers distinguishes PHY2 from PHY3.**
+`RBFBPhy2AccessDiffDark` is **0**. The only non-zero diff is against the panel
+(mask `0x10`, DMCU_DPALT) and it holds for PHY1 and PHY4 as well — the
+live-versus-dark signature that killed 308, caught this time by the structure
+built to catch it rather than a day later.
+
+Three milestones have now surveyed this block — 306/307 with five registers,
+309 with nine — and **every one failed the same way: it could not see the
+DP-alt grant that `QUERY_DP_ALT` reports.** The only instrument that
+distinguishes PHY2 from PHY3 remains the DMCUB query, ROM-attested on five
+boots now.
+
+That is strong evidence the per-port DP-alt state **is not in the RDPCSTX
+register file at all.** Reading more of it is not the next step: the remaining
+~26 registers are more of the same file, and the three candidates this
+milestone produced (307's atom attribution, 308's SRAM handshake, 309's
+ownership) were all killed by controls in the same sample, each within one
+boot of being proposed. The instrument design is working; the *place* is
+wrong.
+
+What is left is two places, not more registers here:
+
+1. **The PHY's own internal registers**, reachable only through the indirect
+   window `RDPCS_TX_CR_ADDR` / `RDPCS_TX_CR_DATA`. Cobalt64's Navi 48 survey
+   reads `CR_ADDR` and deliberately **does not read `CR_DATA`**, noting a read
+   there may itself be a read trigger — SUSPECTED, their word. So this is a
+   hazard, not a free read, and it needs its own argument before a boot.
+2. **DMCUB's image** (4.0.15.47, CW0/CW1), which is what services the command
+   and the query both, and the only thing that has ever answered the grant
+   question.
