@@ -43,6 +43,7 @@ extern "C" {
 #include "rb_dig.h"
 #include "rb_dio.h"
 #include "rb_dpcspipe.h"
+#include "rb_strenc.h"
 #include "rb_enc.h"
 #include "rb_digbe.h"
 #include "rb_dpaltq.h"
@@ -529,6 +530,25 @@ private:
      * nothing to agree WITH), 1 agrees, 2 disagrees on both instances. */
     int                dpcspipeAgree;
     bool               dpcspipeReady;      /* the aperture covered them     */
+    /* 302: the DIO STREAM encoder - fourteen registers per DIG instance, and
+     * no register in this block has ever been read or written by this kext.
+     * READ-ONLY, and the read IS the experiment: instance 0 is the panel's
+     * live, working DP stream, so every field has a known-good value in the
+     * same sample as DIG2's. `strencBase` is the gate - instance 0's
+     * DP_MSA_TIMING_PARAM1 must decode as THIS boot's own OTG0 raster or the
+     * offsets are wrong and nothing else here is a reading.
+     * `strencStatusMask` is the witness: DP_VID_STREAM_STATUS is driven by the
+     * hardware, not by the bit we would write, and upstream REG_WAITs on it. */
+    uint32_t           strencWord[5][14]; /* [instance][enum rb_strenc_reg]  */
+    uint32_t           strencRunMask;     /* MASK, not an index (rule 33)    */
+    uint32_t           strencEnMask;      /* ENABLE set, whatever STATUS says */
+    uint32_t           strencStatusMask;  /* STATUS set: the hardware's half  */
+    int                strencVerdict[5];  /* enum rb_strenc_verdict          */
+    int                strencSweep;       /* enum rb_strenc_sweep            */
+    int                strencBase;        /* enum rb_strenc_base: the gate   */
+    uint32_t           strencHTotal;      /* the live OTG0 totals this base  */
+    uint32_t           strencVTotal;      /* check was made against          */
+    bool               strencReady;       /* the aperture covered them       */
     uint32_t           hpdStatus[5];   /* RB_HPD_COUNT, last raw words       */
     uint32_t           hpdControl[5];
     bool               hpdReady;       /* the aperture covered the registers */
@@ -1183,6 +1203,7 @@ private:
     void dpaltSample(void);
     void dioSample(void);
     void dpcspipeSample(void);
+    void strencSample(void);
     /* 2EF: pipe 0's live DP pixel-clock DTO, read-only - and the check that
      * BASE_IDX 1 is a real address before anything is written there. Same
      * mapping as hpdSample(); gated on dtoArmed. */

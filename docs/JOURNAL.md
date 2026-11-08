@@ -63982,3 +63982,177 @@ reading taken across all thirteen boots of this line, and it requires no dark
 PHY to explain. **That is where the next milestone goes**, and the sink's
 silence stops being evidence about the PHY the moment there is nothing for the
 PHY to carry.
+
+---
+
+## 302 — the stream encoder: the block that had never been read, and a bound
+## that was wrong before it was tested
+
+Tag: `302`. Static work, no boot. The milestone 301 pointed at.
+
+### Why this block
+
+Thirteen boots of the external-display line put a clock on pipe 1, a raster on
+OTG1, a front end on DIG2, a training pattern on the wire and a transmitter
+ENABLE through the DMCUB, and the sink saw nothing. Every candidate is now
+dead: the raster (2FD), the pixel clock (2FE), the DIO mux (2FC, negative),
+`hpdsel` and power gating (300), and the analog-PHY reading itself (301, read
+off a register that does not describe UNIPHY_C).
+
+What has never been attempted, in any boot, is a **stream**.
+`grep -rn DP_VID_STREAM src/` found nothing before this milestone. A DP link
+carrying no stream transmits nothing a sink recognises, which is consistent
+with every reading this line has taken and requires no dark PHY.
+
+### One operation, four files
+
+Rule 46 is about the METHOD's version grouping, and this is 2FA's two-file
+split one worse:
+
+- `dcn31_resource.c:1323` builds the stream encoders with
+  **`dcn30_dio_stream_encoder_construct`** over
+  **`struct dcn10_stream_enc_registers`** (`:361`).
+- `dcn30_dio_stream_encoder.c:832`, `dcn30_str_enc_funcs`: the two entries
+  that matter are **not DCN30's**. `.dp_set_stream_attribute` and
+  `.dp_unblank` are `enc2_...` (**DCN20**); `.dig_connect_to_otg` is
+  `enc1_...` (**DCN10**).
+- `dcn20_stream_encoder.c:562`: `enc2_stream_encoder_dp_set_stream_attribute`
+  delegates its whole body to `enc1_...` and adds **exactly one** write of its
+  own, `DP_SEC_FRAMING4.DP_SST_SDP_SPLITTING`.
+- `dcn10_stream_encoder.c:245`: the body — eight registers.
+- `dcn20_stream_encoder.c:490`: `enc2_stream_encoder_dp_unblank` — five more.
+
+**The upstream paths moved.** These live under `dc/dio/dcn30/` and
+`dc/dio/dcn20/`, not `dc/dcn30/`. Four fetches at the old paths returned 404,
+which is indistinguishable from "no such file" — rule 26 again, a search is an
+instrument. The include line in `dcn30_dio_stream_encoder.h:32` gave the real
+names. All four files are now vendored under `docs/linux-ref/`.
+
+### A correction to 2FC's handoff, from the same read
+
+`setup_dio_stream_encoder` (`link_hwss_dio.c:49`) calls, in order,
+`connect_dig_be_to_fe`, `enable_stream`, `map_stream_to_link`,
+`set_input_mode` and `enable_fifo`, each guarded by `if (funcs->x)`. In
+`dcn30_str_enc_funcs` **all four of the last ones are absent** — checked by
+name, `grep -c '\.<name>'` = 0 for each, not inferred.
+
+So on this chip that whole function reduces to `connect_dig_be_to_fe`, which
+2EC already did. **The stream does not come from there.** It comes from
+`setup_dio_stream_attribute` (`:116`) and from the unblank, and neither has
+ever run here. The handoff had implied the setup path was the gap.
+
+### What was built, and why it is a READ
+
+`src/common/rb_strenc.h`: fourteen registers × five instances, read-only, no
+setter. All BASE_IDX 2, instance stride 0x100, every offset pinned per
+register and per instance in the hosttest rather than derived — 2FA found
+three different strides inside one function for registers programmed together
+for one pipe.
+
+**The read is the experiment, and the reason is instance 0.** DIG0/DP0 is the
+panel: a live, working, composited DP stream. So every one of these fourteen
+registers has a known-good value sitting in instance 0 **in the same sample**
+as DIG2's, and the three instances never brought up are the negative control
+in that same sample. This is the strongest in-boot positive control this
+project has had for a write set. A write designed off upstream alone is
+designed against a manual; one designed off instance 0's live words is
+designed against the machine (rule 25).
+
+**The gate.** `rb_strenc_base_verdict()` requires instance 0's
+`DP_MSA_TIMING_PARAM1` to decode as **this boot's own** OTG0 H_TOTAL and
+V_TOTAL, read in the same sample from the dwords `rb_dpdto.h` already names
+(rule 44 — a control measured in a different window is not a control). Not
+against the 2106/1129 in the card: the DRR ladder moves V_TOTAL, and 2FB
+already misconverted a measurement by treating 143.83 Hz as true while the
+panel sat at 61.40. H_TOTAL is strict because it does not move with DRR;
+V_TOTAL gets a **named** window, `RB_STRENC_VTOTAL_SLACK`. Six verdict codes,
+including `BASE_ZERO` (what a dead aperture, a gated block and a wrong segment
+all read, and never a pass) and `BASE_NO_EXPECTED` (no live raster to compare
+against — its own code, which is the defect 2EF's first draft had and which
+would have cost a boot).
+
+**The witness, and this is what the line has been missing since 2EB.**
+`DP_VID_STREAM_CNTL` carries `DP_VID_STREAM_ENABLE` (bit 0, what a driver
+writes) and `DP_VID_STREAM_STATUS` (bit 16, what the hardware answers) — and
+`enc2_stream_encoder_dp_unblank` writes the first and then `REG_WAIT`s on the
+second, which is upstream saying in its own code that the second is not a
+readback of the first. Published as **two separate masks** plus their
+conjunction, for 2E6's reason: `applied` without `changed` is not evidence,
+and publishing the bit we wrote as the bit the chip answered would be that
+defect in a new register. `ASKED_NOT_RUNNING` is its own verdict code because
+"asked for and refused" is the most informative thing this block can say.
+
+Every instrument before this one either answered our own writes (`DIG_BE_CNTL`,
+`TP_SEL`, `PIXEL_RATE_CNTL` — a block agreeing with itself) or was the wrong
+register (`RDPCSTX2_PHY_CNTL6`, retired in 301).
+
+### The bound was wrong, and the hosttest caught it before any boot
+
+`rb_strenc_dw_max()`'s first draft computed the aperture bound from
+`DP_SEC_FRAMING4` (0x2130), which reads like the top of the block. It is not:
+the four `DP_MSA_TIMING_PARAM` registers sit at **0x214c..0x214f**, above it.
+A bound from the last **enum** slot would have been worse — `DIG_FE_CNTL`
+sorts last and is the **lowest** address at 0x208b, short by 0xc4 dwords.
+
+The case that caught it does not trust either value: it pins 0x254f **and**
+derives the true maximum over every (instance, register) pair and compares the
+two. A short aperture bound is a dereference outside the mapping (rule 19), so
+this is the one guard here whose failure mode is not a wrong number.
+
+### Break-it, and the harness lied a fourth time
+
+Seventeen breaks, one per guard, driven from Python:
+
+| guard broken | caught by |
+|---|---|
+| bound from the last enum slot | `dw_max = 0x248b want 0x254f` |
+| bound from SEC_FRAMING4 (the real bug) | `dw_max = 0x2530 want 0x254f` |
+| MSA_PARAM4 offset off by one | `reg[6] base = 0x2150 want 0x214f` |
+| instance stride 0x10 | 11 failures |
+| instance range gate removed | `an out-of-range instance was answered` |
+| STATUS reads the ENABLE bit | 5 failures |
+| ASKED_NOT_RUNNING folded into OFF | `enable-without-status is not ASKED_NOT_RUNNING` |
+| HTOTAL/VTOTAL halves swapped | 6 failures |
+| H_TOTAL compared to `h+1` | `the panel's own timing is not CONFIRMED` |
+| H_TOTAL compared to V_TOTAL | same |
+| V_TOTAL abs-diff order (unsigned wrap) | `a DRR-shifted V_TOTAL did not confirm` |
+| zero word allowed to confirm | `a zero word is not BASE_ZERO` |
+| NO_EXPECTED gate `\|\|` → `&&` | `a missing reference is not NO_EXPECTED` |
+| running mask ORs `i` not `1<<i` | `running mask = 0x0 want 0x01` |
+| running mask counts ENABLE alone | `an enable-without-status set the running mask` |
+| sweep count bound removed | `bad args not refused by the sweep` |
+| sweep compares against instance 1 | `the panel-only sample is not DIFFERS` |
+
+**One fired nothing, and it was the harness.** Breaking the H_TOTAL check to
+`if (0)` produced no FAIL line and no `error:` — because the break leaves `h`
+set-but-unused, `-Werror` killed the build, `make hosttest` ran the previous
+binary, and **my sweep script read only stdout while the compiler writes to
+stderr**. That is rule 48's `-Werror` trap for the **sixth** time and rule 16
+for the fourth in this session: the instrument is a suspect, and this one has
+now lied by grepping `error:` before `FAIL`, twice by using `|` as a shell
+field delimiter, and now by discarding stderr.
+
+Re-broken in two forms that keep `h` used — compared against `live_htotal + 1`
+and against `live_vtotal` — both caught by the test. So the guard is
+load-bearing and covered; the `if (0)` form is caught by the compiler, which
+per rule 48 is a build failure and **not** coverage.
+
+### What boot 472 will say, written down first
+
+Arm: `-rbgpufbdig` (the read shares the dpalt/dig/fe set, no new token).
+`tools/strenclook.sh`, which prints the gate before any value and **exits**
+rather than printing words on `HTOTAL_BAD` or `BASE_ZERO`.
+
+- **Instance 0 must come back RUNNING** and the base must CONFIRM. The panel is
+  lit; if either fails, the addresses are wrong and nothing else is a reading.
+- **DIG2 is expected OFF with blank MSA registers**, because nothing has ever
+  programmed them. That is not a null — it is the positive identification of
+  what is missing from the chain, and instance 0's populated fields are the
+  list of what a write would have to set.
+- If DIG2 instead reads with MSA timing already programmed, the firmware did
+  more at boot than this project has assumed, and the diff against instance 0
+  names exactly which fields differ.
+
+`SWEEP: UNIFORM` here would be a **positive defect**, not an uninterpretable
+null as it is for the DIO mux: instance 0 runs a stream and the others do not,
+so five identical words mean the 0x100 instance arithmetic did nothing.

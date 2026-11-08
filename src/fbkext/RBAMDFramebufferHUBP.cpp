@@ -27,6 +27,7 @@
 #include "rb_dpcd.h"
 #include "rb_dpalt.h"
 #include "rb_dpcspipe.h"
+#include "rb_strenc.h"
 #include "rb_dpdto.h"
 #include "rb_drr.h"
 #include "rb_dcn_deny.h"
@@ -79,6 +80,7 @@ bool RBAMDFramebuffer::hubpSetup(void)
     hpdReady = false;
     dpaltReady = false;
     dpcspipeReady = false;
+    strencReady = false;
     dtoReady = false;
     dtoExpectedHz = 0;
     dtoRefSrc = RB_DPDTO_REF_SRC_NONE;
@@ -374,6 +376,26 @@ bool RBAMDFramebuffer::hubpSetup(void)
         length >= ((uint64_t)dpcspipeNeeded + 1) * sizeof(uint32_t);
     dpcspipeReady = (dpaltArmed || digArmed || feArmed) && dpcspipeFits;
 
+    /* 302: the stream encoder's bound. Its top is dword 0x254f
+     * (DP4_DP_MSA_TIMING_PARAM4), which is BELOW dpcspipe's 0x2e4b, so at any
+     * aperture that passed `dpcspipeFits` this cannot fail - and a check that
+     * cannot fail is not a check (rule 48). It is here and labelled anyway for
+     * 2EF's reason: `length` is read from the live BAR at runtime and the one
+     * thing that must never happen is a dereference outside it (rule 19).
+     *
+     * `rb_strenc_dw_max()` is NOT the last enum slot and the hosttest proves
+     * it: DIG_FE_CNTL sorts last in the enum at 0x208b and DP_SEC_FRAMING4
+     * reads like the top of the block at 0x2130, while the four
+     * DP_MSA_TIMING_PARAM registers sit above both. The first draft of that
+     * function used SEC_FRAMING4 and was 0x1f dwords short.
+     *
+     * Kept out of `needed` for 2C0's reason: an opt-in read must never be able
+     * to refuse hubpSetup() and take the panel with it (rule 16). */
+    const uint32_t strencNeeded = kRbDmuSeg2 + rb_strenc_dw_max();
+    const bool strencFits =
+        length >= ((uint64_t)strencNeeded + 1) * sizeof(uint32_t);
+    strencReady = (dpaltArmed || digArmed || feArmed) && strencFits;
+
     /* 2EF: the DP DTO's own bound, separate for the same reason 2C0 kept the
      * PHY blocks out of `needed`: an opt-in read must not be able to refuse
      * hubpSetup() and take the panel with it (rule 16).
@@ -480,6 +502,7 @@ bool RBAMDFramebuffer::hubpSetup(void)
     dpaltSample();
     dioSample();
     dpcspipeSample();
+    strencSample();
     hpdSetupMask   = hpdSinkMask;
     hpdSetupEnMask = hpdEnMask;
     hpdChanges     = 0;
@@ -1019,6 +1042,89 @@ void RBAMDFramebuffer::dpcspipeSample(void)
             dpcspipeWord, RB_DPCSPIPE_COUNT,
             dpaltqReply[2].is_dp_alt_disable ? 1 : 0) ? 1 : 2;
     }
+}
+
+/* 302: THE DIO STREAM ENCODER, AND THE READ IS THE EXPERIMENT.
+ *
+ * Thirteen boots of the external-display line put a clock on pipe 1, a raster
+ * on OTG1, a front end on DIG2, a training pattern on the wire and a
+ * transmitter ENABLE through the DMCUB, and the sink saw nothing. 301 retired
+ * the last standing explanation. What has never been attempted in any boot is
+ * a STREAM: before this function, `grep -rn DP_VID_STREAM src/` found nothing.
+ *
+ * WHY A READ FIRST, AND WHY IT IS NOT A CHEAP ONE. Instance 0 is the PANEL -
+ * a live, working, composited DP stream at 143.83 Hz native. So every one of
+ * these fourteen registers has a known-good value sitting in instance 0 in the
+ * SAME SAMPLE as DIG2's, which makes this the strongest in-boot positive
+ * control this project has had for a write set. A write designed off upstream
+ * alone is designed against a manual; a write designed off instance 0's live
+ * words is designed against the machine (rule 25). The three instances never
+ * brought up are the negative control in the same sample.
+ *
+ * THE GATE. `strencBase` compares instance 0's DP_MSA_TIMING_PARAM1 against
+ * THIS BOOT'S OWN OTG0 H_TOTAL and V_TOTAL, read here, in this sample, from
+ * the registers rb_dpdto.h already names - never against the 2106/1129 in the
+ * card, because the DRR ladder moves V_TOTAL and 2FB already misconverted a
+ * measurement by treating 143.83 Hz as true while the panel sat at 61.40. If
+ * instance 0 does not decode as the live raster then the offsets are wrong and
+ * nothing else published here is a reading; rb_strenc.h owns that judgement so
+ * the hosttest owns it too, and the H_TOTAL half is strict while V_TOTAL gets
+ * a named window for the DRR reason.
+ *
+ * THE WITNESS. `DP_VID_STREAM_CNTL` carries DP_VID_STREAM_ENABLE (bit 0, what
+ * a driver writes) and DP_VID_STREAM_STATUS (bit 16, what the hardware
+ * answers) - and `enc2_stream_encoder_dp_unblank` writes the first then
+ * REG_WAITs on the second, which is upstream saying in its own code that the
+ * second is not a readback of the first. Published as two separate masks for
+ * 2E6's reason: `applied` without `changed` is not evidence, and publishing
+ * the bit we wrote as the bit the chip answered would be that defect in a new
+ * register. ASKED_NOT_RUNNING is its own verdict code because "asked for and
+ * refused" is the most informative thing this block can ever say.
+ *
+ * Read-only. No setter anywhere in this path.
+ */
+void RBAMDFramebuffer::strencSample(void)
+{
+    if (!strencReady || !hubpRegs) { return; }
+
+    for (unsigned i = 0; i < RB_STRENC_COUNT; i++) {
+        for (unsigned r = 0; r < RB_STRENC_REG_COUNT; r++) {
+            const uint32_t dw = rb_strenc_dw(i, (enum rb_strenc_reg)r);
+            /* Cannot happen for these bounds, but dword 0 of a segment is a
+             * read of another block entirely, so an INVALID is refused rather
+             * than trusted (rule 19, and dpaltSample()'s own shape). */
+            if (dw == RB_STRENC_DW_INVALID) { continue; }
+            strencWord[i][r] = hubpRegs[kRbDmuSeg2 + dw];
+        }
+        strencVerdict[i] =
+            (int)rb_strenc_verdict(strencWord[i][RB_STRENC_R_VID_STREAM_CNTL]);
+    }
+
+    /* The three masks, from the fourteen-wide rows. Built here rather than in
+     * rb_strenc.h's helpers for the ENABLE and STATUS halves because those two
+     * are deliberately not collapsed into one accessor. */
+    uint32_t cntl[RB_STRENC_COUNT];
+    strencEnMask = 0;
+    strencStatusMask = 0;
+    for (unsigned i = 0; i < RB_STRENC_COUNT; i++) {
+        cntl[i] = strencWord[i][RB_STRENC_R_VID_STREAM_CNTL];
+        if (rb_strenc_enabled(cntl[i])) { strencEnMask |= (1u << i); }
+        if (rb_strenc_status(cntl[i]))  { strencStatusMask |= (1u << i); }
+    }
+    strencRunMask = rb_strenc_running_mask(cntl, RB_STRENC_COUNT);
+    strencSweep   = (int)rb_strenc_sweep_verdict(cntl, RB_STRENC_COUNT);
+
+    /* THE LIVE REFERENCE, taken in THIS sample. A control measured in a
+     * different window is not a control (rule 44), and these are the same two
+     * dwords and the same mask rb_dpdto.h uses, so the number this check is
+     * made against is the number the rest of the kext means by it. */
+    strencHTotal = hubpRegs[kRbDmuSeg2 + RB_DPDTO_DW_OTG0_H_TOTAL] &
+                   RB_DPDTO_TOTAL_MASK;
+    strencVTotal = hubpRegs[kRbDmuSeg2 + RB_DPDTO_DW_OTG0_V_TOTAL] &
+                   RB_DPDTO_TOTAL_MASK;
+    strencBase = (int)rb_strenc_base_verdict(
+        strencWord[RB_STRENC_PANEL_INST][RB_STRENC_R_MSA_PARAM1],
+        strencHTotal, strencVTotal);
 }
 
 /* 2EF: PIPE 0'S LIVE DP PIXEL-CLOCK DTO, AND THE SEGMENT CHECK.
