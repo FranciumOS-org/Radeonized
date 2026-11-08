@@ -462,43 +462,68 @@ with a new clause: **so is WHEN the port came up.** (`RBFBAuxEn` and
 
 **Still not done:** a **stream** on DIG2, a surface, and a second
 `IOFramebuffer` (`getDisplayModeCount()` has returned 1 since 2sl).
-**303: boot 472 READ IT.** Addresses **confirmed** — but the gate first refused
-because **MSA holds the TRUE total and the OTG register holds `total - 1`**
-(`dcn10_optc.c:191` vs `dcn10_stream_encoder.c:419`), so MSA = OTG **+1** on
-both axes: instance 0 read 2107/1130 against a live 2106/1129. Corroborated
-twice more in the same sample: `MSA_PARAM4` = `0x07800438` = **1920x1080** (the
-active raster — the **stronger** check, DRR cannot move it, now published as
-`RBFBStrencActiveAgree` and derived from OTG0's blank words, which **wrap**:
-START 2047, END 127, active = START − END), and `MSA_PARAM2` VSTART **20** =
-the V blank end already in this card. Panel instance **RUNNING**, masks all
-`0x01`, sweep DIFFERS, **DIG2's MSA registers all blank** — the positive
-identification of what is missing. **TWO per-instance differences on DIG2,
-four-instance control, registers never read before:
-`DP_STEER_FIFO_RESET` **set** on DIG2 and clear on all four others (a **held
-reset**; `dp_unblank` pulses it 1→0), and `DP_VID_STREAM_DIS_DEFER` **0** on
-DIG2 against **2** everywhere else, so 2 is the reset value and DIG2's 0 was
-**written by the firmware at boot**. **Neither is established as the blocker**
-— DIG2 is the only instance with a cable, and no stream exists for the FIFO to
-carry. What it does establish: the firmware did more on DIG2 than assumed, and
-the write set has two values to **clear**, not set.
+**303 read the block; 304 derived what to write and gave the derivation a
+control.** Addresses **confirmed three ways in boot 473**: `BASE CONFIRMED`
+(MSA = OTG **+1** on both axes — `dcn10_optc.c:191` vs
+`dcn10_stream_encoder.c:419`, the convention that refused 472),
+`MSA_PARAM4` = `0x07800438` = **1920x1080** active (the stronger check, DRR
+cannot move it), and `MSA_PARAM2` VSTART **20** = the V blank end. Panel
+instance **RUNNING**, masks all `0x01`, sweep DIFFERS, **DIG2's MSA registers
+all blank** — the positive identification of what is missing.
 
-**302 built the stream encoder READ** — `src/common/rb_strenc.h`,
-`tools/strenclook.sh`, 14 registers x 5 instances, BASE_IDX 2, stride 0x100,
-read-only. **The read is the experiment: DIG0 is the panel's live working DP
-stream**, so every field has a known-good value in the same sample as DIG2's
-and the three never brought up are the negative control. Gate: instance 0's
-`DP_MSA_TIMING_PARAM1` must decode as **this boot's own** OTG0 totals (not the
-card's — DRR moves V_TOTAL, 2FB). **The witness this line has lacked since
-2EB:** `DP_VID_STREAM_CNTL` bit 0 `ENABLE` (what a driver writes) vs bit 16
-`STATUS` (what the **hardware** answers, and what upstream `REG_WAIT`s on) —
-published as two masks, never one. Four files for one operation
+**Two per-instance differences on DIG2, four-instance control** —
+`DP_STEER_FIFO_RESET` **set** on DIG2 and clear on all four others (a **held
+reset**; `dp_unblank` pulses it 1->0), and `DP_VID_STREAM_DIS_DEFER` **0** on
+DIG2 against **2** everywhere else, so 2 is the reset value and DIG2's 0 was
+written by the firmware at boot. **Both reproduced in boots 472 and 473**
+(rule 44's two boots per side). **`DIS_DEFER` IS RETIRED AS A CANDIDATE on
+source grounds**: `dcn20_stream_encoder.c:541` says *"this register has no
+effect on enable transition"* and upstream stopped programming it — so it is
+real, firmware-written, and **not** the blocker, and the write set must not
+touch it. The held FIFO reset survives as the only live candidate of the two,
+and the unblank's own pulse covers it by construction.
+
+**304: every MSA field is derivable from six OTG registers, and the panel is
+the control.** Inverting `optc1_program_timing` collapses the arithmetic:
+**`MSA_HSTART` = `OTG_H_BLANK_END`**, **`MSA_VSTART` = `OTG_V_BLANK_END`**,
+sync widths = `OTG_*_SYNC_A_END`, and the **polarity bit transfers unchanged**
+because optc and MSA both store the negation of the same flag; totals are the
+register **+1**, `HWIDTH`/`VHEIGHT` are blank `START - END`.
+`rb_strenc_derive_msa()` writes its output **only on OK**, has nine refusal
+codes, and `rb_strenc_msa_mismatch()` returns a **mask of which word
+disagrees** (`0x10` = could not derive, above the four-bit range).
+`strencSample()` derives **both pipes** and compares **pipe 0's against DIG0's
+four live words bit for bit in the same sample** — `RBFBStrencMsaMismatch`,
+0 = agree. That is **PARAM3's only real check**: the hosttest's sync inputs
+were back-derived from its own expected output, which is circular, so the
+boot is where the sync and polarity fields are first read rather than assumed.
+Pipe 1's derivation has **no control** and is published rather than hidden.
+Fourteen break-it checks, all caught by a failing test.
+
+**The M/N formula is validated against hardware**: `n_vid` is always `0x8000`
+and `m_vid = N * pix_khz / (link_rate * 27000)`; at the panel's ~342 MHz over
+**HBR** that gives 41508 against a live `0xa2a4` = 41636 (0.3%, the residual
+being the DRR drift). **`DP_VID_M` is hardware-generated on the panel**
+(`DP_VID_M_N_GEN_EN` set) and moved `0xa2a6` -> `0xa2a4` between boots 472 and
+473, so it is a value to **prime**, never to copy. For the sink at 148500 kHz
+over HBR2: `m_vid` **9011**. `tools/strenclook.sh`.
+
+**302 built the stream encoder READ** — `src/common/rb_strenc.h`, 14 registers
+x 5 instances, BASE_IDX 2, stride 0x100. **The read is the experiment: DIG0 is
+the panel's live working DP stream**, so every field has a known-good value in
+the same sample as DIG2's and the three never brought up are the negative
+control. **The witness this line has lacked since 2EB:**
+`DP_VID_STREAM_CNTL` bit 0 `ENABLE` (what a driver writes) vs bit 16 `STATUS`
+(what the **hardware** answers, and what upstream `REG_WAIT`s on) — published
+as two masks, never one. Four files for one operation
 (`dcn31_resource.c:1323` construct DCN30 over a **DCN10** register struct;
-`.dp_set_stream_attribute`/`.dp_unblank` are **DCN20's**; `.dig_connect_to_otg`
-**DCN10's**), all vendored. **And `setup_dio_stream_encoder` is NOT the gap:**
-its `enable_stream` / `map_stream_to_link` / `set_input_mode` / `enable_fifo`
-are all **absent** from `dcn30_str_enc_funcs`, so it reduces to
-`connect_dig_be_to_fe`, done in 2EC.
-**Order:** FE connect → configure encoder → transmitter ENABLE; the atom
+`.dp_set_stream_attribute`/`.dp_unblank` are **DCN20's**;
+`.dig_connect_to_otg` **DCN10's**), all vendored.
+**And `setup_dio_stream_encoder` is NOT the gap:** its `enable_stream` /
+`map_stream_to_link` / `set_input_mode` / `enable_fifo` are all **absent**
+from `dcn30_str_enc_funcs`, so it reduces to `connect_dig_be_to_fe`, done in
+2EC.
+**Order:** FE connect -> configure encoder -> transmitter ENABLE; the atom
 transmitter command carries no front end **by design**.
 **2FC corrected the name:** `enc31_map_stream_to_link` is the **HPO DP**
 (128b/132b) encoder's and our 8b/10b link never goes through it. This chip's
@@ -513,23 +538,6 @@ unprogrammed, and the only finding available is a **non-zero** `ENC_TYPE_SEL`
 on LINKC. `tools/diolook.sh`; read-only, no setter, and the caller that
 programs it is **not** identified.
 
-**The firmware does NOT train this link** (2F3, measured with a control), so
-training is ours. **PHY0 / DIG0 / front end DIGA are the panel's and are
-refused by name** in every half of every one of these experiments.
-
-**2F8: `dptrain go tps=3` DEGRADES THIS SINK and the recovery is a REBOOT.**
-Two boots. A sink measured healthy (EDID header and checksum OK, DPCD `0x000`
-byte-identical to 2D8/2BB, `0x202` reading) goes to `00 00 00 81 ... 84 00` with
-`0x202` DEFERring, immediately after one run. `tps=2` does not bring it back,
-nor DPCD `0x102`=`0x00`, nor `0x600`=`0x01`; further writes make it worse. **All
-of 2F7 was the aftermath of this**, so its two dead hypotheses were killed by
-invalid data. `dptrain` now **refuses `tps=3`/`tps=4`** (exit 3, `force`
-overrides). **Use `tps=2`.** What survives of the DPCD-store question is
-narrower and about *proximity*, not transmitter movement: `0x102` stores only
-when written inside `dptrain`'s own call, ~100 µs after the register writes
-(n=2 boots), and not from a separate call with the TX unmoved (in-boot control,
-same address and value). `0x01` drives the byte to `0x00` and `0x03` never
-stores, both reproduced in two boots.
 ---
 
 ## Boot-args and dials
@@ -630,9 +638,11 @@ table, which we have on disk); **polling `checkTimestamps()` harder**
 
 **Open:** the rest of the external-display chain — `docs/EXTERNAL-DISPLAY.md`
 for the state, `docs/HANDOFF-NEXT.md` for the next step. **The blocker is not
-named** (301 retired "the analog PHY is off"); the three things never
-attempted are a **stream** on DIG2 (`dcn30_dio_stream_encoder.c`), a
-**surface** on pipe 1 and a second `IOFramebuffer`. 2F8 added a cost: `tps=3`
+named** (301 retired "the analog PHY is off"); the things never
+attempted are a **stream** on DIG2 (`dcn30_dio_stream_encoder.c` — 304 has
+the write set derived and its arithmetic validated against the panel, but
+**nothing is written yet and there is still no setter**), a **surface** on
+pipe 1 and a second `IOFramebuffer`. 2F8 added a cost: `tps=3`
 **degrades the sink until a reboot**, which is what 2F7 spent a milestone
 diagnosing. Also open: the **wedge** (work submitted that
 never retires — channel-52 GFX, 3.5 s, the "random lag"; `stamp_ticks` 125666
