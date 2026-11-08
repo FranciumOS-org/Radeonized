@@ -68,6 +68,9 @@ uint32_t RBAMDFramebuffer::strmProgram(uint32_t inst, uint32_t tgInst,
     strmStatusOff   = 0;
     strmMVid        = 0;
     strmPhaseUsed   = phase;
+    for (i = 0; i < RB_STRPROG_MAX_WRITES; i++) {
+        strmWas[i] = 0; strmWant[i] = 0; strmGot[i] = 0;
+    }
     strmInstUsed    = inst;
     strmOtgUsed     = tgInst;
     strmPixKhzUsed  = pixKhz;
@@ -137,6 +140,17 @@ uint32_t RBAMDFramebuffer::strmProgram(uint32_t inst, uint32_t tgInst,
          * these - it reads 0, and 0 is also the reset value, so whether the
          * write moved anything is exactly the thing that cannot be assumed. */
         if (hubpRegs[addr] != was) { strmChangedMask |= (1u << i); }
+
+        /* THE READBACK ITSELF, per write, not just whether it differed.
+         * Boot 478 inferred "DP_VID_M refused the store" from a zero bit in
+         * the changed mask, which cannot tell a dropped store from a store of
+         * the value already there. The word the register held immediately
+         * after the store is the reading; keep it. */
+        if (i < RB_STRPROG_MAX_WRITES) {
+            strmWas[i]  = was;
+            strmWant[i] = val;
+            strmGot[i]  = hubpRegs[addr];
+        }
 
         if (w[i].delay_us) { IODelay(w[i].delay_us); }
 
@@ -214,6 +228,18 @@ void RBAMDFramebuffer::strmPublish(void)
     setProperty("RBFBStrmVerdict",    (uint64_t)strmVerdict, 32);
     setProperty("RBFBStrmSteerAfter", (uint64_t)strmSteerAfter, 64);
     setProperty("RBFBStrmFeAfter",    (uint64_t)strmFeAfter, 64);
+
+    /* Per write: what the register held, what we asked, what it held
+     * immediately afterwards. A store that is dropped and a store of a value
+     * already present look identical in the changed mask alone. */
+    for (i = 0; i < strmWrites && i < RB_STRPROG_MAX_WRITES; i++) {
+        snprintf(key, sizeof(key), "RBFBStrmW%uWas", i);
+        setProperty(key, (uint64_t)strmWas[i], 64);
+        snprintf(key, sizeof(key), "RBFBStrmW%uWant", i);
+        setProperty(key, (uint64_t)strmWant[i], 64);
+        snprintf(key, sizeof(key), "RBFBStrmW%uGot", i);
+        setProperty(key, (uint64_t)strmGot[i], 64);
+    }
     for (i = 0; i < 4; i++) {
         snprintf(key, sizeof(key), "RBFBStrmMsaAfter%u", i + 1u);
         setProperty(key, (uint64_t)strmMsaAfter[i], 64);
