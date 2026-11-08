@@ -176,10 +176,17 @@ static inline uint32_t rb_dpcsphy_dw(uint32_t inst, enum rb_dpcsphy_reg r)
  */
 enum rb_dpcsphy_verdict {
     RB_DPCSPHY_V_UNKNOWN   = 0,  /* no sample                              */
-    RB_DPCSPHY_V_DEAD      = 1,  /* no ref clock, no SRAM, no clocks on    */
+    RB_DPCSPHY_V_DEAD      = 1,  /* no ref clock, no SRAM                  */
     RB_DPCSPHY_V_CLOCKLESS = 2,  /* SRAM loaded but the detector says no clk */
     RB_DPCSPHY_V_NO_SRAM   = 3,  /* clock detected but firmware not loaded  */
-    RB_DPCSPHY_V_ALIVE     = 4   /* ref clock detected AND SRAM init done   */
+    RB_DPCSPHY_V_ALIVE     = 4,  /* ref clock detected AND SRAM init done   */
+    /* THE DETECTOR IS OFF, so no clock-based verdict is available. Boot 479
+     * is why this value exists: with REF_CLKDET_EN clear on all five
+     * instances, the first version of this function called the PANEL'S OWN
+     * LIVE PHY "CLOCKLESS". It classified on an input whose licence had
+     * failed - the recurring error, in the one place written to prevent it.
+     * A verdict with no basis is now a verdict of its own, not a guess. */
+    RB_DPCSPHY_V_NO_LICENCE = 5
 };
 
 /* THE CLOCK_ON BITS ARE NOT IN THE VERDICT, and that is deliberate.
@@ -194,12 +201,19 @@ enum rb_dpcsphy_verdict {
  *
  * Both inputs are ANSWERED bits. A break that swaps either for its DRIVEN
  * neighbour is caught by a failing test. */
+static inline int rb_dpcsphy_clkdet_valid(const struct rb_dpcsphy_inst *in);
+
 static inline int rb_dpcsphy_verdict(const struct rb_dpcsphy_inst *in)
 {
     uint32_t p;
     int clk, sram;
 
     if (!in) { return RB_DPCSPHY_V_UNKNOWN; }
+    /* THE LICENCE COMES FIRST. Both clock-bearing verdicts rest on
+     * REF_CLKDET_RESULT, and that bit means nothing while the detector is
+     * disabled, so there is nothing to classify. */
+    if (!rb_dpcsphy_clkdet_valid(in)) { return RB_DPCSPHY_V_NO_LICENCE; }
+
     p = in->w[RB_DPCSPHY_R_PHY_CNTL0];
     clk  = (p & RB_DPCSPHY_A_REF_CLKDET_RESULT) ? 1 : 0;
     sram = (p & RB_DPCSPHY_A_SRAM_INIT_DONE) ? 1 : 0;
@@ -208,6 +222,49 @@ static inline int rb_dpcsphy_verdict(const struct rb_dpcsphy_inst *in)
     if (sram)         { return RB_DPCSPHY_V_CLOCKLESS; }
     if (clk)          { return RB_DPCSPHY_V_NO_SRAM; }
     return RB_DPCSPHY_V_DEAD;
+}
+
+/* ---------------------------------------------------- the bits that MATTERED
+ *
+ * Boot 479 did not turn on the clock-detector verdict above. What it answered
+ * came from three bits whose licence is the PANEL IN THE SAME SAMPLE rather
+ * than an enable bit, and they are given accessors so the reader never has to
+ * mask by hand:
+ *
+ *   PHY0 (the live panel)  reset 0   tx_clock_on 1   fifo_en 1
+ *   PHY2 (the Type-C port) reset 1   tx_clock_on 0   fifo_en 0
+ *
+ * PHY_RESET is DRIVEN - software holds it - so a 1 says software has not
+ * released it, which is exactly the finding. TX_CLOCK_ON is ANSWERED;
+ * TX_FIFO_EN is DRIVEN.
+ *
+ * A LIMIT OF BOOT 479'S DATA, recorded because the break-it sweep found it:
+ * in that sample TX_CLOCK_ON (0x400) and the DRIVEN TX_CLK_EN (0x200) are
+ * SET TOGETHER on the panel and CLEAR TOGETHER on PHY2, and so are
+ * TX_FIFO_EN and the per-lane TX_FIFO_LANE*_EN. Swapping either accessor for
+ * its neighbour fired NOTHING against the real words. So those words pin the
+ * FINDING - the panel's PHY is released with its clock and FIFO up and PHY2's
+ * is not - but they do NOT pin which bit of each pair carries it, and
+ * TX_CLOCK_ON cannot be claimed as evidence independent of the enable beside
+ * it. The hosttest pins the bits with synthetic words instead. Separating
+ * them needs a boot where one is set without the other.
+ */
+static inline int rb_dpcsphy_in_reset(const struct rb_dpcsphy_inst *in)
+{
+    if (!in) { return -1; }
+    return (in->w[RB_DPCSPHY_R_PHY_CNTL0] & RB_DPCSPHY_D_PHY_RESET) ? 1 : 0;
+}
+
+static inline int rb_dpcsphy_tx_clock_on(const struct rb_dpcsphy_inst *in)
+{
+    if (!in) { return -1; }
+    return (in->w[RB_DPCSPHY_R_CLOCK_CNTL] & RB_DPCSPHY_A_TX_CLOCK_ON) ? 1 : 0;
+}
+
+static inline int rb_dpcsphy_tx_fifo_en(const struct rb_dpcsphy_inst *in)
+{
+    if (!in) { return -1; }
+    return (in->w[RB_DPCSPHY_R_CNTL] & RB_DPCSPHY_D_TX_FIFO_EN) ? 1 : 0;
 }
 
 /* THE REF_CLKDET RESULT IS ONLY MEANINGFUL IF THE DETECTOR IS ENABLED.

@@ -64969,3 +64969,147 @@ and so unfalsifiable by any break.
 
 New framebuffer UUID **99122618-EC61-3E7B-B428-6CD5D0044DDC**, not installed.
 One restart now answers two questions that would otherwise have taken two.
+
+---
+
+## 306 / boot 479 — THE BLOCKER HAS A NAME: PHY2 IS HELD IN RESET
+
+Framebuffer UUID **99122618**, verified inside the live auxiliary collection.
+`-rbgpufbdpalt` present, the cable in at boot (2FB), the sink up on the panel.
+One boot, two questions, both answered.
+
+### Q1 — the PHY's own status, with the panel as the positive control
+
+`tools/phylook.sh`, all five instances in one sample:
+
+```
+inst  CNTL        CLOCK_CNTL  INTR        SRAM_CNTL   PHY_CNTL0
+PHY0  0x028ff0f0  0x00117ff0  0x00000006  0x03100000  0xb0100004
+PHY1  0x008f00f0  0x001019f0  0x00000000  0x03100000  0x00100607
+PHY2  0x008f00f0  0x001019f0  0x00000000  0x03100000  0x10100605
+PHY3  0x008f00f0  0x001019f0  0x00000000  0x03100000  0x10100605
+PHY4  0x008f00f0  0x001019f0  0x00000000  0x03100000  0x10100005
+```
+
+Sweep **DIFFERS**, so the 0xd8 stride addressed five register sets and not one
+address five times. Decoded, with the panel's live working DP link beside the
+subject in the same sample:
+
+| | PHY0 — the panel, LIVE | PHY2 — UNIPHY_C, the subject |
+|---|---|---|
+| `PHY_RESET` | **0** — released | **1** — HELD |
+| `TX_CLOCK_ON` | set | clear |
+| `SRAMCLK_CLOCK_ON` | set | clear |
+| `TX_FIFO_EN` | set | clear |
+| `SRAM_INIT_DONE` | set | **set** — firmware IS loaded |
+
+**PHY2 IS HELD IN RESET, AND THAT IS THE BLOCKER'S NAME.** Its PHY firmware
+loaded (`SRAM_INIT_DONE`), so the block is powered and alive; what has not
+happened is the release. **Byte-identical before and after the full chain** —
+DTO, raster, configure, train, unblank — so **the atom transmitter ENABLE
+never takes PHY2 out of reset**, and that is consistent with everything
+downstream: no symbol clock, so DPCD `0x202` reads `0x00` and boot 478's
+`0x205` bit 0 `RECEIVE_PORT_0_STATUS` is clear. The sink is not refusing to
+train; nothing is being sent to train with.
+
+**PHY2 is byte-identical to PHY3**, which was never brought up. The port we
+have granted DP alt mode on, read EDID over, and run a pixel clock for is, at
+the PHY, in the state of a port nobody has touched.
+
+**What this does NOT say.** Not that releasing reset is sufficient, not that
+software is the thing that should release it (on the panel the firmware did),
+and not which register does it — `rb_dpcsphy.h` has **no setter** and
+`PHY_RESET` is a DRIVEN bit, so a write to it is a write to a bit whose owner
+here is the firmware. The reading locates the gap; it does not authorise a
+write into it.
+
+### Q1's own defect: the verdict classified the live panel as CLOCKLESS
+
+`RBFBPhy0Verdict` read **2 = CLOCKLESS** for the panel that is at that moment
+driving a working 1080p link. `REF_CLKDET_EN` is **clear on all five
+instances**, so `REF_CLKDET_RESULT` is meaningless on all five — and
+`rb_dpcsphy_verdict()` classified on it anyway. **The recurring error, inside
+the one function written to prevent it:** `rb_dpcsphy_clkdet_valid()` existed
+and the verdict did not consult it. Fixed by adding
+**`RB_DPCSPHY_V_NO_LICENCE = 5`** and gating the whole classification on the
+licence, so the only honest verdict in this sample is 5 on every instance.
+`phylook.sh` now says outright that a non-5 verdict on the live panel means
+the loaded kext predates the gate and is not a reading.
+
+### Q2 — `DP_VID_M` DID NOT TAKE, read directly
+
+The per-write table (`RBFBStrmW<n>Was/Want/Got`, new in 306) answers boot
+478's open question without inference:
+
+```
+DP_VID_M   0x00000000 -> 0x00002333 -> 0x00000000   *** DID NOT TAKE ***
+DP_VID_N   0x00002000 -> 0x00008000 -> 0x00002000   *** DID NOT TAKE ***
+```
+
+Same instruction stream, same instance, same mask shape, and `DP_VID_N` takes
+no store either. A **candidate** mechanism, not established: M and N feed a
+hardware generator whose registers need the link symbol clock, which a PHY in
+reset cannot supply. It sits downstream of Q1 and is not a second problem
+until Q1 is cleared.
+
+### BOOT 478'S DIG1/DIG3 CONCLUSION IS WITHDRAWN
+
+478 read `DP_VID_N` coming back `0x2000` for an `0x8000` store on DIG1/DIG3
+and concluded "they retain no stores at all". **Wrong.** Boot 479's table
+shows `0x2000` was **already there going in on DIG2 as well** — it is the
+firmware's value, present before any store, so a readback of `0x2000` is not
+evidence of a dropped ENABLE bit. Their store was simply dropped, exactly like
+DIG2's. **The "first per-instance power discrimination" claim goes with it**;
+there is none. The finding that survives is narrower and uniform: on every
+instance tried, `DP_VID_M`/`DP_VID_N` stores do not stick.
+
+### The break-it sweep found three defects in my own checks, and a limit of the data
+
+Twelve guards on `rb_dpcsphy.h`. Three rounds, each finding a defect in the
+*test*, not the code (2E8's pattern again):
+
+- breaking the verdict's CLOCK_ON term **FIRED NOTHING** — every branch it
+  reached returned the same answer, so those bits carried no information in
+  the verdict. They are published **raw** now instead of dressed up as part
+  of a reading.
+- emptying one ANSWERED mask **FIRED NOTHING** — the check tested the OR of
+  a group, so a single mask typo'd to 0 was invisible. Replaced with a
+  29-entry runtime loop over each mask individually.
+- the ANSWERED/DRIVEN overlap check **had never been coverage at all**:
+  `(a & d) || …` on constants is folded, so `-Wconstant-logical-operand`
+  killed the **build** instead of the test failing — **the `-Werror` trap for
+  the sixth time**. Routed through a `static volatile uint32_t pair[3][2]`.
+
+**And a limit of boot 479's own words, which only the sweep could have
+found.** Swapping `tx_clock_on` to read the DRIVEN `TX_CLK_EN` (0x200) instead
+of the ANSWERED `TX_CLOCK_ON` (0x400) **fired nothing**; so did swapping
+`tx_fifo_en` to the per-lane enables. In that sample each pair is **set
+together on the panel and clear together on PHY2**. So those words pin the
+**finding** — the panel's PHY is released with clock and FIFO up and PHY2's is
+not — but they do **not** pin which bit of each pair carries it, and
+`TX_CLOCK_ON` cannot be cited as evidence independent of the enable beside it.
+Recorded in `rb_dpcsphy.h`, and the hosttest now pins the bits with
+**synthetic** words that set exactly one member of each pair; breaks T and U
+then fire. Separating them on hardware needs a boot where one is set without
+the other.
+
+### Two instrument fixes, no rebuild needed for either
+
+- **`tools/phylook.sh` printed decimal.** The kext publishes 64-bit numbers,
+  so ioreg prints decimal, and a 32-bit register word in decimal is exactly
+  what a misread looks like (301 spent five boots on one). It now prints
+  `0x%08x` plus a per-register decode of which **A:** (answered) and **D:**
+  (driven) bits are set, and prints `ABSENT (key not published - NOT a zero
+  word)` rather than `0` for a missing key — rule 14 at the tool boundary.
+- The decode is where Q1 is now read off directly: PHY0's set-list has no
+  `D:PHY_RESET`, PHY2's does.
+
+### Where this leaves the line
+
+306 excluded the encoder side entirely with zero boots. Boot 479 excludes the
+sink and the link layer as the *first* obstacle: **nothing downstream of the
+PHY can be the blocker while the PHY is in reset.** The next question is not
+"what else is missing on DIG2" but **what releases `PHY_RESET` on a USB-C PHY
+on this chip, and whose job is it** — firmware's, as on the panel, or the
+driver's. `rb_dpcsphy.h` is read-only by design and stays that way until that
+is answered from source.
