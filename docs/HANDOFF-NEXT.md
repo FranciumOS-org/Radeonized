@@ -63,39 +63,85 @@ rate across 307, 308 and 309 was three proposed and three killed, each inside
 one boot of being proposed — the instrument design is working and the *place*
 is wrong.
 
-## The two places left, neither free
+## THE NEXT STEP: `DMUB_CMD__VBIOS_TRANSMITTER_SET_PHY_FSM = 29`
 
-### 1. The PHY's internal registers, via `RDPCS_TX_CR_ADDR` / `CR_DATA`
+**310 found it statically, no boot.** It supersedes both of 309b's candidates.
 
-The indirect window into the PHY's own (non-RDPCSTX) register space, which is
-where a reset-release handshake would live if it is software-reachable at all.
+`dmub_cmd.h`, same VBIOS command family as the atom ENABLE (1) and
+`QUERY_DP_ALT` (26). Doc comment: *"Control PHY FSM"*.
 
-**This is not a free read.** Cobalt64's Navi 48 survey reads `CR_ADDR` and
-deliberately does **not** read `CR_DATA`, on the suspicion that a read there
-is itself the bus trigger. Their word is SUSPECTED, not established, and we
-have no second source.
+```
+enum dmub_phy_fsm_state {
+    0 POWER_UP_DEFAULT,  1 RESET,           2 RESET_RELEASED,
+    3 SRAM_LOAD_DONE,    4 INITIALIZED,     5 CALIBRATED, ...
+    9 PLL_EN,           10 TX_EN, ...
+}
+```
 
-Before this costs a boot it needs, statically: the `_sh_mask` field layout for
-both registers; whether `CR_DATA` is read-triggering in the DCN31 headers or
-any vendored `.c`; and a read on the **live panel first** as the positive
-control, since a trigger that disturbs a working link is the failure mode that
-costs a reboot. If the trigger question cannot be settled from source, it is a
-decision for the user, not an assumption — the Type-C subsystem on this
-chassis has already died once in a way only a 30-second power-key hold cleared
-(2DD).
+**PHY2 measures as state 1. The live panel measures as state 10. 308 spent a
+milestone on state 3.** Three milestones surveyed this state machine's output
+register by register; the machine has a command.
 
-### 2. DMCUB's image
+```c
+struct dmub_rb_cmd_transmitter_set_phy_fsm_data {   /* "passed in/out" */
+    uint8_t  phy_id;        /* 2 = UNIPHYC - comment VERBATIM query_dp_alt's */
+    uint8_t  mode; uint8_t lane_num;
+    uint32_t symclk_100Hz;
+    struct phy_test_mode test_mode;
+    enum dmub_phy_fsm_state state;
+    uint32_t status;        /* <- the execution evidence command 1 cannot give */
+    uint8_t  pad;
+};
+```
 
-What services both the command that does nothing and the query that works.
-4.0.15.47, CW0/CW1, already located and already parsed for the ring. The
-question is what the firmware wants before it acts on phyid 2 — and since
-`transmitter_control_dmcub` never asks for a reply (`WAIT_TYPE_WAIT`, not
-`WAIT_WITH_REPLY`, unlike the query), **DMCUB's own execution evidence has
-never been obtained**. Static work, no boot needed to start.
+Its union member sits **immediately after `query_dp_alt`'s** (7821 vs 7817) —
+the command we already send on this ring, with a ROM-matching answer on five
+boots, using `WAIT_TYPE_WAIT_WITH_REPLY`. **The reply path is already proven on
+this machine.**
 
-**Start with the static half of either.** Both are reads of things already on
-disk, and the boot budget has bought three dead candidates in three boots —
-the next boot should be spent on a question the source could not answer.
+**Nobody has ever sent command 29** — not upstream, not us. Upstream only sets
+`use_phy_fsm` inside PSR copy_settings, which is consistent with DCN31 NULLing
+every `dpcs_*` bringup: the FSM is the firmware's, and this is the one command
+into it.
+
+### Do it in this order
+
+1. **Free, no boot, do it first.** Add the struct, the ten state names and the
+   `status` decode to `dmubbl` as a **read-only addition** — build the command,
+   send nothing. Then **read `dmub_dig_transmitter_control_data_v1_7`'s own
+   symclk field in the source** and settle whether 54000 or 5400000 is right
+   here: the two commands share a field *name* and are different ABIs, and a
+   factor of ten is a wrong PLL rate on the port we are bringing up.
+2. **Then ask the user.** Sending 29 is a **write of a new firmware command**,
+   so it is their decision (the card's rule for SMU message groups, same
+   spirit). Say what it changes: one new `DMUB_CMD__VBIOS` command on the ring
+   we already drive, **phyid 2 only**, PHY0 refused by name, `status` read back
+   and published, with the nine-register PHY survey as the in-boot before/after
+   and PHY1/3/4 as the four-instance control.
+3. **Pick the target state deliberately.** `RESET_RELEASED` (2) is the minimal
+   ask and matches the measured defect exactly. Whether the firmware accepts
+   RESET -> RESET_RELEASED directly or wants the ladder is **not established**,
+   so the `status` field is the point of the first send, not the picture.
+
+**Not established, and say so in the journal:** that the firmware acts on 29
+for a DP-alt port, that the direct transition is legal, or that DMCUB
+4.0.15.47 implements 29 at all — our image is one build, the header is
+upstream's.
+
+### The CR window is NOT a read — deprioritised
+
+`RDPCS_TX_CR_ADDR` (0x2934 + n*0xd8) and `CR_DATA` (+1) are plain 16-bit value
+fields: **no busy bit, no trigger bit, no status**, a second name for the same
+address (`DPCSSYS_CR<n>_*`), and **no vendored `.c` user**. So `CR_DATA`
+returns whatever register the **firmware's own latched address** selects, and
+choosing one means **writing CR_ADDR** and clobbering that latch mid-sequence.
+The live word decodes not as a register but as somebody else's cursor. Not a
+read experiment at all.
+
+Of the ~41 registers per instance, only `RDPCSTX_SCRATCH` (0x2ae7) and
+`DEBUG_CONFIG` (0x2aed) are worth a line in some future survey. 309b's
+conclusion stands: more registers from this file is the same experiment a
+fourth time.
 
 ## Also open, unrelated to the display
 

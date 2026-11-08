@@ -65676,3 +65676,139 @@ What is left is two places, not more registers here:
 2. **DMCUB's image** (4.0.15.47, CW0/CW1), which is what services the command
    and the query both, and the only thing that has ever answered the grant
    question.
+
+---
+
+## 310 — THE COMMAND THAT DRIVES THE PHY FSM EXISTS, HAS A STATUS FIELD, AND WE HAVE NEVER SENT IT. ZERO BOOTS.
+
+Static only. No boot was spent. This supersedes both of 309b's "two places
+left".
+
+### `DMUB_CMD__VBIOS_TRANSMITTER_SET_PHY_FSM = 29`
+
+In `dmub_cmd.h`, in the **same VBIOS command family** as the two we already
+use: `DMUB_CMD__VBIOS_DIG1_TRANSMITTER_CONTROL = 1` (the atom ENABLE, which
+moves nothing) and `DMUB_CMD__VBIOS_TRANSMITTER_QUERY_DP_ALT = 26` (the only
+instrument that has ever told PHY2 from PHY3). Its doc comment is three words:
+**"Control PHY FSM"**.
+
+```c
+enum dmub_phy_fsm_state {
+    DMUB_PHY_FSM_POWER_UP_DEFAULT = 0,
+    DMUB_PHY_FSM_RESET,              /* 1 */
+    DMUB_PHY_FSM_RESET_RELEASED,     /* 2 */
+    DMUB_PHY_FSM_SRAM_LOAD_DONE,     /* 3 */
+    DMUB_PHY_FSM_INITIALIZED,        /* 4 */
+    DMUB_PHY_FSM_CALIBRATED,         /* 5 */
+    ...
+    DMUB_PHY_FSM_PLL_EN,             /* 9  */
+    DMUB_PHY_FSM_TX_EN,              /* 10 */
+    ...
+};
+```
+
+**Read that against three milestones of measurements.** 307 measured PHY2 at
+`PHY_RESET` 1, no `TX_CLOCK_ON`, no `TX_FIFO_EN` — **FSM state 1, RESET**. The
+live panel has `PHY_RESET` 0 and both clocks and the FIFO — **TX_EN, state
+10**. 308 spent a milestone on the SRAM-load handshake; it is **state 3**. The
+survey was reading this state machine's *output*, register by register, for
+three milestones, and the state machine itself has a command.
+
+### IT HAS A STATUS FIELD, WHICH IS WHAT 307 SAID WAS MISSING
+
+```c
+/* Data passed in/out in a DMUB_CMD__VBIOS_TRANSMITTER_SET_PHY_FSM command. */
+struct dmub_rb_cmd_transmitter_set_phy_fsm_data {
+    uint8_t  phy_id;        /* 0=UNIPHYA .. 2=UNIPHYC .. */
+    uint8_t  mode;          /* HDMI/DP/DP2 etc */
+    uint8_t  lane_num;
+    uint32_t symclk_100Hz;  /* PLL symclock in 100 Hz */
+    struct phy_test_mode test_mode;
+    enum dmub_phy_fsm_state state;
+    uint32_t status;
+    uint8_t  pad;
+};
+```
+
+**"passed in/out"**, and a `uint32_t status`. 307 closed with: *"`ran` is a
+MAILBOX ACK ... `transmitter_control_v1_7` returns `BP_RESULT_OK`
+unconditionally, so Linux cannot tell whether the table ran either"*, and the
+handoff asked for **DMCUB's own execution evidence**. Command 1 has no reply
+field and is sent `DM_DMUB_WAIT_TYPE_WAIT`. **Command 29 has an out-parameter
+in the payload**, in the same position and shape as `query_dp_alt`'s
+`is_dp_alt_disable` / `is_dp4` — the command we send through this exact ring
+and read a ROM-matching answer back from on five boots, with
+`WAIT_TYPE_WAIT_WITH_REPLY`. The reply mechanism is **already proven on this
+machine, on this ring, on a neighbouring union member.**
+
+`phy_id`'s encoding is the **same comment, verbatim**, as
+`query_dp_alt_data.phy_id` — `2 = UNIPHYC`. So the one field that selects our
+port is attested by the instrument that already works, not assumed.
+
+### WHY NEITHER WE NOR LINUX HAS EVER SENT IT
+
+**No caller exists anywhere.** `grep -rn "SET_PHY_FSM|set_phy_fsm|phy_fsm|
+PHY_FSM"` over `docs/linux-ref/`, `src/` and `tools/` returns the enum, the two
+structs, the union member `set_phy_fsm` (line 7821, **immediately after
+`query_dp_alt` at 7817**) and three `uint8_t use_phy_fsm` flags inside PSR
+copy_settings — **and no code that builds command 29.** The instrument is
+checked (rule 26): the same grep shape found
+`dig1_transmitter_control`, `domain_control` and `dig1_dpia_control` where they
+exist.
+
+So upstream **exposes** the command and only ever asks the firmware to use the
+FSM *internally*, via `use_phy_fsm` during PSR power up/down. That is
+consistent with 307's finding that DCN31 NULLs every `dpcs_*` bringup function:
+**the driver has no PHY bringup because the FSM is the firmware's, and this is
+the one command that reaches into it.**
+
+### Units, and the trap in them
+
+The atom transmitter payload carries `symclk_100Hz` as **54000** for HBR2
+(`20 * 27000 / 10`, verified field by field in 307). This struct's field is
+also named `symclk_100Hz`, so the same value should apply — **but
+`dmub_dig_transmitter_control_data_v1_7`'s field must be read before assuming
+it**, because the two commands are different ABIs that happen to share a field
+name, and a factor of ten here is a wrong PLL rate on a port we are trying to
+bring up. Check it in the source, not from this entry.
+
+### What this is, and what it is not
+
+It is a **candidate with a named mechanism**, which is more than 308 or 309
+had: the observed state matches enum value 1 exactly, the target state has a
+name, and the command reports its own outcome.
+
+It is **not** established that the firmware will act on it for a DP-alt port,
+or that it accepts a transition from RESET straight to RESET_RELEASED rather
+than requiring the ladder, or that DMCUB 4.0.15.47 implements command 29 at
+all — our image is a specific build and the header is upstream's.
+
+**It is a WRITE of a new command to the firmware, so it is the user's
+decision** (the card's rule for SMU message groups, same spirit). What it
+changes: one new `DMUB_CMD__VBIOS` command on the ring we already drive,
+targeted at **phyid 2 only**, with PHY0 refused by name as everywhere else.
+The read-only part — sending nothing, but adding the struct, the state names
+and the status decode to `dmubbl` — costs nothing and is a prerequisite.
+
+### 309b's two candidates, reassessed against this
+
+**The CR window is worse than "a hazard": it is not a read.**
+`RDPCSTX<n>_RDPCS_TX_CR_ADDR` (0x2934 + n*0xd8) and `..._CR_DATA` (+1) are
+**plain 16-bit value fields** — `RDPCS_TX_CR_ADDR_MASK 0x0000FFFF`,
+`RDPCS_TX_CR_DATA_MASK 0x0000FFFF` — with **no busy bit, no trigger bit, no
+status**, and the offset header gives them a **second name for the same
+address**, `DPCSSYS_CR<n>_DPCSSYS_CR_ADDR`. No vendored `.c` uses either
+(instrument checked: the grep found an unrelated `AUTO_INCR_ADDR` hit in
+`gfx_v10_0.c`). So reading `CR_DATA` returns whatever PHY register the address
+**currently latched by the firmware** selects — an address we did not
+establish — and to read anything we chose we would first have to **write
+CR_ADDR**, clobbering the firmware's own latch mid-sequence. Rule 47's write
+clause in a new form: the live word does not decode as a register, it decodes
+as *somebody else's cursor*. **Deprioritised, and not as a read.**
+
+The block has ~41 registers per instance (full RDPCSTX2 list now recorded:
+`PHY_CNTL0..17`, `PHY_FUSE0..3`, `SCRATCH` 0x2ae7, `DEBUG_CONFIG` 0x2aed,
+`PHY_RX_LD_VAL`, `PLL_UPDATE_*`, `CNTL3`). `RDPCSTX_SCRATCH` is worth one line
+in a future survey as a place firmware might stamp progress — but 309b's
+conclusion stands: **more registers from this file is the same experiment a
+fourth time.** The FSM command is a different kind of question.

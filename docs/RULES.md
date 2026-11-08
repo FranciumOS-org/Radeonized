@@ -578,6 +578,45 @@ step.** Two places are left: the PHY's **internal** registers behind
 not a free read), and **DMCUB's image**, which services both the command and
 the query.
 
+
+**310: THE COMMAND THAT DRIVES THE PHY FSM EXISTS, HAS A STATUS FIELD, AND WE
+HAVE NEVER SENT IT — ZERO BOOTS.**
+**`DMUB_CMD__VBIOS_TRANSMITTER_SET_PHY_FSM = 29`**, in the same VBIOS family as
+the atom ENABLE (1, moves nothing) and `QUERY_DP_ALT` (26, the only instrument
+that tells PHY2 from PHY3). Doc comment: *"Control PHY FSM"*. `enum
+dmub_phy_fsm_state`: 0 POWER_UP_DEFAULT, **1 RESET**, **2 RESET_RELEASED**,
+**3 SRAM_LOAD_DONE**, 4 INITIALIZED, 5 CALIBRATED, 9 PLL_EN, **10 TX_EN**.
+**307 measured PHY2 at state 1 and the live panel at state 10, and 308 spent a
+milestone on state 3** — three milestones surveyed this state machine's
+*output* register by register while the machine itself had a command.
+**`struct dmub_rb_cmd_transmitter_set_phy_fsm_data` is "passed in/out" and
+carries a `uint32_t status`** — the DMCUB execution evidence 307 said was
+missing, since command 1 has no reply field at all. Its `phy_id` comment is
+**verbatim** `query_dp_alt`'s (`2 = UNIPHYC`), and its union member sits
+**immediately after `query_dp_alt`'s** (7821 vs 7817) on the ring we already
+drive and read ROM-matching answers back from. **No caller exists anywhere** —
+not upstream, not ours (grep over `docs/linux-ref/`, `src/`, `tools/`;
+instrument checked). Upstream only ever sets `use_phy_fsm` inside PSR
+copy_settings, which is consistent with DCN31 NULLing every `dpcs_*` bringup:
+**the FSM is the firmware's and this is the one command into it.**
+**Not established:** that the firmware acts on it for a DP-alt port, that
+RESET -> RESET_RELEASED is legal without the ladder, or that DMCUB 4.0.15.47
+implements 29 at all. **`symclk_100Hz` shares a NAME with the atom payload's
+field and is a different ABI — read the source, not this card** (a factor of
+ten is a wrong PLL rate). **Sending it is a WRITE of a new firmware command and
+therefore the user's decision**; adding the struct and the status decode to
+`dmubbl` without sending costs nothing.
+**And the CR window is NOT A READ.** `RDPCS_TX_CR_ADDR` (0x2934 + n*0xd8) /
+`CR_DATA` (+1) are plain 16-bit value fields — no busy, no trigger, no status —
+with a second name for the same address (`DPCSSYS_CR<n>_*`) and **no vendored
+`.c` user**. Reading `CR_DATA` returns whatever register the **firmware's own
+latched address** selects, and choosing one means **writing CR_ADDR** and
+clobbering that latch mid-sequence. Rule 47's write clause in a new form: the
+live word decodes not as a register but as somebody else's cursor.
+**Deprioritised.** Full RDPCSTX2 list is in the journal (~41 per instance;
+`SCRATCH` 0x2ae7 and `DEBUG_CONFIG` 0x2aed are the only ones worth a line
+later).
+
 **Still not done:** a **stream** on DIG2, a surface, and a second
 `IOFramebuffer` (`getDisplayModeCount()` has returned 1 since 2sl).
 **303 read the block; 304 derived what to write and gave the derivation a
@@ -882,12 +921,15 @@ longer a register on our side: the driver has **no** PHY bringup on DCN31, the
 VBIOS table is the only mechanism, our payload is verified field by field, and
 `ran` is only a mailbox ack. What is needed is **DMCUB's own execution
 evidence** and what else the firmware wants before it acts on phyid 2 — and
-**309 is the live question: is PHY2's register
-interface BLOCKED?** `RDPCSTX_DPALT_CONTROL_REG`'s
-`ALLOW_DRIVER_ACCESS` / `DRIVER_ACCESS_BLOCKED`, read against the panel AND
-against dark USB-C PHY3, needs a boot on framebuffer UUID **16CB216D**.
-308's SRAM candidate is **dead** — it separated live from dark, not PHY2 from
-anything.
+**310 found it: `DMUB_CMD__VBIOS_TRANSMITTER_SET_PHY_FSM = 29`**, whose
+`dmub_phy_fsm_state` enum names RESET (PHY2's measured state), RESET_RELEASED,
+SRAM_LOAD_DONE and TX_EN (the panel's), and whose payload is **"passed in/out"
+with a `uint32_t status`** — the execution evidence command 1 cannot give.
+**Nobody has ever sent it, upstream included.** Sending it is a new firmware
+command and so the **user's decision**. 308's SRAM candidate and 309's
+ownership registers are both **dead**, and 309b closed the register survey as
+a method: nine registers cannot tell PHY2 from PHY3 while `QUERY_DP_ALT` can.
+The CR window is **not a read** (310) and is deprioritised.
 The things never attempted are a stream on a **trained** DIG2 link, a
 **surface** on pipe 1 and a second `IOFramebuffer`. 2F8 added a cost: `tps=3`
 **degrades the sink until a reboot**, which is what 2F7 spent a milestone
