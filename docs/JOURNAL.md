@@ -63848,3 +63848,137 @@ tools/dpcspipelook.sh
 
 In that order, because the agreement is only computed in a publish that
 happens after `dpaltq` has answered.
+
+---
+
+## 301 — boot 471: the right register agrees with the DMUB, and 0x00063333 is
+## retired as a misread rather than withdrawn on suspicion
+
+Tag: `301`. Boot 470 and boot 471.
+
+### Boot 470 was rule 15, and it caught itself
+
+`rbgpu-boot` 471's predecessor came up armed correctly (`-rbgpufbdpalt`,
+`-rbgpufbdig`, `-rbgpufbaltq`, `-rbgpufbfe`, `wdt=-1`) and running the
+**pre-300 framebuffer**:
+
+| | UUID | `RBFBDpcsPipe*` strings |
+|---|---|---|
+| built, `build/out` | `AC5E2C85` | 6 |
+| live, in the collection | `09F04A54` (staged 19:05) | **0** |
+
+`ioreg` published zero `RBFBDpcsPipe` keys. Checked **before** any reading was
+taken, which is the whole content of rule 15 — 2xx cost nine boots to exactly
+this, the plugin reinstalled every time and the framebuffer never.
+
+The boot was not wasted: `dmubbl dpaltq` ran and gave a **third** reproduction
+of the ROM match, with a detail the earlier runs had not been read for. Among
+the three PHYs the DMUB reports as USB-C, **only PHY2 has `alt_disable` 0**:
+
+```
+  phy  is_usb  alt_disable  is_dp4  echo  refusal
+   0     0         1          1      0   OK
+   1     0         1          1      1   OK
+   2     1         0          0      2   OK   <== the Type-C port (2E1)
+   3     1         1          0      3   OK
+   4     1         1          0      4   OK
+```
+
+That makes the DMUB's answer a **discrimination**, not a blanket "granted",
+and it set up the test boot 471 then ran.
+
+### Boot 471: AGREES, and the sweep DIFFERS
+
+UUID `AC5E2C85` inside the collection, `RBFBHubpRefuse` 0,
+`RBFBDpcsPipeReady` Yes. `dmubbl dpaltq` first (the agreement is only computed
+in a publish that happens after it answers), then `tools/dpcspipelook.sh`:
+
+| instance | dword | word | DP4 | DISABLE | ACK | verdict |
+|---|---|---|---|---|---|---|
+| RDPCSPIPE0 | 0x2d73 | `0x00000000` | 0 | 0 | 0 | 3 = NOT DISABLED |
+| RDPCSPIPE1 | 0x2e4b | `0x00060000` | 0 | **1** | **1** | 1 = DISABLED |
+
+`RBFBDpcsPipeSweep` = **1 = DIFFERS**, `RBFBDpcsPipeAgree` = **1 = AGREES**.
+
+**The control fired, and that is what makes this worth anything.** The sweep's
+DIFFERS proves these are two registers and not one address read twice — which
+mattered more than usual here, because upstream's own table aliases indexes 2,
+3 and 4 onto these two and a decoder that answered them would have handed back
+one register under another's name. And the agreement is **not vacuous**: one
+instance agrees with the DMUB while the other **actively disagrees**, so the
+test discriminated rather than passing on a field that reads 0 everywhere.
+Had both instances read `0x00000000`, AGREES would have carried no
+information, and the guard against that is in `rb_dpcspipe.h`'s hosttest as
+the break-it case where the agreement is made to read instance 0 only.
+
+### The three instruments in one sample
+
+| instrument | on PHY2 / UNIPHY_C | says |
+|---|---|---|
+| `QUERY_DP_ALT`, ROM-matched, three boots | `alt_disable` **0** | granted |
+| `RDPCSPIPE0_PHY_CNTL6` @ 0x2d73 | `0x00000000` | **not disabled** |
+| `RDPCSTX2_PHY_CNTL6` | `0x00063333` | disabled **and** acked |
+
+The RDPCSTX block, same sample, as the in-boot spread it has always been read
+against:
+
+```
+RDPCSTX0  0x00194444   the panel's, DISABLE clear
+RDPCSTX1  0x00023333   DISABLE set, ACK CLEAR - settling
+RDPCSTX2  0x00063333   DISABLE set and acked
+RDPCSTX3  0x00063333
+RDPCSTX4  0x00063333
+```
+
+### What is now established, and what is not
+
+**`0x00063333` is RETIRED as a misread, not withdrawn on suspicion.** 300
+withdrew "the analog PHY is off" on source grounds — upstream reads a
+different register for UNIPHY_C on this part. 301 is the positive case:
+`RDPCSTX2`'s word contradicts **both** the independent ROM-attested instrument
+**and** the register Linux actually reads, in one sample, with a working
+in-boot control on each side. Two of three agree and the two that agree are
+the two that are entitled to.
+
+**The counting lines up without being an identification.** The DMUB reports
+three USB-C PHYs and exactly **one** granted; `RDPCSPIPE` has two instances
+and exactly **one** not disabled. That is consistent with instance 0 being
+UNIPHY_C's, and it is **still not proof** — one matching bit across two
+candidates is not an identification (rule 18), and three PHYs against two
+registers cannot be a one-to-one map. `rb_dpcspipe.h` declines to decide it
+and `rb_dpcspipe_agrees_with_dmub()` stays an OR over instances.
+
+**LANE POWER IS UNTOUCHED.** This register defines three fields —
+`DPALT_DP4`, `DPALT_DISABLE`, `DPALT_DISABLE_ACK`
+(`dpcs_4_2_0_offset.h:11945-11957`) — and no MPLL, no reference clock, no
+PSTATE. Nothing in boot 471 says whether a lane is powered. The question is
+not answered in either direction and must not be reported as answered because
+a DP-alt register came back agreeing.
+
+### So what is the blocker
+
+Still not named, and the candidate list is now shorter than it has ever been.
+Dead: the raster (2FD), the pixel clock (2FE), `hpdsel` (300), power gating
+(300), the DIO encoder-type mux (2FC, negative), and the analog-PHY reading
+itself (301). The atom transmitter ENABLE has executed since 2E2 and the DMCUB
+consumes and acks every command.
+
+What remains absent from the chain is what it has been since the start, and
+none of it has been attempted:
+
+1. **A stream on DIG2.** No stream encoder is programmed at all. This chip's
+   DIO stream encoder is built by `dcn30_dio_stream_encoder_construct` over
+   DCN10's register struct (`dcn31_resource.c:1323`, `:361`), so the file to
+   read is `dcn30_dio_stream_encoder.c` — **not** a dcn31 file, and **not**
+   `enc31_map_stream_to_link`, which 2FC established is the HPO DP
+   (128b/132b) encoder's and off our 8b/10b path entirely.
+2. **A surface on pipe 1** — HUBP, address, swizzle. The raster scans
+   blanking.
+3. **A second `IOFramebuffer`.** `getDisplayModeCount()` has returned 1 since
+   2sl.
+
+A link carrying no stream, scanning out no surface, is consistent with every
+reading taken across all thirteen boots of this line, and it requires no dark
+PHY to explain. **That is where the next milestone goes**, and the sink's
+silence stops being evidence about the PHY the moment there is nothing for the
+PHY to carry.
