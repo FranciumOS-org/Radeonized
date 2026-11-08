@@ -241,6 +241,74 @@ int dig_tests(void)
               "that was already up when we found it");
     }
 
+    /* 2FF: the hpdsel override. The point of these cases is that the
+     * override cannot widen the gate and cannot silently fail. */
+    {
+        struct rb_dig_params p;
+
+        rb_dig_typec_enable(&p);
+        CHECK(p.hpdsel == RB_DIG_TYPEC_HPDSEL,
+              "the producer's derived hpdsel is what an untouched set "
+              "carries - a boot that sets nothing must send what boot 468 "
+              "sent");
+
+        CHECK(rb_dig_set_hpdsel(&p, 2u) == 1 && p.hpdsel == 2u,
+              "2 is accepted: it is dmub_cmd.h's own reading of the field "
+              "and the other side of the A/B");
+
+        rb_dig_typec_enable(&p);
+        CHECK(rb_dig_set_hpdsel(&p, 6u) == 1 && p.hpdsel == 6u,
+              "6 is the top of atomfirmware.h's HPD1_SEL..HPD6_SEL");
+
+        /* THE BOUNDS ARE THE GATE'S BOUNDS. An override that could set a
+         * value rb_dig_refuse() would reject would let a caller post a
+         * payload past the gate, which is the whole reason the setter exists
+         * instead of a bare assignment. */
+        rb_dig_typec_enable(&p);
+        CHECK(rb_dig_set_hpdsel(&p, 0u) == 0 &&
+              p.hpdsel == RB_DIG_TYPEC_HPDSEL,
+              "0 is refused AND the derived value is left intact - a "
+              "half-applied override is worse than none");
+        /* EACH out-of-range case re-produces the set. Without this the
+         * cases share state: the break-it run that allowed 0 through made
+         * the PRECEDING case leave p.hpdsel at 0, and this one then failed
+         * for that reason rather than for anything about 7. A case that can
+         * fail for a reason other than the one it names is not coverage
+         * (rule 48), and it hides whichever guard it was written for. */
+        rb_dig_typec_enable(&p);
+        CHECK(rb_dig_set_hpdsel(&p, 7u) == 0 &&
+              p.hpdsel == RB_DIG_TYPEC_HPDSEL,
+              "7 is past HPD6_SEL and is refused without disturbing the set");
+        rb_dig_typec_enable(&p);
+        CHECK(rb_dig_set_hpdsel(&p, 0xffffffffu) == 0 &&
+              p.hpdsel == RB_DIG_TYPEC_HPDSEL,
+              "a wrapped value is refused too");
+        CHECK(rb_dig_set_hpdsel(0, 2u) == 0, "NULL is refused");
+
+        /* Every value the setter ACCEPTS must pass the gate, and every value
+         * it REFUSES must be one the gate would have refused. Checked as a
+         * sweep rather than at the edges, because the two bounds are written
+         * out twice in two files and the failure mode is them drifting
+         * apart. */
+        for (uint32_t h = 0; h < 10u; h++) {
+            int took;
+            uint32_t why;
+            rb_dig_typec_enable(&p);
+            took = rb_dig_set_hpdsel(&p, h);
+            why  = rb_dig_refuse(&p, 1, 1, 1);
+            if (took && why == RB_DIG_REFUSE_HPDSEL) {
+                printf("FAIL dig: hpdsel %u accepted but refused by the "
+                       "gate\n", h);
+                bad++;
+            }
+            if (!took && h != 0u && h <= 6u) {
+                printf("FAIL dig: hpdsel %u refused but inside the gate\n",
+                       h);
+                bad++;
+            }
+        }
+    }
+
 #undef CHECK
     return bad;
 }

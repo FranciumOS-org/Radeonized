@@ -120,6 +120,14 @@ bool RBAMDFramebuffer::hubpSetup(void)
      * programmed anything cannot be read as one that did and found nothing
      * (rule 14), and the refusal starts at OK only because dtoProgCalls 0 is
      * what separates "never called" from "called and allowed". */
+    /* 2FF: 0 = "use rb_dig.h's derived hpdsel", so a boot that sets nothing
+     * sends what every boot up to 468 sent. Sent and Took start at 0 for
+     * rule 14's reason: before any send there is no value to report, and 0
+     * is not a valid hpdsel (the gate's range is 1..6), so an unwritten
+     * field cannot be misread as a real one. */
+    digHpdSelWant = 0u;
+    digHpdSelSent = 0u;
+    digHpdSelTook = 0;
     dtoCallInst = RB_DPDTO_FIRST_FREE_PIPE;
     dtoCallPixHz = 0;
     /* 2FE: 0, NOT Linux's 1, and the reason is a measurement rather than a

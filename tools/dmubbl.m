@@ -1653,6 +1653,7 @@ int main(int argc, char **argv)
          * across boots cannot tell a dial from a drift, and 2B6 died on
          * exactly that. `noenc` reproduces 2E4's arm byte for byte. */
         int wantEnc = 1;
+        long wantHpdSel = 0;   /* 0 = rb_dig.h's derived value (2FF) */
         /* 2EC: the FE connection, OFF unless asked. 0 is the documented
          * INVALID and is what the kext refuses, so this is both the dial and
          * the A side; -1 asks for the derived front end (DIGC) so the
@@ -1660,7 +1661,10 @@ int main(int argc, char **argv)
          * accepted for a deliberate A/B against another front end. */
         long wantFe = 0;
         for (int a = 2; a < argc; a++) {
-            if (strcmp(argv[a], "noenc") == 0) { wantEnc = 0; }
+            if (strncmp(argv[a], "hpdsel=", 7) == 0) {
+                wantHpdSel = strtol(argv[a] + 7, NULL, 0);
+            }
+            else if (strcmp(argv[a], "noenc") == 0) { wantEnc = 0; }
             else if (strcmp(argv[a], "fe") == 0) { wantFe = -1; }
             else if (strncmp(argv[a], "fe=", 3) == 0) {
                 wantFe = strtol(argv[a] + 3, NULL, 0);
@@ -1710,7 +1714,24 @@ int main(int argc, char **argv)
          * place before the send they govern (rule 34). */
         d = @{ @"RBFBDigFe": @((int32_t)wantFe),
                @"RBFBDigEnc": @(wantEnc),
+               @"RBFBDigHpdSel": @((uint32_t)wantHpdSel),
                @"RBFBDigPhy": @((int32_t)phy) };
+        if (wantHpdSel == 0) {
+            printf("hpdsel:       DERIVED 3 - hpd_sel_to_atom on pin_id 3\n"
+                   "              (command_table_helper2_dce112.c:63,\n"
+                   "               link_factory.c:603). dmub_cmd.h's own\n"
+                   "              field comment reads as 2 instead, and the\n"
+                   "              two have never been separated because this\n"
+                   "              firmware has no reply path (2zr). Pass\n"
+                   "              `hpdsel=2` for the other side, in THIS\n"
+                   "              boot, and compare PHY_CNTL6 across the two\n"
+                   "              sends (rule 44: interleaved, not two boots).\n");
+        } else {
+            printf("hpdsel:       OVERRIDE %ld - check RBFBDigHpdSelTook is 1,\n"
+                   "              because a refused override keeps the default\n"
+                   "              and would make this comparison a lie.\n",
+                   wantHpdSel);
+        }
         printf("\nencoder half: %s\n", wantEnc
                ? "ON - enc1_configure_encoder's two writes run first (2E5)"
                : "OFF - reproducing 2E4's arm exactly (the A side)");

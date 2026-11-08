@@ -1407,6 +1407,13 @@ IOReturn RBAMDFramebuffer::setProperties(OSObject *props)
         }
     }
     {
+        /* 2FF: read BEFORE the send, in the same setProperties dictionary,
+         * so one call carries both and no second round trip can land between
+         * them (rule 34: a dial's state at the start is part of the arm). */
+        OSNumber *hs = OSDynamicCast(OSNumber,
+                                     dict->getObject("RBFBDigHpdSel"));
+        if (hs) { digHpdSelWant = hs->unsigned32BitValue(); }
+
         OSNumber *w = OSDynamicCast(OSNumber, dict->getObject("RBFBDigPhy"));
         if (w) {
             digCalls++;
