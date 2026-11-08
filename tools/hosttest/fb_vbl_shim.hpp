@@ -323,6 +323,14 @@ public:
     int dioSweep=0;
     bool dioReady=false;
     void dioSample(void) {}
+    /* 300: mirrored the moment the kext gained them (the 2B1 lesson). The
+     * verdicts start at their NOT_SAMPLED codes, which is 0 for all three. */
+    uint32_t dpcspipeWord[2]={0,0};
+    int dpcspipeVerdict[2]={0,0};
+    int dpcspipeSweep=0;
+    int dpcspipeAgree=0;
+    bool dpcspipeReady=false;
+    void dpcspipeSample(void) {}
     void dpaltSample(void) {}
     /* 2EF: the DP DTO survey, stubbed for the same reason - dtoSample() lives
      * in RBAMDFramebufferHUBP.cpp, which this executable does not compile.

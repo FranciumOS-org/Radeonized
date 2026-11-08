@@ -16,8 +16,10 @@ Port = **HPD instance 2** = **AUX engine 2** = **UNIPHY_C / phyid 2** = **DIG2**
 -object table in our own `firmware/680m-vbios.rom`). Sink: **MSI MP2412C**, DP
 1.2, HBR2, **2 lanes**, EDID read over I2C-over-AUX, native **100 Hz** (fits the
 ~8.64 Gbps link). DP alt mode **is granted** (DMUB `QUERY_DP_ALT`, matching the
-ROM bit for bit on all five phys; `RDPCSTX2_PHY_CNTL6` disagrees and is the
-legacy fallback Linux only reads when DMCUB is absent). **The firmware executes
+ROM bit for bit on all five phys; `RDPCSTX2_PHY_CNTL6` disagrees and **300
+established it is the WRONG REGISTER for this part** - Linux reads
+`RDPCSPIPE_PHY_CNTL6` for UNIPHY_C on `YELLOW_CARP_B0`, see 300 at the end of
+this file). **The firmware executes
 `DMUB_CMD__VBIOS` commands** (`DIG_BE_EN_CNTL.DIG_ENABLE` 0→1 on the targeted
 instance alone, two boots) **and answers them** (the reply path works at
 REGION4; `ret_status` stays SET, which Linux's own criterion would discard).
@@ -137,3 +139,77 @@ references in `link_dp_training*.c`), `enc31_map_stream_to_link`, a second OTG
 and HUBP, and a second `IOFramebuffer` (`getDisplayModeCount()` has returned 1
 since 2sl). **Order matters:** FE connect → configure encoder → transmitter
 ENABLE; the atom transmitter command carries no front end **by design**.
+
+
+---
+
+### 300: the register was wrong, and the blocker is unnamed again
+
+Boot 469 closed two candidates and then the tooling closed the conclusion.
+
+**`hpdsel` is not it.** In-boot A/B: side A `Want` 0 / `Took` 0 / `Sent` 3,
+side B `Want` 2 / `Took` 1 / `Sent` 2. Both acked (`RBFBDmubAcks` 2,
+`AckTimeouts` 0, `Rptr` = `Wptr` = 2496), PHY2 `0x00063333` on both sides. The
+override took, so the arm is attested and the null is about `hpdsel`.
+
+**Power gating is not it.** `RBFBPgCandidate` = -1; `dmubbl dom` refusal 24 -
+no domain differs from DOMAIN0 across DOMAIN0-3 and DOMAIN16-18.
+
+**DP alt mode IS granted on PHY2.** `dmubbl dpaltq`: `is_usb` 1,
+`alt_disable` **0**, `is_usb` mask `0x1c` (PHYs 2, 3, 4) equal to 2E1's
+independent VBIOS display-path read. A ROM match on a value the command does
+not derive from, and the second boot to reproduce it (2EB was the first).
+
+**AND THE CORRECTION.** `dmubbl dpaltq` has printed, since 2EA:
+
+> `RDPCSTX2_PHY_CNTL6 is the WRONG REGISTER for this part - Linux reads
+> RDPCSPIPE_PHY_CNTL6 for UNIPHY_C on YELLOW_CARP_B0`
+
+Five boots - 459, 461, 464, 468, 469 - read `RDPCSTX2_RDPCSTX_PHY_CNTL6` as
+`0x00063333`, called PHY2's analog lane dark, wrote that into this file and
+into `docs/RULES.md` as **the blocker, named**, and logged the contradiction with
+`QUERY_DP_ALT` as unresolved while the tool producing the contradiction
+printed its resolution in the same output. The recurring error in its "read
+the evidence already in hand" form, and its most expensive instance.
+
+`dpcs_4_2_0_offset.h:11960`, a comment in the generated header:
+`//[Note] Hack. RDPCSPIPE only has 2 instances.` **Two** real registers,
+`0x2d73` and `0x2e4b`, BASE_IDX 2, 0xd8 apart - the RDPCSTX stride, which is
+how the blocks come to be confusable; indexes 2/3/4 alias them and exist only
+so `DPCS_DCN31_REG_LIST(id)` compiles for id 0..4.
+
+**WHAT THE RIGHT REGISTER CANNOT SAY.** `dpcs_4_2_0_offset.h:11945-11957`
+defines exactly three fields for it: `DPALT_DP4`, `DPALT_DISABLE`,
+`DPALT_DISABLE_ACK`. **No MPLL, no reference clock, no PSTATE** - RDPCSTX's
+`PHY_CNTL6` carries those in the low 16 bits, which is why `0x00063333` read
+as one verdict covering two questions. So it answers "is DP alt granted" and
+is silent on lane power.
+
+**STATE OF THE CLAIM.** "The analog PHY is off" is **withdrawn as stated**
+(rule 39's reverse clause). What survives: `RDPCSTX2` differs from `RDPCSTX0`
+(`0x00194444`) in an in-boot, byte-level comparison, and two instances of one
+block differing is a fact whichever block it is - but it means "no MPLL, no
+ref clock" **only if those fields are what that address decodes as for this
+PHY**, and that `if` is open now that upstream is known to read elsewhere for
+this PHY. **Lane power is unanswered in either direction.**
+
+**WHAT BOOT 470 CAN AND CANNOT DO.** `tools/dpcspipelook.sh` reads both
+instances and publishes the raw words, per-instance verdicts, the sweep (only
+DIFFERS is a control: it proves two registers rather than one address read
+twice, which matters because upstream's own table aliases them) and the
+product, `RBFBDpcsPipeAgree`. It can retire `0x00063333` as a misread of the
+wrong register, or produce the larger finding that two attested instruments
+disagree - with the ROM match on the DMUB's side. It **cannot** answer lane
+power. Which instance is UNIPHY_C is **not** established: three USB-C PHYs
+against two registers, so the mapping is not one-to-one and the agreement is
+an OR over both, never an identification (rule 18).
+
+**The arm (rule 34):** `-rbgpufbdig` **and** `-rbgpufbaltq` - the read comes
+from the first, the thing it is compared against from the second. Without the
+second, agreement publishes 0, which is "not evaluated" and not a
+disagreement. Cable plugged in at boot (2FB). Then, in that order:
+`build/out/dmubbl dpaltq`, then `tools/dpcspipelook.sh`.
+
+**Still absent from the chain, unchanged:** a **stream** on DIG2
+(`dcn30_dio_stream_encoder.c`, not a dcn31 file), a **surface** on pipe 1, and
+a second `IOFramebuffer`.

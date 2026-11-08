@@ -26,6 +26,7 @@
 #include "rb_aux.h"
 #include "rb_dpcd.h"
 #include "rb_dpalt.h"
+#include "rb_dpcspipe.h"
 #include "rb_dpdto.h"
 #include "rb_drr.h"
 #include "rb_dcn_deny.h"
@@ -77,6 +78,7 @@ bool RBAMDFramebuffer::hubpSetup(void)
     hubpTripleReadback = 0;
     hpdReady = false;
     dpaltReady = false;
+    dpcspipeReady = false;
     dtoReady = false;
     dtoExpectedHz = 0;
     dtoRefSrc = RB_DPDTO_REF_SRC_NONE;
@@ -359,6 +361,19 @@ bool RBAMDFramebuffer::hubpSetup(void)
         length >= ((uint64_t)dioNeeded + 1) * sizeof(uint32_t);
     dioReady = (dpaltArmed || digArmed || feArmed) && dioFits;
 
+    /* 300: RDPCSPIPE_PHY_CNTL6's bound, and this one is NOT decorative.
+     * Instance 1 is dword 0x2e4b, which is ABOVE dpalt's 0x2ca6 - the first
+     * register this kext reads that `dpaltFits` does not already cover. So
+     * unlike dioFits, this comparison can genuinely fail, and it is checked
+     * separately for 2C0's reason: an opt-in read must never be able to
+     * refuse hubpSetup() and take the panel with it (rule 16). It shares
+     * dpalt's arm set with no new token, because this register is the
+     * VERDICT the -rbgpufbdig family has been missing (rule 34, rule 30). */
+    const uint32_t dpcspipeNeeded = kRbDmuSeg2 + rb_dpcspipe_dw_max();
+    const bool dpcspipeFits =
+        length >= ((uint64_t)dpcspipeNeeded + 1) * sizeof(uint32_t);
+    dpcspipeReady = (dpaltArmed || digArmed || feArmed) && dpcspipeFits;
+
     /* 2EF: the DP DTO's own bound, separate for the same reason 2C0 kept the
      * PHY blocks out of `needed`: an opt-in read must not be able to refuse
      * hubpSetup() and take the panel with it (rule 16).
@@ -464,6 +479,7 @@ bool RBAMDFramebuffer::hubpSetup(void)
     auxSample();
     dpaltSample();
     dioSample();
+    dpcspipeSample();
     hpdSetupMask   = hpdSinkMask;
     hpdSetupEnMask = hpdEnMask;
     hpdChanges     = 0;
@@ -935,6 +951,74 @@ void RBAMDFramebuffer::dioSample(void)
 
     dioNonzeroMask = rb_dio_nonzero_mask(dioWord, RB_DIO_COUNT);
     dioSweep       = (int)rb_dio_sweep_verdict(dioWord, RB_DIO_COUNT);
+}
+
+/* 300: RDPCSPIPE_PHY_CNTL6, THE REGISTER FIVE BOOTS DID NOT READ.
+ *
+ * Boots 459, 461, 464, 468 and 469 read `RDPCSTX2_RDPCSTX_PHY_CNTL6` as
+ * 0x00063333, called PHY2's analog lane dark, and recorded the contradiction
+ * with QUERY_DP_ALT - which said DP alt mode was GRANTED on PHY2, with its
+ * is_usb mask equal to 2E1's independent VBIOS read - as unresolved. The
+ * resolution was in `dmubbl dpaltq`'s own printed output the whole time:
+ * Linux reads RDPCSPIPE_PHY_CNTL6, not RDPCSTX's, for UNIPHY_C on
+ * YELLOW_CARP_B0. That is the recurring error in its "read the evidence
+ * already in hand" form, and it is why this read exists.
+ *
+ * WHAT MAKES A READING HERE MEANINGFUL. QUERY_DP_ALT is the independent
+ * instrument and it is already attested twice (2EB, and boot 469 against the
+ * ROM pattern). So the question is a one-bit agreement test, and
+ * `dpcspipeAgree` is the product: an instance whose DPALT_DISABLE is 0 agrees
+ * with the DMUB, which is the first corroboration IN A REGISTER that PHY2's
+ * DP-alt state is granted - and that is what would retire RDPCSTX2's
+ * 0x00063333 as a misread rather than a measurement. Both instances
+ * disagreeing is the larger finding and is published as its own code.
+ *
+ * WHAT IT CANNOT DO, SAID BEFORE THE VALUES. THIS REGISTER HAS NO LANE-POWER
+ * FIELDS - three bits, all DPALT (dpcs_4_2_0_offset.h:11945-11957), where
+ * RDPCSTX's PHY_CNTL6 also carries DP_REF_CLK_EN/REQ and the per-lane
+ * MPLL_EN/PSTATE. "Is DP alt granted" and "is the MPLL running" are two
+ * questions, and conflating them is what made 0x00063333 look like a single
+ * verdict. Nothing read here answers the second one.
+ *
+ * WHICH INSTANCE IS UNIPHY_C IS NOT DECIDED, here or in rb_dpcspipe.h.
+ * Upstream's table maps index 2 onto instance 0, but that table is a compile
+ * hack by its own comment, and three PHYs report as USB-C against two
+ * registers, so the mapping cannot be one-to-one. Both are read, both are
+ * published raw, and the agreement is an OR - never an identification
+ * (rule 18).
+ *
+ * Read-only. rb_dpcspipe.h owns every judgement so the hosttest owns it too.
+ */
+void RBAMDFramebuffer::dpcspipeSample(void)
+{
+    if (!dpcspipeReady || !hubpRegs) { return; }
+
+    for (unsigned i = 0; i < RB_DPCSPIPE_COUNT; i++) {
+        const uint32_t dw = rb_dpcspipe_dw(i);
+        /* Cannot happen for i < RB_DPCSPIPE_COUNT, but dword 0 of the segment
+         * is another block entirely and upstream's own table aliases indexes
+         * 2..4 onto these two, so an INVALID is refused rather than trusted
+         * (rule 19, and the alias is exactly what this file exists to end). */
+        if (dw == RB_DPCSPIPE_DW_INVALID) { continue; }
+        dpcspipeWord[i] = hubpRegs[kRbDmuSeg2 + dw];
+        dpcspipeVerdict[i] = (int)rb_dpcspipe_verdict(dpcspipeWord[i]);
+    }
+
+    dpcspipeSweep =
+        (int)rb_dpcspipe_sweep_verdict(dpcspipeWord, RB_DPCSPIPE_COUNT);
+
+    /* THE AGREEMENT, and it is only computed when there is something to agree
+     * WITH. QUERY_DP_ALT has to have answered for PHY2 in THIS boot; a stale
+     * or absent reply would make this a comparison against a zero-initialised
+     * struct, which would read as "alt_disable 0" and agree with anything
+     * (rule 14: absence must not look like a result). The unevaluated case
+     * keeps its own code. */
+    dpcspipeAgree = 0;
+    if (RB_DPALTQ_PHY_COUNT > 2u && dpaltqRefuse[2] == RB_DPALTQ_OK) {
+        dpcspipeAgree = rb_dpcspipe_agrees_with_dmub(
+            dpcspipeWord, RB_DPCSPIPE_COUNT,
+            dpaltqReply[2].is_dp_alt_disable ? 1 : 0) ? 1 : 2;
+    }
 }
 
 /* 2EF: PIPE 0'S LIVE DP PIXEL-CLOCK DTO, AND THE SEGMENT CHECK.

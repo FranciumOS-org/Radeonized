@@ -425,17 +425,29 @@ With the clock right, boot 468 re-ran the whole chain — `dig fe` moved
 `FE_SEL 0 -> 0x4`, `dptrain tps=2` moved `TP_SEL 0 -> 1` — and **DPCD `0x202`
 still read `0x00` before and after**.
 
-**THE BLOCKER: the digital transmitter answers every write and the ANALOG PHY
-IS OFF.** PHY2 `0x00063333` — no reference clock, not one enabled MPLL, all
-four lanes at pstate 3 — against PHY0's `0x00194444` (four MPLLs, ref_clk en
-and req) as the in-boot control, **four boots unmoved** (459, 461, 464, 468).
-The question is **what powers up an RDPCSTX lane**, not whether our writes
-land; the atom transmitter ENABLE has run since 2E2 and does not do it.
-`PHY_CNTL6` is a **suspect, not a witness** — it is the legacy fallback Linux
-reads only when DMCUB is absent and it has contradicted `QUERY_DP_ALT` on all
-five PHYs since 2EB, so `dig` still needs a verdict register that is not this
-one (2FC's `DIO_LINK*_CNTL` was tried: all zeros). `rb_dpalt.h` has **no
-setter** and Linux marks that write path "avoid if possible".
+**THE BLOCKER IS NOT NAMED. "The analog PHY is off" is WITHDRAWN (300)** —
+it was read off `RDPCSTX2_PHY_CNTL6` = `0x00063333` for five boots (459, 461,
+464, 468, 469) while `dmubbl dpaltq`'s own printed output said, since 2EA,
+that **Linux reads `RDPCSPIPE_PHY_CNTL6`, not RDPCSTX's, for UNIPHY_C on
+`YELLOW_CARP_B0`**. The recurring error's "read the evidence already in hand"
+form, and its most expensive instance. What survives: `RDPCSTX2` differs from
+`RDPCSTX0` (`0x00194444`, in-boot, byte-level) in a way that WOULD mean no
+MPLL and no ref clock **if those fields are what that address decodes as for
+this PHY** — and that `if` is open. Lane power is **unanswered in either
+direction**. `src/common/rb_dpcspipe.h` reads the right block: **two** real
+instances (`0x2d73`, `0x2e4b`, BASE_IDX 2; upstream's own comment is
+`//[Note] Hack. RDPCSPIPE only has 2 instances.`, indexes 2/3/4 alias them and
+`rb_dpcspipe_dw()` refuses them), and it defines **only** DPALT_DP4 /
+DISABLE / DISABLE_ACK — **no MPLL, no ref clock, no PSTATE**, so it answers
+"is DP alt granted", never "is the lane powered". Conflating those two is what
+made `0x00063333` look like one verdict. `tools/dpcspipelook.sh`; the product
+is agreement with `QUERY_DP_ALT`, which is ROM-attested (2E1's VBIOS mask
+`0x1c`, reproduced boots 449 and 469) and says PHY2 `alt_disable` **0** =
+**granted**. Which instance is UNIPHY_C is **not** established: three USB-C
+PHYs, two registers. **Boot 469 also killed `hpdsel`** (in-boot A/B, Sent 3 vs
+Sent 2, both acked, PHY2 unmoved) **and power gating** (`RBFBPgCandidate` -1,
+`dmubbl dom` refusal 24). `rb_dpalt.h` has **no setter** and Linux marks that
+write path "avoid if possible".
 
 **THE CABLE MUST BE PLUGGED IN AT BOOT (2FB).** Plugged in afterwards, every
 AUX read returns **refusal 3** on engine "AUX5" (= `RB_AUX_COUNT`, none):
@@ -579,8 +591,8 @@ table, which we have on disk); **polling `checkTimestamps()` harder**
 `~/Developer/Econized`).
 
 **Open:** the rest of the external-display chain — `docs/EXTERNAL-DISPLAY.md`
-for the state, `docs/HANDOFF-NEXT.md` for the next step. The blocker is the
-**atom transmitter ENABLE at the link rate**, and 2F8 added a cost: `tps=3`
+for the state, `docs/HANDOFF-NEXT.md` for the next step. **The blocker is not
+named** (300 withdrew "the analog PHY is off"), and 2F8 added a cost: `tps=3`
 **degrades the sink until a reboot**, which is what 2F7 spent a milestone
 diagnosing. Also open: the **wedge** (work submitted that
 never retires — channel-52 GFX, 3.5 s, the "random lag"; `stamp_ticks` 125666
