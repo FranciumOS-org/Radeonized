@@ -1,0 +1,44 @@
+<!doctype html><html><head><meta charset="utf-8"><title>MSAA</title>
+<style>body{font:12px ui-monospace,monospace;background:#111;color:#ddd;padding:10px}
+#out{white-space:pre-wrap}</style></head><body><div id="out">…</div><script>
+var L=[];function p(s){L.push(s);document.getElementById('out').textContent=L.join('\n');}
+var EM={0:'NONE',1280:'INVALID_ENUM',1281:'INVALID_VALUE',1282:'INVALID_OPERATION',
+        1285:'OUT_OF_MEMORY',1286:'INVALID_FRAMEBUFFER_OPERATION'};
+var FM={36053:'COMPLETE',36054:'INCOMPL_ATTACH',36055:'MISSING_ATTACH',
+        36057:'INCOMPL_DIMS',36061:'UNSUPPORTED',36182:'INCOMPL_MULTISAMPLE'};
+var c=document.createElement('canvas');c.width=64;c.height=64;
+var gl=c.getContext('webgl2',{antialias:false,depth:false});
+p('MAX_SAMPLES          : '+gl.getParameter(gl.MAX_SAMPLES));
+p('MAX_INTEGER_SAMPLES  : '+gl.getParameter(gl.MAX_INTEGER_SAMPLES));
+p('MAX_COLOR_ATTACHMENTS: '+gl.getParameter(gl.MAX_COLOR_ATTACHMENTS));
+p('internalformat RGBA8 SAMPLES: '+(gl.getInternalformatParameter?
+   gl.getInternalformatParameter(gl.RENDERBUFFER,gl.RGBA8,gl.SAMPLES):'n/a'));
+p('');
+[1,2,4,8,16].forEach(function(n){
+  var rb=gl.createRenderbuffer(); gl.bindRenderbuffer(gl.RENDERBUFFER,rb);
+  gl.renderbufferStorageMultisample(gl.RENDERBUFFER,n,gl.RGBA8,64,64);
+  var e1=gl.getError();
+  var got=gl.getRenderbufferParameter(gl.RENDERBUFFER,gl.RENDERBUFFER_SAMPLES);
+  var fb=gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER,fb);
+  gl.framebufferRenderbuffer(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.RENDERBUFFER,rb);
+  var e2=gl.getError(); var fbs=gl.checkFramebufferStatus(gl.FRAMEBUFFER);
+  gl.clearColor(0.2,0.6,1,1); gl.clear(gl.COLOR_BUFFER_BIT);
+  var e3=gl.getError();
+  /* resolve into a single-sample FBO and read that */
+  var tex=gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D,tex);
+  gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA8,64,64,0,gl.RGBA,gl.UNSIGNED_BYTE,null);
+  var rfb=gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER,rfb);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,tex,0);
+  gl.bindFramebuffer(gl.READ_FRAMEBUFFER,fb); gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER,rfb);
+  gl.blitFramebuffer(0,0,64,64,0,0,64,64,gl.COLOR_BUFFER_BIT,gl.NEAREST);
+  var e4=gl.getError();
+  gl.bindFramebuffer(gl.FRAMEBUFFER,rfb);
+  var px=new Uint8Array(4); gl.readPixels(0,0,1,1,gl.RGBA,gl.UNSIGNED_BYTE,px);
+  p('samples asked '+n+' got '+got+
+    '  storage '+(EM[e1]||e1)+'  attach '+(EM[e2]||e2)+
+    '  fbs '+(FM[fbs]||fbs)+'  clear '+(EM[e3]||e3)+'  blit '+(EM[e4]||e4));
+  p('     resolved readback ['+px.join(',')+']  '+
+    ((px[0]==51&&px[1]==153&&px[2]==255)?'OK':'*** WRONG ***'));
+});
+try{fetch('/collect',{method:'POST',body:'PROBE4 (own multisample renderbuffers)\n'+L.join('\n')});}catch(e){}
+</script></body></html>
