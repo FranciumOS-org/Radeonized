@@ -41,6 +41,11 @@
 //   RBGPU_SWIZZLE=fix       LINEAR for non-render-targets, and render targets
 //                           mapped from their _X mode to the non-X equivalent
 //   RBGPU_SWIZZLE=nox       every _X mode mapped to its non-X equivalent
+//   RBGPU_SWIZZLE=fixmip    as `fix`, except a non-render-target WITH A MIP
+//                           CHAIN is not made linear: it takes the render
+//                           target rule (_X to non-X) instead. The dry run
+//                           for 311 - `fix` leaves levels of a mipmapped
+//                           sample-only texture reading back as nothing.
 //   RBGPU_SWIZZLE=off       inject but do not patch at all (control)
 //
 //   RBGPU_SWIZZLE_NONRT=n   explicit mode for non-render-targets (overrides)
@@ -133,7 +138,7 @@ typedef unsigned int (*swz_fn)(void *hw, void *addrlib, const void *desc,
                               unsigned int frags, unsigned int *out,
                               bool b8, bool b9);
 
-enum { M_LOG, M_LINEAR, M_AUTO, M_FIX, M_NOX, M_OFF };
+enum { M_LOG, M_LINEAR, M_AUTO, M_FIX, M_NOX, M_OFF, M_FIXMIP };
 static int gMode = M_LOG;
 static int gNonRT = -1, gRT = -1;      // explicit overrides, -1 = per-mode default
 static unsigned long gUsageOff  = 0x68; // usage as requested
@@ -206,10 +211,15 @@ static unsigned int hook(void *hw, void *al, const void *desc, const void *st,
                              : "DISAGREES - this is the global defect");
     }
     if (fresh) {
+        // 311: usage on the line itself. It was only in the hexdump, which the
+        // budget stops after eight descriptors, so "is this one a render
+        // target" could not be read for anything an app made after start-up.
         fprintf(stderr, "swz: type=%llu fmt=%-3llu %llux%llu depth=%llu mip=%llu "
-                        "smp=%llu arr=%llu | samples=%u frags=%u b8=%d b9=%d "
+                        "smp=%llu arr=%llu use=0x%llx | samples=%u frags=%u b8=%d b9=%d "
                         "=> mode=%u out=%u\n",
                 d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7],
+                *(const uint64_t *)((const char *)desc + gUsageOff) |
+                *(const uint64_t *)((const char *)desc + gUsageOff2),
                 samples, frags, (int)b8, (int)b9, orig, out ? *out : 0u);
         if (dump) {
             fprintf(stderr, "swz:   desc");
@@ -228,7 +238,8 @@ static unsigned int hook(void *hw, void *al, const void *desc, const void *st,
     int isRT = (usage & gUsageRT) != 0;
     unsigned int want = orig;
     if (gMode == M_NOX) want = nox(orig);
-    else if (isRT) want = gMode == M_FIX ? nox(orig) : orig;
+    else if (isRT) want = (gMode == M_FIX || gMode == M_FIXMIP) ? nox(orig) : orig;
+    else if (gMode == M_FIXMIP && d[5] > 1) want = nox(orig);  // mipmapped
     else want = 0;                                     // non-render-target
     if (isRT) { if (gRT >= 0) want = (unsigned int)gRT; }
     else      { if (gNonRT >= 0) want = (unsigned int)gNonRT; }
@@ -251,6 +262,7 @@ static void patch_image(const struct mach_header *mh, intptr_t slide)
     else if (m && !strcmp(m, "auto")) gMode = M_AUTO;
     else if (m && !strcmp(m, "fix")) gMode = M_FIX;
     else if (m && !strcmp(m, "nox")) gMode = M_NOX;
+    else if (m && !strcmp(m, "fixmip")) gMode = M_FIXMIP;
     else if (m && !strcmp(m, "off")) gMode = M_OFF;
     if (getenv("RBGPU_USAGE_OFF")) gUsageOff = strtoul(getenv("RBGPU_USAGE_OFF"), 0, 0);
     if (getenv("RBGPU_USAGE_OFF2")) gUsageOff2 = strtoul(getenv("RBGPU_USAGE_OFF2"), 0, 0);
@@ -375,7 +387,11 @@ static void patch_image(const struct mach_header *mh, intptr_t slide)
         gDone = 1; return;
     }
     int ok = memcmp(fn, det, sizeof det) == 0;
-    static const char *names[] = { "log", "linear", "auto", "fix", "nox", "off" };
+    // One name per M_* value, in enum order. 311 added a mode and not a name, and
+    // names[gMode] then read one slot past the table: an empty string on the
+    // first run and a SIGSEGV inside fprintf on the next.
+    static const char *names[] = { "log", "linear", "auto", "fix", "nox", "off", "fixmip" };
+    _Static_assert(sizeof names / sizeof names[0] == M_FIXMIP + 1, "one name per mode");
     fprintf(stderr, "swz: HOOKED DetermineSwizzleMode at %p (verify %s) mode=%s",
             (void *)fn, ok ? "ok" : "FAILED", names[gMode]);
     if (gMode != M_LOG && gMode != M_LINEAR)

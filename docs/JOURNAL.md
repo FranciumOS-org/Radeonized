@@ -66248,3 +66248,124 @@ all. Reaching it needs hybrid mode, where the eDP backlight belongs to the
 dGPU and our brightness registers drive nothing — six milestones went into
 that gap. **So both HDMI routes are blocked, by two unrelated things**: the
 chassis port by the MUX wiring, and USB-C by PHY2's reset.
+
+## 3mip (2026-11-09, boot 507) — Spotify's green covers: THE SWIZZLE FIX EMPTIES MIPMAPPED SAMPLE-ONLY TEXTURES
+
+The user's report: Spotify (CEF, Chromium 151) draws every album cover as flat
+green, while the same artwork in a native app is correct. No reboot, no kext
+change; everything here is one boot (`rbgpu-boot` 507, `kern.boottime` 14:44).
+
+### What was measured
+
+**1. A class of texture no instrument here had ever made.** `lawtest`,
+`texprobe` and `blitprobe` are all single-level; 2mw listed "mipmapped
+sampling" as left over and nothing followed it up. `tools/mipprobe.swift`
+(`make mipprobe`) makes every format x size x storage mode four ways — usage
+`ShaderRead` or `RenderTarget|ShaderRead`, each flat and mipmapped — and puts
+bytes into each level five ways and reads them back two ways. Its readback
+buffer is prefilled with `0xEE`, so a copy that wrote nothing (`u`) is not
+confused with one that wrote zeroes (`z`).
+
+Under the kext's fix as every process runs it (detour state 1 at start and
+end), full matrix, 160 rows:
+
+```
+ShaderRead, mipmapped              40 / 40 rows BAD
+everything else (120 rows)          0 BAD
+```
+
+The 120 clean rows are the controls: the same formats, sizes and storage
+modes, flat; and the same mip chains with `RenderTarget` added. In a failing
+row the blit readback of a level writes **nothing** and sampling that level
+returns **zero**. Which levels fail depends on format and size — `r8` 300x300
+loses L0 and L6; `rgba8` 300x300 loses all nine — and that pattern is recorded,
+not explained.
+
+**2. It is our policy, by an in-boot A/B.** `mipprobe unpatch` restores the
+driver's original prologue in its own process (the kext places the detour once
+per pid, so it stays restored; state 0 at end). Without the detour nothing is
+empty: every class scrambles instead, flat and render-target rows included,
+which is the original swizzle defect and the proof the removal took. So the
+empty levels belong to the policy and not to the hardware or to the probe.
+
+**3. The policy term, by a userspace dry run.** `tools/mtlswizzle.c`'s `fix`
+is the cave's policy line for line (`cachepatch.py` `build_cave()`): LINEAR
+for anything that is not a render target, `_X` to non-X for render targets.
+Injected into the probe, `fix` reproduces the kext exactly — the same 40 rows.
+A new mode `fixmip` changes one thing: a non-render-target **with a mip
+chain** takes the render-target rule instead of LINEAR. Interleaved, two runs
+each, full matrix:
+
+```
+run 1 fix     40 / 160 BAD   (40/40 SR mips, 0 elsewhere)
+run 1 fixmip   0 / 160 BAD
+run 2 fix     40 / 160 BAD
+run 2 fixmip   0 / 160 BAD
+```
+
+**4. Spotify makes exactly that class.** With the hook injected in `log` mode
+(observe only; the GPU process stays up, no crash dumps, no `--use-gl`
+fallback), every mipmapped texture its GPU process created was
+`MTLPixelFormatR8Unorm`, usage `0x1` = `ShaderRead` only: 300x300 mip 9,
+320x320 mip 9, 133x160 mip 8, 80x80, 75x75 and 67x80 mip 7. Six of six. Its
+flat 2D textures are a mix of `0x1`, `0x4` and `0x5`.
+
+### What that does and does not establish
+
+Established: the fix shipped since 2om leaves levels of a mipmapped
+`ShaderRead`-only texture empty; Spotify's GPU process creates such textures,
+single-channel; a narrower policy keeps every level in the probe.
+
+**Inference, not measurement:** that those R8 textures are the Y/U/V planes of
+the decoded covers, and that the green is three planes sampling as zero (0,0,0
+in YCbCr is a saturated green after conversion). It fits — the probe measures
+zero, single-channel planes are what a JPEG decodes to, and only scaled
+photographs are affected while vector and CSS content is fine — but no frame of
+Spotify's has been traced to a texture.
+
+**Not established: that `fixmip` fixes Spotify.** A first reading said it did
+and is **withdrawn**. Launched with the hook in `fixmip`, Spotify's covers were
+correct. The control — the same injection with the OLD policy `fix` — was
+also correct. Both runs left three new crashpad dumps and a GPU process
+restarted with `--use-gl=disabled`: an overriding hook in userspace kills
+Spotify's GPU process three times and Chromium falls back to software, which
+draws the covers correctly whatever the policy is. `log` and `off` do not do
+this (0 dumps each), and neither does the kext's own cave, so it is the
+userspace override in that process and it is **not explained**. The
+instrument was the suspect (rule 16) and the picture was not a measurement
+until it had a control (rule 45). The completed-dump directory holds ten
+earlier triplets from 2026-11-08/09, before this session; what produced those
+is not known.
+
+So the Spotify-level verdict needs the policy in the cave: a plugin build, an
+EFI install and a reboot. Not done here.
+
+### The instrument's own defects, this session
+
+- `fixmip` was added to the enum and not to the `names[]` table that the
+  HOOKED line prints from. It read one slot past the end: an empty string on
+  the first run, a SIGSEGV inside `fprintf` on the next four. There is a
+  `_Static_assert` on the table length now.
+- The probe's stdout was block-buffered into a file, so those crashes left
+  zero lines and looked like a probe that never started. It is unbuffered now.
+- The hook's log line did not carry `usage` — only the hexdump did, and its
+  budget stops after eight descriptors. Usage is on the line now.
+- `make mtlswizzle` in a fresh worktree died with "No rule to make target
+  build/out": every tool is `| $(OUT)` and no rule made it. Added.
+
+### For the user, today
+
+`open -a Spotify --args --disable-gpu-rasterization` draws the covers
+correctly with GPU compositing still on (checked: the GPU process carries the
+flag and no `--use-gl=disabled`). It is a workaround for one app, not a fix.
+
+### Next
+
+Put `fixmip`'s term in the cave: `cmp qword [rbx+0x28], 1` / `ja` to the
+render-target path, before the `xor eax, eax`. `mipLevels` is descriptor
+`+0x28` (2nq's layout, and the `mip=` column above is that field). Both rows
+(`darwin24.h`, `darwin25.h`) carry the cave bytes, so both have to be
+regenerated or the Darwin 24 row keeps the old policy. After the boot:
+`build/out/mipprobe` with no injection must print 0 BAD with detour state 1,
+and then Spotify, launched normally, is the observation. The Chromium inside
+other apps (the assistant, VS Code) takes the same path and has not been looked at.

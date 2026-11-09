@@ -92,7 +92,7 @@ KEXT_OBJS := $(BUILD_DIR)/kext/rb_discovery.o $(BUILD_DIR)/kext/rb_probe.o $(BUI
 KEXT_BUNDLE := $(OUT)/RembrandtProbe.kext
 KEXT_BIN    := $(KEXT_BUNDLE)/Contents/MacOS/RembrandtProbe
 
-.PHONY: all hosttest kext fbkext tools plugin subret fbperf fbpresent blset mtlcave osrange iosurftex texprobe blitprobe xprobe screenprobe decodescreen permute bitfit surfdump surfwatch mtllinear mtlswizzle usageprobe cavecheck dispclk vramtest accelport slquery skyshaders cdchain useiop ioptest agdcinfo vramprobe lawtest noop ownership-test clean
+.PHONY: all hosttest kext fbkext tools plugin mipprobe subret fbperf fbpresent blset mtlcave osrange iosurftex texprobe blitprobe xprobe screenprobe decodescreen permute bitfit surfdump surfwatch mtllinear mtlswizzle usageprobe cavecheck dispclk vramtest accelport slquery skyshaders cdchain useiop ioptest agdcinfo vramprobe lawtest noop ownership-test clean
 
 all: kext tools
 
@@ -128,10 +128,24 @@ $(OUT)/iosurftex.dylib: tools/iosurftex.m | $(OUT)
 	clang -dynamiclib -O2 -fno-objc-arc -o $@ $< \
 	      -framework Metal -framework IOSurface -framework Foundation
 
+# 3mip: every tool below is `| $(OUT)` and nothing made it, so in a fresh
+# checkout or worktree `make mtlswizzle` died with "No rule to make target
+# build/out". It only ever worked after `make hosttest` had made the directory.
+$(OUT):
+	@mkdir -p $@
+
 # lawtest (2mn): the law in one fast instrument - six geometries, n=12, ~1.5 s.
 lawtest: $(OUT)/lawtest
 $(OUT)/lawtest: tools/lawtest.swift | $(OUT)
 	swiftc -O $< -o $@ -framework Metal
+
+# mipprobe (3mip): does every mip level of a texture hold what was put there?
+# The C half restores the driver's original prologue in-process, for an in-boot
+# A/B against the kext's swizzle detour.
+mipprobe: $(OUT)/mipprobe
+$(OUT)/mipprobe: tools/mipprobe.swift tools/mipprobe_unpatch.c tools/mipprobe_unpatch.h src/plugin/rbgpu_mtlcave.h | $(OUT)
+	clang -O2 -Wall -Isrc/plugin -c tools/mipprobe_unpatch.c -o $(OUT)/mipprobe_unpatch.o
+	swiftc -O tools/mipprobe.swift $(OUT)/mipprobe_unpatch.o -import-objc-header tools/mipprobe_unpatch.h -o $@ -framework Metal
 
 # ownership-test (2mr): crashes if the interposers break Metal's +1 ownership.
 # Run it before inserting the dylib into anything.
