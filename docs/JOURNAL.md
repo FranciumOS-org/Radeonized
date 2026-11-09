@@ -66248,3 +66248,191 @@ all. Reaching it needs hybrid mode, where the eDP backlight belongs to the
 dGPU and our brightness registers drive nothing — six milestones went into
 that gap. **So both HDMI routes are blocked, by two unrelated things**: the
 chassis port by the MUX wiring, and USB-C by PHY2's reset.
+## 311 — NO BOOT SPENT: WebGL is not missing. MSAA COLOUR SURFACE SIZING RETURNS 0, and that one call is why browser pages are white (2026-11-09)
+
+The user asked whether this driver has no WebGL support - "any browser page I
+open, shellshock.io or a volumetric shader on github, just shows white". It
+has WebGL. One capability under it is missing, and the whole symptom follows
+from a single call.
+
+**First, the search was the instrument.** `webgl` appears **zero** times in
+61 000 lines of this journal; the 180 `ANGLE` hits are `\bANGLE\b` **0** - they
+are all `rectangle`/`angle`. The 25 Safari hits are the 2m*/2o* swizzle era,
+closed by 2on. So this had never been measured, and no prior reading of ours
+was being contradicted.
+
+**Nothing is crashing.** No `com.apple.WebKit.GPU` crash report exists, and
+two GPU processes were alive during the whole investigation. Only Safari is
+installed, so "any browser" = Safari 27.2 / WebKit 605.1.15.
+
+### The probe, and the trap in the first one
+
+A local collector (`python3 -I` HTTP server on 127.0.0.1:8731) served a page
+that clears to a known colour, draws a green full-screen triangle through a
+compiled shader, reads both back with `readPixels`, and POSTs the log. The
+page is opened in the user's own Safari, so the configuration measured is the
+one with the symptom (rule 39).
+
+Probe 1, context attributes `{preserveDrawingBuffer:true}` only:
+
+    context: webgl2   VERSION: WebGL 2.0   UNMASKED_R: Apple GPU
+    clear readback: [0,0,0,0]   expect ~[51,153,255,255]
+    draw  readback: [0,0,0,0]   expect [0,255,0,255]
+    gl error: 1286 (INVALID_FRAMEBUFFER_OPERATION)
+
+Probe 2, written to also test a render-to-texture FBO, asked for
+`{antialias:false, depth:false, stencil:false}` - and **passed everything**:
+default framebuffer COMPLETE, clear `[51,153,255,255]`, draw `[0,255,0,255]`,
+our own FBO correct, `toDataURL` producing a real 406-byte PNG, every
+`getError` 0.
+
+**Two probes, several attributes changed at once, no isolation** - rule 17 in
+its purest form, and the second probe nearly became "WebGL works fine".
+
+### Probe 3: one variable, interleaved, five pairs
+
+One page, contexts created side by side, varying `antialias` alone and then
+`depth` alone, repeated, at 64x64 and at 1280x720, with and without
+`preserveDrawingBuffer`:
+
+| row | antialias | depth | fbstatus | err | readback |
+|----|----|----|----|----|----|
+| 1 | **true** | true | 36054 INCOMPLETE_ATTACHMENT | 1286 | `[0,0,0,0]` |
+| 2 | false | true | 36053 COMPLETE | 0 | correct |
+| 3 | **true** | false | 36054 | 1286 | `[0,0,0,0]` |
+| 4 | false | false | 36053 | 0 | correct |
+| 5-10 | the same, repeated and at 1280x720 | | identical | | |
+
+`antialias` is the whole variable. `depth` is not. Size is not.
+`preserveDrawingBuffer` is not. **And `antialias: true` is the browser
+DEFAULT** - `getContext('webgl')` with no options gets MSAA - so a page
+written normally fails and only a probe that explicitly opts out works. That
+is exactly "every page is white".
+
+Note the reading that was there from probe 1 and meant nothing until now:
+the context reports `antialias: **true**` while `SAMPLES` reads **0**. The
+context believes it got MSAA; the sample count says it did not. An unwritten
+field and a value look the same (rule 32).
+
+### It is not WebGL, and not the browser: Metal, directly
+
+A 70-line Metal program, no browser involved:
+
+    device: AMD Radeon 680M
+    supportsTextureSampleCount:2   YES
+    supportsTextureSampleCount:4   YES
+    supportsTextureSampleCount:8   YES
+    supportsTextureSampleCount:16  no
+    sampleCount 2: msaa tex NULL   resolve tex ok
+    sampleCount 4: msaa tex NULL   resolve tex ok
+    sampleCount 8: msaa tex NULL   resolve tex ok
+
+The device **claims** 2x, 4x and 8x and returns **nil for all three**, with
+the single-sample resolve texture allocating in the same loop as the positive
+control. WebGL's `renderbufferStorageMultisample` reporting `OUT_OF_MEMORY`
+(probe 4, every sample count 2..8, `RENDERBUFFER_SAMPLES` always 0 and
+`MAX_SAMPLES` claiming 8) is just ANGLE relaying this nil.
+
+### The descriptor matrix: COLOUR fails, DEPTH does not
+
+    2D       BGRA8 64x64    s1 RT private   -> OK      (controls)
+    2D       BGRA8 4096x4096 s1 RT private  -> OK
+    2D       D32   64x64    s1 RT private   -> OK
+
+    2DMS     BGRA8 64x64    s4 RT private   -> NULL
+    2DMS     BGRA8 64x64    s2 RT private   -> NULL
+    2DMS     RGBA8 64x64    s4 RT private   -> NULL
+    2DMS     R8    64x64    s4 RT private   -> NULL
+    2DMS     RGBA16F 64x64  s4 RT private   -> NULL
+    2DMS     BGRA8 64x64    s4 RT+READ      -> NULL
+    2DMS     BGRA8 16x16    s4 RT private   -> NULL
+    2DMSArr  BGRA8 64x64    s4 RT private   -> NULL
+
+    2DMS     D32   64x64    s4 RT private   -> OK      <-- !
+    2DMS     D16   64x64    s4 RT private   -> OK
+    2DMS     D32S8 64x64    s4 RT private   -> OK
+    2DMS     S8    64x64    s4 RT private   -> OK
+
+**Multisampled depth and stencil allocate. Multisampled colour never does**,
+in four formats, two sample counts, two sizes, array and non-array. So this
+is not "MSAA is unsupported" and not a memory shortage: it is the thing only
+a multisampled COLOUR surface needs.
+
+(Two instrument defects of mine, both aborting the run early with an
+assertion: `MTLStorageModeMemoryless`, then `Shared`/`Managed`, are rejected
+for multisample textures on this device. Rows after them never executed the
+first two times - a truncated run reads as a short table, not as an error.)
+
+### The failing call, named
+
+`heapTextureSizeAndAlignWithDescriptor:` - the surface sizing query, which
+runs **before** any memory is requested:
+
+    s1 colour BGRA8 (control, allocates)  size 16384  align 4096        alloc OK
+    s4 colour BGRA8 (THE FAILURE)         size 0      align 3614113793  alloc NULL
+    s2 colour BGRA8                       size 0      align 0           alloc NULL
+    s1 depth  D32   (control)             size 65536  align 65536       alloc OK
+    s4 depth  D32   (allocates)           size 65536  align 65536       alloc OK
+
+**Size 0, alignment `0xD7739C01`.** A zero size with a garbage alignment is an
+**unwritten output struct**: the sizing call failed and Metal passed the
+struct back untouched. Rule 14's exact shape - absence read as a value -
+appearing inside Apple's own stack. MSAA depth returns a sane 65536/65536 in
+the same run.
+
+So the chain is complete, every link measured:
+
+    getContext('webgl')  ->  antialias:true by default
+      ->  WebKit/ANGLE asks for a multisampled COLOUR render target
+      ->  AMDRadeonX6000MTLDriver cannot SIZE it (size 0)
+      ->  newTextureWithDescriptor returns nil
+      ->  default framebuffer INCOMPLETE_ATTACHMENT (36054)
+      ->  every clear and draw errors 1286, canvas stays empty
+      ->  WHITE PAGE
+
+`DYLD_PRINT_LIBRARIES` confirms the image servicing this is Apple's
+`/System/Library/Extensions/AMDRadeonX6000MTLDriver.bundle/...`, cache-
+resident (`nm` on the on-disk path returns 0 for **every** token including
+the control `Texture` - rule 26 caught it, the file is not there at all).
+
+### The candidate, stated as a candidate
+
+On gfx10 a multisampled **colour** surface needs **FMASK** (and CMASK)
+metadata that depth does not - depth uses HTILE, which single-sample depth
+also uses and which works here. The split in the matrix is exactly the
+FMASK/no-FMASK split. **This is a candidate, not a mechanism**: no FMASK code
+path has been read, the sizing function has not been disassembled, and
+nothing establishes that a genuinely Apple-supported AMD GPU would succeed
+where this one fails - there is no configuration here without the symptom
+(rule 39). It may also connect to the long-open `_X` swizzle-family defect,
+since MSAA colour requires the `_X` modes, but that is two facts next to each
+other, not a mechanism (rule 17).
+
+`tools/re/dscinv.sh` takes a fixed list of five images and does not accept
+`AMDRadeonX6000MTLDriver`, so reading that function needs the instrument
+extended first. No boots are required for any of this work.
+
+### Adjacent, NOT the same thing
+
+Eleven `Steam Helper` crash reports (2026-11-07) are a **different** stack:
+Steam's embedded Chromium uses legacy **OpenGL**, and dies
+
+    glClear_Exec -> gleUpdateDrawFramebufferState -> gldUpdateDrawFramebuffer
+      -> glrBindContextDrawFramebuffer -> glrATI_Hwl_SubmitPacketsWithToken
+      -> gpusSubmitDataBuffers -> gpusKillClientExt -> abort
+
+in `AMDRadeonX6000GLDriver` / `GLEngine` - a GPU **client kill** on binding a
+draw framebuffer, not a nil allocation, and through the GL driver rather than
+the Metal one. Same area (client framebuffer setup), different path. Recorded
+so it is not later merged into this one by resemblance.
+
+### What this does and does not mean for the project
+
+Metal itself is unaffected: the accelerator's own compositing, the bit-exact
+Metal results and the 91-140 fps all run single-sampled. What is broken is
+one capability that browsers request **by default**, which is why it reads as
+"no WebGL support" while WebGL 2.0, shader compilation, linking,
+render-to-texture, blits and `toDataURL` all demonstrably work.
+
+Reproducers kept: the probe pages and the three Metal programs
+(`msaa.m`, `mtx.m`, `sz.m`).
