@@ -89,10 +89,28 @@ def build_cave():
     w += bytes([0xF6, 0xC1, 0x04])                   # test cl, 4   (RenderTarget)
     jnz_at = len(w)
     w += bytes([0x75, 0])                            # jnz RT
+    # 3mip: a non-render-target WITH A MIP CHAIN is not made linear - it takes
+    # the render-target rule. LINEAR left levels of a mipmapped ShaderRead-only
+    # texture reading back as nothing and sampling as zero, 40 rows of 40 in
+    # tools/mipprobe.swift, which is every album cover Spotify draws. mipLevels
+    # is descriptor +0x28 (2nq's layout). cmp leaves eax, the driver's own
+    # mode, alone.
+    w += bytes([0x48, 0x83, 0x7B, 0x28, 0x01])       # cmp qword [rbx+0x28], 1
+    jmip_at = len(w)
+    w += bytes([0x77, 0])                            # ja RT   (mipLevels > 1)
     w += bytes([0x31, 0xC0])                         # xor eax,eax  -> LINEAR
     jmp_at = len(w)
     w += bytes([0xEB, 0])                            # jmp OUT
     rt = len(w)
+    # 312: a MULTISAMPLED render target keeps Apple's own mode. The remap
+    # below turns 27 (64KB_R_X) into 10 (64KB_D) and AddrLib refuses 10 for
+    # numFrags > 1 with ADDR_INVALIDPARAMS, so the sizing call never wrote its
+    # outputs, newTextureWithDescriptor returned nil, and every WebGL page
+    # (antialias:true) came up white. MTLTextureDescriptorPrivate +0x30 is the
+    # sample count (the sizing function tests it `>= 2` at 0x...243b3).
+    w += bytes([0x48, 0x83, 0x7B, 0x30, 0x02])       # cmp qword [rbx+0x30], 2
+    jae_at = len(w)
+    w += bytes([0x73, 0])                            # jae OUT  (MSAA: keep)
     w += bytes([0x83, 0xF8, 0x1B])                   # cmp eax, 27
     ja_at = len(w)
     w += bytes([0x77, 0])                            # ja OUT
@@ -102,26 +120,32 @@ def build_cave():
     out = len(w)
     w += bytes([0x5B, 0x5D, 0xC3])                   # pop rbx; pop rbp; ret
 
-    while len(w) % 16:                               # pad to 16 for the table
-        w += b"\x90"
+    # 3mip: NO ALIGNMENT PADS. Until 312 the wrapper was 89 bytes and two pads
+    # took it to 96 and the table to 128, for 163 of the 176 reserved. 312's
+    # MSAA guard used the first pad's seven bytes exactly; 3mip's seven more
+    # would push the table to 112 and the cave to 179 - three past the zero
+    # run. Nothing here needs alignment: the table is bytes read through a
+    # rip-relative lea and the trampoline is entered by a rel32 call. Packed,
+    # the cave is 166 bytes.
     table_at = len(w)
     w += bytes([NOX.get(i, i) for i in range(28)])
-    while len(w) % 16:
-        w += b"\x90"
     tramp_at = len(w)
     w += PROLOGUE
     w += bytes([0xE9, 0, 0, 0, 0])                   # jmp FN+30
 
     # ---- fix every displacement now that the layout is known ----
     w[jnz_at + 1] = rt - (jnz_at + 2)
+    w[jmip_at + 1] = rt - (jmip_at + 2)
     w[jmp_at + 1] = out - (jmp_at + 2)
     w[ja_at + 1] = out - (ja_at + 2)
+    w[jae_at + 1] = out - (jae_at + 2)
     struct.pack_into("<i", w, lea_at + 3, table_at - (lea_at + 7))
     struct.pack_into("<i", w, call_at + 1, tramp_at - (call_at + 5))
     tramp_end = tramp_at + len(PROLOGUE) + 5
     struct.pack_into("<i", w, tramp_at + len(PROLOGUE) + 1,
                      (FN_VM + len(PROLOGUE)) - (CAVE_VM + tramp_end))
-    for v in (w[jnz_at + 1], w[jmp_at + 1], w[ja_at + 1]):
+    for v in (w[jnz_at + 1], w[jmip_at + 1], w[jmp_at + 1], w[ja_at + 1],
+              w[jae_at + 1]):
         assert 0 <= v < 128, "a short jump went out of range"
     return bytes(w)
 

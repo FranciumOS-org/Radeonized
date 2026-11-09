@@ -964,6 +964,24 @@ table, which we have on disk); **polling `checkTimestamps()` harder**
 (`rbgpuretiredrain`, measured dead); **efficiency/power** (moved to
 `~/Developer/Econized`).
 
+**311 - WEBGL IS NOT MISSING; MSAA COLOUR SURFACE SIZING RETURNS 0.** Browser
+pages are white because `getContext('webgl')` defaults to `antialias: true`.
+Isolated to that one attribute (interleaved, five pairs, two sizes): `true` ->
+default framebuffer `INCOMPLETE_ATTACHMENT`, every op **1286**; `false` ->
+correct throughout. Below the browser, Metal claims
+`supportsTextureSampleCount` 2/4/8 and returns **nil for all three**. The
+matrix splits it: multisampled **colour** fails in four formats, two sample
+counts, two sizes, array and not; multisampled **depth/stencil** (D32, D16,
+D32S8, S8) all allocate. The failing call is
+**`heapTextureSizeAndAlignWithDescriptor:`** - **size 0, align `0xD7739C01`**
+against the control's 16384/4096 and MSAA depth's 65536/65536, i.e. an
+**unwritten output struct** (rule 14 inside Apple's stack). **FMASK is a
+CANDIDATE, not a mechanism** - the split is FMASK-versus-HTILE shaped, but no
+FMASK path has been read and no configuration here lacks the symptom (rule
+39). `tools/msaa/`; `dscinv.sh` does not accept
+`AMDRadeonX6000MTLDriver` yet. Metal is otherwise unaffected - everything
+measured on this chip runs single-sampled.
+
 **Open:** the rest of the external-display chain — `docs/EXTERNAL-DISPLAY.md`
 for the state, `docs/HANDOFF-NEXT.md` for the next step. **THE BLOCKER IS
 NAMED: PHY2 IS HELD IN RESET** (307 — `PHY_RESET` 1 against the live panel's

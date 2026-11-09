@@ -66248,6 +66248,234 @@ all. Reaching it needs hybrid mode, where the eDP backlight belongs to the
 dGPU and our brightness registers drive nothing — six milestones went into
 that gap. **So both HDMI routes are blocked, by two unrelated things**: the
 chassis port by the MUX wiring, and USB-C by PHY2's reset.
+## 311 — NO BOOT SPENT: WebGL is not missing. MSAA COLOUR SURFACE SIZING RETURNS 0, and that one call is why browser pages are white (2026-11-09)
+
+The user asked whether this driver has no WebGL support - "any browser page I
+open, shellshock.io or a volumetric shader on github, just shows white". It
+has WebGL. One capability under it is missing, and the whole symptom follows
+from a single call.
+
+**First, the search was the instrument.** `webgl` appears **zero** times in
+61 000 lines of this journal; the 180 `ANGLE` hits are `\bANGLE\b` **0** - they
+are all `rectangle`/`angle`. The 25 Safari hits are the 2m*/2o* swizzle era,
+closed by 2on. So this had never been measured, and no prior reading of ours
+was being contradicted.
+
+**Nothing is crashing.** No `com.apple.WebKit.GPU` crash report exists, and
+two GPU processes were alive during the whole investigation. Only Safari is
+installed, so "any browser" = Safari 27.2 / WebKit 605.1.15.
+
+### The probe, and the trap in the first one
+
+A local collector (`python3 -I` HTTP server on 127.0.0.1:8731) served a page
+that clears to a known colour, draws a green full-screen triangle through a
+compiled shader, reads both back with `readPixels`, and POSTs the log. The
+page is opened in the user's own Safari, so the configuration measured is the
+one with the symptom (rule 39).
+
+Probe 1, context attributes `{preserveDrawingBuffer:true}` only:
+
+    context: webgl2   VERSION: WebGL 2.0   UNMASKED_R: Apple GPU
+    clear readback: [0,0,0,0]   expect ~[51,153,255,255]
+    draw  readback: [0,0,0,0]   expect [0,255,0,255]
+    gl error: 1286 (INVALID_FRAMEBUFFER_OPERATION)
+
+Probe 2, written to also test a render-to-texture FBO, asked for
+`{antialias:false, depth:false, stencil:false}` - and **passed everything**:
+default framebuffer COMPLETE, clear `[51,153,255,255]`, draw `[0,255,0,255]`,
+our own FBO correct, `toDataURL` producing a real 406-byte PNG, every
+`getError` 0.
+
+**Two probes, several attributes changed at once, no isolation** - rule 17 in
+its purest form, and the second probe nearly became "WebGL works fine".
+
+### Probe 3: one variable, interleaved, five pairs
+
+One page, contexts created side by side, varying `antialias` alone and then
+`depth` alone, repeated, at 64x64 and at 1280x720, with and without
+`preserveDrawingBuffer`:
+
+| row | antialias | depth | fbstatus | err | readback |
+|----|----|----|----|----|----|
+| 1 | **true** | true | 36054 INCOMPLETE_ATTACHMENT | 1286 | `[0,0,0,0]` |
+| 2 | false | true | 36053 COMPLETE | 0 | correct |
+| 3 | **true** | false | 36054 | 1286 | `[0,0,0,0]` |
+| 4 | false | false | 36053 | 0 | correct |
+| 5-10 | the same, repeated and at 1280x720 | | identical | | |
+
+`antialias` is the whole variable. `depth` is not. Size is not.
+`preserveDrawingBuffer` is not. **And `antialias: true` is the browser
+DEFAULT** - `getContext('webgl')` with no options gets MSAA - so a page
+written normally fails and only a probe that explicitly opts out works. That
+is exactly "every page is white".
+
+Note the reading that was there from probe 1 and meant nothing until now:
+the context reports `antialias: **true**` while `SAMPLES` reads **0**. The
+context believes it got MSAA; the sample count says it did not. An unwritten
+field and a value look the same (rule 32).
+
+### It is not WebGL, and not the browser: Metal, directly
+
+A 70-line Metal program, no browser involved:
+
+    device: AMD Radeon 680M
+    supportsTextureSampleCount:2   YES
+    supportsTextureSampleCount:4   YES
+    supportsTextureSampleCount:8   YES
+    supportsTextureSampleCount:16  no
+    sampleCount 2: msaa tex NULL   resolve tex ok
+    sampleCount 4: msaa tex NULL   resolve tex ok
+    sampleCount 8: msaa tex NULL   resolve tex ok
+
+The device **claims** 2x, 4x and 8x and returns **nil for all three**, with
+the single-sample resolve texture allocating in the same loop as the positive
+control. WebGL's `renderbufferStorageMultisample` reporting `OUT_OF_MEMORY`
+(probe 4, every sample count 2..8, `RENDERBUFFER_SAMPLES` always 0 and
+`MAX_SAMPLES` claiming 8) is just ANGLE relaying this nil.
+
+### The descriptor matrix: COLOUR fails, DEPTH does not
+
+    2D       BGRA8 64x64    s1 RT private   -> OK      (controls)
+    2D       BGRA8 4096x4096 s1 RT private  -> OK
+    2D       D32   64x64    s1 RT private   -> OK
+
+    2DMS     BGRA8 64x64    s4 RT private   -> NULL
+    2DMS     BGRA8 64x64    s2 RT private   -> NULL
+    2DMS     RGBA8 64x64    s4 RT private   -> NULL
+    2DMS     R8    64x64    s4 RT private   -> NULL
+    2DMS     RGBA16F 64x64  s4 RT private   -> NULL
+    2DMS     BGRA8 64x64    s4 RT+READ      -> NULL
+    2DMS     BGRA8 16x16    s4 RT private   -> NULL
+    2DMSArr  BGRA8 64x64    s4 RT private   -> NULL
+
+    2DMS     D32   64x64    s4 RT private   -> OK      <-- !
+    2DMS     D16   64x64    s4 RT private   -> OK
+    2DMS     D32S8 64x64    s4 RT private   -> OK
+    2DMS     S8    64x64    s4 RT private   -> OK
+
+**Multisampled depth and stencil allocate. Multisampled colour never does**,
+in four formats, two sample counts, two sizes, array and non-array. So this
+is not "MSAA is unsupported" and not a memory shortage: it is the thing only
+a multisampled COLOUR surface needs.
+
+(Two instrument defects of mine, both aborting the run early with an
+assertion: `MTLStorageModeMemoryless`, then `Shared`/`Managed`, are rejected
+for multisample textures on this device. Rows after them never executed the
+first two times - a truncated run reads as a short table, not as an error.)
+
+### The failing call, named
+
+`heapTextureSizeAndAlignWithDescriptor:` - the surface sizing query, which
+runs **before** any memory is requested:
+
+    s1 colour BGRA8 (control, allocates)  size 16384  align 4096        alloc OK
+    s4 colour BGRA8 (THE FAILURE)         size 0      align 3614113793  alloc NULL
+    s2 colour BGRA8                       size 0      align 0           alloc NULL
+    s1 depth  D32   (control)             size 65536  align 65536       alloc OK
+    s4 depth  D32   (allocates)           size 65536  align 65536       alloc OK
+
+**Size 0, alignment `0xD7739C01`.** A zero size with a garbage alignment is an
+**unwritten output struct**: the sizing call failed and Metal passed the
+struct back untouched. Rule 14's exact shape - absence read as a value -
+appearing inside Apple's own stack. MSAA depth returns a sane 65536/65536 in
+the same run.
+
+So the chain is complete, every link measured:
+
+    getContext('webgl')  ->  antialias:true by default
+      ->  WebKit/ANGLE asks for a multisampled COLOUR render target
+      ->  AMDRadeonX6000MTLDriver cannot SIZE it (size 0)
+      ->  newTextureWithDescriptor returns nil
+      ->  default framebuffer INCOMPLETE_ATTACHMENT (36054)
+      ->  every clear and draw errors 1286, canvas stays empty
+      ->  WHITE PAGE
+
+`DYLD_PRINT_LIBRARIES` confirms the image servicing this is Apple's
+`/System/Library/Extensions/AMDRadeonX6000MTLDriver.bundle/...`, cache-
+resident (`nm` on the on-disk path returns 0 for **every** token including
+the control `Texture` - rule 26 caught it, the file is not there at all).
+
+### The candidate, stated as a candidate
+
+On gfx10 a multisampled **colour** surface needs **FMASK** (and CMASK)
+metadata that depth does not - depth uses HTILE, which single-sample depth
+also uses and which works here. The split in the matrix is exactly the
+FMASK/no-FMASK split. **This is a candidate, not a mechanism**: no FMASK code
+path has been read, the sizing function has not been disassembled, and
+nothing establishes that a genuinely Apple-supported AMD GPU would succeed
+where this one fails - there is no configuration here without the symptom
+(rule 39). It may also connect to the long-open `_X` swizzle-family defect,
+since MSAA colour requires the `_X` modes, but that is two facts next to each
+other, not a mechanism (rule 17).
+
+`tools/re/dscinv.sh` takes a fixed list of five images and does not accept
+`AMDRadeonX6000MTLDriver`, so reading that function needs the instrument
+extended first. No boots are required for any of this work.
+
+### Adjacent, NOT the same thing
+
+Eleven `Steam Helper` crash reports (2026-11-07) are a **different** stack:
+Steam's embedded Chromium uses legacy **OpenGL**, and dies
+
+    glClear_Exec -> gleUpdateDrawFramebufferState -> gldUpdateDrawFramebuffer
+      -> glrBindContextDrawFramebuffer -> glrATI_Hwl_SubmitPacketsWithToken
+      -> gpusSubmitDataBuffers -> gpusKillClientExt -> abort
+
+in `AMDRadeonX6000GLDriver` / `GLEngine` - a GPU **client kill** on binding a
+draw framebuffer, not a nil allocation, and through the GL driver rather than
+the Metal one. Same area (client framebuffer setup), different path. Recorded
+so it is not later merged into this one by resemblance.
+
+### What this does and does not mean for the project
+
+Metal itself is unaffected: the accelerator's own compositing, the bit-exact
+Metal results and the 91-140 fps all run single-sampled. What is broken is
+one capability that browsers request **by default**, which is why it reads as
+"no WebGL support" while WebGL 2.0, shader compilation, linking,
+render-to-texture, blits and `toDataURL` all demonstrably work.
+
+Reproducers kept: the probe pages and the three Metal programs
+(`msaa.m`, `mtx.m`, `sz.m`).
+
+## 312 — NO BOOT SPENT: MSAA COLOUR IS BROKEN BY OUR OWN SWIZZLE CAVE (2026-11-09)
+
+311's candidate (FMASK) is **dead**; the cause is ours.
+
+**Chain, every link read live with lldb on `tools/msaa/sz.m`** (slide 0xef51000,
+no boot, no sudo):
+`heapTextureSizeAndAlignWithDescriptor:` -> `amdMtl_GetHeapTexSizeAlignment`
+(unslid `0x7ffb1122436c`) -> `amdMtl_HWL_DetermineSwizzleMode`
+(`0x7ffb1121622d`, **our cave's detour site**) -> `Addr2ComputeSurfaceInfo`
+(`0x7ffb11238a90`). The sizing function returns on a non-zero AddrLib code
+**without writing its two outputs** — 311's "size 0, align garbage".
+
+| descriptor | Apple's chooser | after our cave | AddrLib |
+|---|---|---|---|
+| s1 colour BGRA8 | 22 (4KB_D_X) | 6 | 0 |
+| **s4 colour** | **27 (64KB_R_X)** | **10 (64KB_D)** | **3 INVALIDPARAMS** |
+| s2 colour | 27 | 10 | 3 |
+| s1 / s4 depth | 24 (Z_X) | 24 (Z left alone) | 0 |
+
+`tools/cachepatch.py`'s `NOX` table maps 27 -> 10 for render targets (the 2nr
+text fix). AddrLib refuses a non-X mode for `numFrags > 1`. **Not tested:**
+that AddrLib accepts 27 for MSAA colour here (the lldb poke that would show it
+was interrupted) — it is Apple's own choice and the depth case shows the _X
+family sizes fine, but that is inference.
+
+**Fix:** the cave skips the remap when descriptor `+0x30` (sampleCount, the
+field the sizing function tests `>= 2`) is >= 2: `cmp qword [rbx+0x30],2 ;
+jae OUT`, 7 bytes, absorbed by the 16-alignment pad (cave still 163 B of 176).
+Tahoe row regenerated by `make mtlcave`; **Sequoia row NOT** (no machine) so it
+still remaps MSAA. Hosttest case + break-it (old row restored -> FAIL). Plugin
+UUID **217C793A**, 0 libraries from SKC, 0 IOGraphicsFamily.
+
+**Open, named so it is not assumed:** MSAA colour in an `_X` mode may hit the
+old swizzle defect (the reason the remap exists). Size/alloc working is what
+this change claims; a *correct picture* needs a boot and `probe3.html`.
+
+Instrument fixes: `dscsym_many.sh` carried SkyLight's macOS 15 base (the 2xz
+defect, missed there); `dscinv.sh`/`dscbase.sh` take `MTLDriver` or any path
+(11055 functions; 6520/80400 grid points unresolved, printed).
 
 ## 3mip (2026-11-09, boot 507) — Spotify's green covers: THE SWIZZLE FIX EMPTIES MIPMAPPED SAMPLE-ONLY TEXTURES
 
@@ -66369,3 +66597,113 @@ regenerated or the Darwin 24 row keeps the old policy. After the boot:
 `build/out/mipprobe` with no injection must print 0 BAD with detour state 1,
 and then Spotify, launched normally, is the observation. The Chromium inside
 other apps (Claude, VS Code) takes the same path and has not been looked at.
+
+## 3mip-b (2026-11-09, boots 507 and 508) — the mip term is in the cave, ON TOP OF 312, and Spotify itself has its A/B
+
+`make plugin`, no boot spent. Plugin UUID **`6151555F-0425-3F3A-95CD-8C9C29651067`**,
+not yet booted. The loaded one is `217C793A`.
+
+### The booted plugin was not main's (rule 15, caught before the install)
+
+3mip was written on a branch cut from main. The plugin this machine has been
+booting is **`217C793A`, built in the `driver-msaa-issue` worktree at
+`67f1ac6`** — four commits main does not have, and one of them (312) changes
+the cave. A plugin built from this branch as it stood would have carried the
+mip term and **dropped the MSAA guard**, and the first WebGL page after the
+reboot would have been white again with nothing to point at. Found by
+comparing the loaded UUID against every worktree's `build/out`, which is the
+only place a UUID from another checkout can be matched: the two builds do not
+share a UUID even from identical source. That branch is merged here.
+
+**And it explains 3mip's unexplained reading.** `mtlswizzle.c`'s `fix` was
+main's policy, without 312's guard, so in Spotify it remapped the 8x MSAA
+colour probe to a mode AddrLib refuses; the texture came back nil and the GPU
+process died three times into software. The kext's cave has not done that
+since 312. The tool mirrors the guard now.
+
+### Two terms, one cave, and it no longer fitted
+
+312 used the seven pad bytes before the mode table; 3mip needs seven more.
+With both, the padded layout is 179 bytes against a 176-byte zero run. The
+pads were cosmetic — the table is bytes behind a rip-relative `lea`, the
+trampoline is entered by a rel32 `call` — so they are gone and the cave is
+**166** bytes. The policy, in order:
+
+```
+call TRAMP                      eax = the driver's own mode
+test usage, RenderTarget   jnz RT
+cmp  mipLevels, 1          ja  RT      3mip: a mip chain is never made linear
+xor  eax, eax              jmp OUT     flat, sample-only: LINEAR (2np)
+RT:  cmp sampleCount, 2    jae OUT     312: multisampled keeps its mode
+     cmp eax, 27           ja  OUT
+     eax = nox[eax]
+```
+
+### Every row carries it
+
+312 regenerated only Tahoe's row, so Sequoia's stayed on the pre-312 policy
+and a test said so in a comment. The cave is position-dependent in one rel32,
+made of two addresses the row already records, so `gen_cavepatch.py` now
+re-emits every other row's policy bytes from that row's own `fn_vm` and
+`cave_vm`. **Not tested on Darwin 24** — there is no such machine here. What
+it rests on: both descriptor offsets (`+0x28`, `+0x30`) are 2nq's, and 2nq
+measured them on Sequoia.
+
+### The hosttest runs the cave
+
+Nothing in the tree had ever executed a cave; every check was about where the
+bytes go. `osver_test.c` now maps each row's cave executable, replaces its
+trampoline with `mov eax, <mode>; ret`, and calls it with a descriptor:
+named cases for the measured defect (R8, usage 1, 7/8/9 mips, modes 22/27/2),
+both sides of each boundary, and 5000 cases against the policy written out in
+C. 312's own check was a byte-pattern search; its behaviour is run as well.
+Sanitized. Five breaks, each caught by failing tests and none by `-Werror`:
+
+```
+Darwin 24 row left on the old cave      10 FAIL
+mip boundary off by one (cmp ..., 2)     4 FAIL
+mip jump on the wrong condition (jb)    14 FAIL
+MSAA boundary off by one (cmp ..., 3)    6 FAIL
+mip term reading +0x30 for +0x28        12 FAIL
+```
+
+### The exact bytes, against the real driver, before any boot
+
+`mipprobe newcave` writes this build's cave and detour into its own process —
+the same bytes at the same two places the kext will write — and prints which
+cave is in memory at start and at end. Interleaved, two runs a side, full
+matrix, boot 508:
+
+```
+running kext (217C793A)   40 / 160 BAD   MSAA colour 9 / 9 allocated   cave 0
+this build's cave          0 / 160 BAD   MSAA colour 9 / 9 allocated   cave 1
+```
+
+(Boot 507 gave the same 40 and 0 for the pre-merge bytes.)
+
+### Spotify, with a control this time
+
+With the hook carrying 312's guard the GPU process stays up under an
+overriding policy — 0 new crash dumps and no `--use-gl=disabled` in all three
+runs — so the picture is a measurement now:
+
+```
+fixmip   covers correct
+fix      covers green        (the control: same injection, old policy)
+fixmip   covers correct
+```
+
+Still inference: that the R8 planes are Y/U/V. It no longer matters to the
+fix. Still owed: the same picture from the **kext** with no injection, after
+the boot. `build/out/mipprobe` with no argument must then print cave 1,
+0 BAD and MSAA 9 of 9.
+
+### Also in this session, not ours
+
+Boot 507 ended in a kernel panic — `local.ehsan.XHCIPoke`,
+`XHCIPoke::publishStatus + 0x3a4`, page fault, from its timer tick. The
+14:18 panic that preceded boot 507 is the same frame at the same offset, with
+the faulting address 0x100000 past R14 both times. Neither backtrace has a
+RembrandtGPU frame. It killed a break-it run mid-way and left the Darwin 24
+row on the old cave in the working tree; `make mtlcave` restored it and the
+five breaks above are the re-run.

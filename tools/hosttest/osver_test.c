@@ -6,8 +6,11 @@
  * and the consequence is a measured constant written on an OS it was never
  * measured on, which is rule 17. So the claims are pinned here, with the
  * evidence named, and a change to any of them has to come through this file. */
+#include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/mman.h>
 
 #include "rb_osver.h"
 /* 2xz: the cave rows are checked AGAINST the matrix here, because they are
@@ -22,6 +25,89 @@
 } while (0)
 
 int osver_tests(void);
+
+/* 3mip: THE CAVE IS CODE, SO RUN IT.
+ *
+ * Until 3mip nothing here executed a cave. Every check above is about where
+ * the bytes go and none is about what they decide, so a policy that emptied
+ * every mipmapped ShaderRead-only texture on the machine - Spotify's album
+ * covers - passed this file for a year. The policy is 96 bytes of x86 with
+ * one external reference (the trampoline into the driver), so it can be run
+ * right here: map the row's cave executable, overwrite its trampoline with
+ * `mov eax, <mode>; ret` standing in for the driver's own choice, and call it
+ * with a descriptor the way the driver would. What comes back is what a
+ * process on that OS would be told.
+ *
+ * The descriptor offsets are 2nq's, measured: mipLevels +0x28, sample count
+ * +0x30 (312), usage as requested +0x68, usage as resolved +0xb0. */
+#if defined(__x86_64__)
+typedef unsigned (*rb_cave_fn)(void *, void *, const void *, const void *,
+                               unsigned, unsigned, unsigned *, bool, bool);
+
+#define RB_CAVE_CALL_AT 38u     /* the `call TRAMP` in build_cave()'s wrapper */
+
+static uint8_t *cave_map(const struct rb_mtlcave_row *r, uint32_t *tramp)
+{
+    const uint8_t *code = r->cave_repl + r->cave_anchor;
+    int32_t rel;
+    uint8_t *m;
+
+    if (r->cave_used < RB_CAVE_CALL_AT + 5u || code[RB_CAVE_CALL_AT] != 0xE8) {
+        return 0;
+    }
+    memcpy(&rel, code + RB_CAVE_CALL_AT + 1, 4);
+    *tramp = (uint32_t)((int32_t)(RB_CAVE_CALL_AT + 5u) + rel);
+    if (*tramp + 6u > r->cave_used) {
+        return 0;
+    }
+    m = mmap(0, 4096, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (m == MAP_FAILED) {
+        return 0;
+    }
+    memcpy(m, code, r->cave_used);
+    return m;
+}
+
+static unsigned cave_ask(uint8_t *m, uint32_t tramp, unsigned orig,
+                         uint64_t use68, uint64_t useb0, uint64_t mips,
+                         uint64_t samples)
+{
+    uint64_t desc[32];
+    unsigned out = 0;
+
+    memset(desc, 0, sizeof(desc));
+    desc[0x28 / 8] = mips;
+    desc[0x30 / 8] = samples;
+    desc[0x68 / 8] = use68;
+    desc[0xb0 / 8] = useb0;
+    m[tramp] = 0xB8;                         /* mov eax, orig */
+    memcpy(m + tramp + 1, &orig, 4);
+    m[tramp + 5] = 0xC3;                     /* ret */
+    return ((rb_cave_fn)(void *)m)(0, 0, desc, 0, 1, 0, &out, false, false);
+}
+
+/* The policy in C, written from the journal's statement of it and not from
+ * the bytes: LINEAR for a flat non-render-target; a multisampled surface that
+ * is not made linear keeps the driver's mode untouched (312); everything else
+ * keeps the driver's mode with the _X family mapped to its non-X equivalent. */
+static unsigned cave_model(unsigned orig, uint64_t usage, uint64_t mips,
+                           uint64_t samples)
+{
+    static const unsigned char nox[28] = {
+        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
+        20, 5, 6, 6, 24, 9, 10, 10,
+    };
+
+    if (!(usage & 4) && mips <= 1) {
+        return 0;
+    }
+    if (samples >= 2) {
+        return orig;
+    }
+    return orig < 28 ? nox[orig] : orig;
+}
+#endif
+
 
 int osver_tests(void)
 {
@@ -177,6 +263,23 @@ int osver_tests(void)
          * prologue is left as context. */
         CHECK(r->fn_repl[0] == 0xE9,
               "the detour starts with a rel32 jmp");
+        /* 312: a multisampled render target must keep Apple's own swizzle
+         * mode. The guard is `cmp qword [rbx+0x30], 2 ; jae OUT`. Without it
+         * the remap turns 64KB_R_X into 64KB_D, AddrLib answers
+         * ADDR_INVALIDPARAMS and every MSAA colour texture is nil.
+         * 3mip: this was Tahoe-only, because 312 regenerated only the row of
+         * the machine it ran on. gen_cavepatch.py now re-emits every other
+         * row's policy bytes from that row's own recorded addresses, so the
+         * guard is required of every row. */
+        {
+            static const unsigned char guard[] = { 0x48, 0x83, 0x7B, 0x30, 0x02, 0x73 };
+            int found = 0;
+            for (j = 0; j + (int)sizeof(guard) <= (int)r->cave_len; j++) {
+                found += memcmp(r->cave_repl + j, guard, sizeof(guard)) == 0;
+            }
+            CHECK(found == 1,
+                  "every cave skips the remap for sampleCount >= 2 - MSAA colour keeps its _X mode (312)");
+        }
         CHECK(r->cave_vm > r->text_vm && r->fn_vm > r->text_vm,
               "both addresses are inside the image, above its __TEXT base");
         CHECK(r->cave_vm >= r->cave_anchor,
@@ -194,6 +297,83 @@ int osver_tests(void)
                   "no two cave rows share addresses - a copied row is not a derived one");
         }
     }
+
+#if defined(__x86_64__)
+    /* --- 3mip: what each row's cave DECIDES ---------------------------- */
+    for (i = 0; i < RB_MTLCAVE_ROW_COUNT; i++) {
+        const struct rb_mtlcave_row *r = &rb_mtlcave_rows[i];
+        uint32_t tramp = 0;
+        uint8_t *m = cave_map(r, &tramp);
+        static const uint64_t usages[] = { 0x1, 0x4, 0x5, 0x7, 0x17 };
+        static const uint64_t mipsv[] = { 0, 1, 2, 7, 9 };
+        static const uint64_t sampv[] = { 0, 1, 2, 4, 8 };
+        unsigned o, u, v, k;
+        int wrong = 0;
+
+        CHECK(m != 0, "the cave maps and its call into the trampoline is where build_cave() puts it");
+        if (!m) {
+            continue;
+        }
+        /* The defect, as measured: Spotify's planes are R8, usage 0x1, mip 7
+         * to 9, and the driver picks 22, 27 or 2 for them. */
+        CHECK(cave_ask(m, tramp, 22, 0x1, 0x1, 9, 1) == 6,
+              "3mip: ShaderRead-only, 9 mips, 4KB_D_X -> 4KB_D, NOT linear (the 300x300 cover plane)");
+        CHECK(cave_ask(m, tramp, 27, 0x1, 0x1, 8, 1) == 10,
+              "3mip: ShaderRead-only, 8 mips, 64KB_R_X -> 64KB_D, NOT linear");
+        CHECK(cave_ask(m, tramp, 2, 0x1, 0x1, 7, 1) == 2,
+              "3mip: ShaderRead-only, 7 mips, a non-X mode is left exactly as the driver chose");
+        /* The boundary, both sides. One mip level is a flat texture. */
+        CHECK(cave_ask(m, tramp, 22, 0x1, 0x1, 2, 1) == 6,
+              "3mip: two mip levels is a chain - not linear");
+        CHECK(cave_ask(m, tramp, 22, 0x1, 0x1, 1, 1) == 0,
+              "a flat ShaderRead-only texture is still LINEAR (2np's fix for the glyph atlas stands)");
+        CHECK(cave_ask(m, tramp, 27, 0x1, 0x1, 0, 1) == 0,
+              "mipLevels 0 is flat too - LINEAR");
+        /* Render targets: unchanged by 3mip, flat or not. */
+        CHECK(cave_ask(m, tramp, 27, 0x5, 0x5, 1, 1) == 10 &&
+              cave_ask(m, tramp, 22, 0x5, 0x5, 9, 1) == 6,
+              "a render target is mapped off the _X family, with or without mips");
+        CHECK(cave_ask(m, tramp, 27, 0x0, 0x17, 1, 1) == 10,
+              "usage unset as requested but resolved to a render target (JBR) is a render target");
+        CHECK(cave_ask(m, tramp, 24, 0x4, 0x4, 1, 1) == 24 &&
+              cave_ask(m, tramp, 20, 0x4, 0x4, 1, 1) == 20,
+              "Z modes are left alone - depth needs them");
+        CHECK(cave_ask(m, tramp, 31, 0x4, 0x4, 1, 1) == 31 &&
+              cave_ask(m, tramp, 28, 0x1, 0x1, 9, 1) == 28,
+              "a mode past the table is returned as it came, never indexed");
+        /* 312, now RUN rather than pattern-matched: a multisampled render
+         * target keeps the driver's own mode, both sides of the boundary. */
+        CHECK(cave_ask(m, tramp, 27, 0x5, 0x5, 1, 4) == 27 &&
+              cave_ask(m, tramp, 27, 0x7, 0x7, 1, 8) == 27,
+              "312: a multisampled render target keeps 64KB_R_X - the remap is what made MSAA colour nil");
+        CHECK(cave_ask(m, tramp, 27, 0x5, 0x5, 1, 2) == 27 &&
+              cave_ask(m, tramp, 27, 0x5, 0x5, 1, 1) == 10,
+              "312: two samples is multisampled and one is not");
+        /* And everything, against the policy written down in C. */
+        for (o = 0; o < 40; o++) {
+            for (u = 0; u < sizeof(usages) / sizeof(usages[0]); u++) {
+                for (v = 0; v < sizeof(mipsv) / sizeof(mipsv[0]); v++) {
+                    for (k = 0; k < sizeof(sampv) / sizeof(sampv[0]); k++) {
+                        wrong += cave_ask(m, tramp, o, usages[u], usages[u], mipsv[v], sampv[k]) !=
+                                 cave_model(o, usages[u], mipsv[v], sampv[k]);
+                    }
+                }
+            }
+        }
+        CHECK(wrong == 0,
+              "the cave agrees with the stated policy for every mode x usage x mip count x sample count (5000 cases)");
+        munmap(m, 4096);
+
+        /* One policy, every OS. The cave is position-dependent only in the
+         * trampoline's last rel32, so everything before it must be identical
+         * across rows - otherwise an OS is still running an older policy. */
+        CHECK(r->cave_used == rb_mtlcave_rows[0].cave_used &&
+              memcmp(r->cave_repl + r->cave_anchor,
+                     rb_mtlcave_rows[0].cave_repl + rb_mtlcave_rows[0].cave_anchor,
+                     r->cave_used - 4u) == 0,
+              "every row carries the same cave outside the one address-dependent displacement");
+    }
+#endif
 
     return failures;
 }

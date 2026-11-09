@@ -264,8 +264,64 @@ existed = os.path.exists(path)
 with open(path, "w") as fh:
     fh.write(body)
 
+# 3mip: EVERY ROW CARRIES THE SAME POLICY, BY CONSTRUCTION.
+#
+# A row is addresses plus the cave's bytes, and the cave's bytes are the
+# policy. Until 3mip a change to build_cave() reached only the row of the OS
+# this ran on - the others kept whatever policy they were generated with, and
+# nothing said so. The cave is position-dependent in exactly one place (the
+# trampoline's rel32 back to FN+30), and a row records the two addresses that
+# displacement is made of. So every OTHER row's replacement is re-emitted here
+# from its OWN recorded fn_vm and cave_vm: nothing about that OS is re-derived
+# or assumed, only the policy bytes move. tools/hosttest/osver_test.c asserts
+# the rows agree byte for byte outside that one displacement.
+def rebase_row(p):
+    src = open(p).read()
+
+    def num(field):
+        m = re.search(r"/\* %s\s*\*/ (0x[0-9a-fA-F]+|\d+)" % field, src)
+        assert m, "%s: no %s in the row" % (p, field)
+        return int(m.group(1), 0)
+
+    def array(prefix):
+        m = re.search(r"static const uint8_t (%s_d\d+)\[(\d+)\] = \{(.*?)\};"
+                      % prefix, src, re.S)
+        assert m, "%s: no %s array" % (p, prefix)
+        data = bytes(int(x, 16) for x in re.findall(r"0x([0-9A-Fa-f]{2})", m.group(3)))
+        assert len(data) == int(m.group(2)), "%s: %s length disagrees" % (p, prefix)
+        return m, data
+
+    anchor, reserved, used = num("cave_anchor"), num("cave_reserved"), num("cave_used")
+    _fm, rfind = array("kRbMtlCaveFind")
+    rm, rrepl = array("kRbMtlCaveRepl")
+    assert len(rfind) == anchor + reserved and set(rfind[anchor:]) == {0}, \
+        "%s: the find pattern is not anchor + zero run" % p
+    cp.CAVE_VM, cp.FN_VM = num("cave_vm"), num("fn_vm")
+    rcave = cp.build_cave()
+    assert len(rcave) <= reserved, "%s: cave is %d bytes, %d reserved" % (p, len(rcave), reserved)
+    new = rfind[:anchor] + rcave + bytes(reserved - len(rcave))
+    if new == rrepl:
+        return False
+    src = src[:rm.start()] + arr(rm.group(1), new) + src[rm.end():]
+    src = re.sub(r"(/\* cave_used\s*\*/ )\d+u", r"\g<1>%du" % len(rcave), src)
+    src = src.replace("%d bytes used of" % used, "%d bytes used of" % len(rcave))
+    with open(p, "w") as fh:
+        fh.write(src)
+    return True
+
+
+rebased = []
+for _f in sorted(os.listdir(OUT_DIR)):
+    _p = os.path.join(OUT_DIR, _f)
+    if re.fullmatch(r"darwin\d+\.h", _f) and _p != path:
+        rebased.append((_p, rebase_row(_p)))
+cp.CAVE_VM, cp.FN_VM = CAVE_VM, FN_VM
+
 e = sys.stderr
 print("%s %s" % ("rewrote" if existed else "wrote", path), file=e)
+for _p, _changed in rebased:
+    print("%s %s (policy bytes only, from its own recorded addresses)"
+          % ("rebased" if _changed else "unchanged", _p), file=e)
 print("  Darwin %d (%s), %s" % (D, OS, platform.platform()), file=e)
 print("  image  %s at %#x" % (img_path, img_addr), file=e)
 print("  __TEXT %#x  fn %#x  cave %#x" % (TEXT_VM, FN_VM, CAVE_VM), file=e)
