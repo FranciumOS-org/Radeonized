@@ -1,5 +1,5 @@
 #!/bin/sh
-# dscinv.sh <SkyLight|CoreDisplay|CoreGraphics>  -- the image's complete
+# dscinv.sh <SkyLight|CoreDisplay|CoreGraphics|IOPresentment|IOKit|MTLDriver|/abs/path>  -- the image's complete
 # function inventory, "<unslid-hex> <name>" per line, cached in build/re/.
 #
 # This is the single most useful instrument in the cache work so far (2py):
@@ -20,10 +20,18 @@ cd "$(dirname "$0")/../.."
 # have belonged to another library. One of them was even marked
 # "# approximate", which is the honest version of the same problem. dscbase.sh
 # reads the load commands, so the answer cannot go stale.
+# 311: any image dscbase.sh can place, by name or by absolute path - the list
+# of five was why the Metal plugin could not be inventoried. MTLDriver (and
+# any path under /System/Library/Extensions) is mapped into a process only
+# once a Metal device exists, so the symbolizer is told to create one.
 case "$1" in
   SkyLight|CoreDisplay|CoreGraphics|IOPresentment|IOKit) ;;
-  *) echo "usage: $0 <SkyLight|CoreDisplay|CoreGraphics|IOPresentment|IOKit>" >&2; exit 2 ;;
+  MTLDriver) DSC_METAL=1; export DSC_METAL ;;
+  /System/Library/Extensions/*) DSC_METAL=1; export DSC_METAL ;;
+  /*) ;;
+  *) echo "usage: $0 <SkyLight|CoreDisplay|CoreGraphics|IOPresentment|IOKit|MTLDriver|/abs/path>" >&2; exit 2 ;;
 esac
+TAG=$(basename "$1")
 read -r B L _P <<EOF
 $("$(dirname "$0")/dscbase.sh" "$1")
 EOF
@@ -31,7 +39,7 @@ EOF
 BASE=0x$B; LEN=0x$L
 printf 'inventory of %s: unslid __TEXT %s, %s bytes\n' "$1" "$BASE" "$LEN" >&2
 mkdir -p build/re
-OUT="build/re/$1-funcs.txt"
+OUT="build/re/$TAG-funcs.txt"
 G=$(mktemp -t dscinv); N=$(mktemp -t dscinv)
 trap 'rm -f "$G" "$N"' EXIT
 /usr/bin/python3 -c "
@@ -54,3 +62,10 @@ for nm, b in sorted(best.items(), key=lambda kv: kv[1]):
     print("%x %s" % (b, nm))
 PY
 printf '%s: %s functions\n' "$OUT" "$(wc -l < "$OUT" | tr -d ' ')"
+# 311: the 0x40-grid caveat, made loud instead of left in a comment. Grid
+# points atos could not name (no " + N" offset) are reported: those, plus any
+# function shorter than 0x40 that no point lands in, are ABSENT from the
+# inventory - an absent name is not an absent function.
+TOT=$(wc -l < "$G" | tr -d ' ')
+UNR=$(grep -vc ' + [0-9][0-9]*$' "$N" || true)
+printf '%s grid points, %s unresolved; functions under 0x40 bytes may be absent\n' "$TOT" "$UNR" >&2

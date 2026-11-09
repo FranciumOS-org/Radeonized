@@ -3,7 +3,12 @@
 # Slide measured fresh every run (2ps). Addresses are fed to atos in chunks
 # because a whole-image grid (78 720 addresses for SkyLight) overflows argv.
 set -e
-SL_UNSLID=$((0x7FF807B42000))
+# 311: the reference base was a macOS 15 literal (0x7FF807B42000) - the very
+# stale-table defect 2xz removed from dscsym.sh and dscinv.sh and missed here.
+# On macOS 26 SkyLight is at 0x7FF8091F1000, so every slide this script
+# measured was 0x16AF000 off and atos answered for the wrong addresses.
+# Derived from this machine's cache, as dscsym.sh does.
+SL_UNSLID=$((0x$("$(dirname "$0")/dscbase.sh" SkyLight | cut -d" " -f1)))
 /usr/bin/python3 -c '
 import ctypes, time
 for p in ("/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight",
@@ -17,6 +22,18 @@ for p in ("/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight",
           "/System/Library/Frameworks/IOKit.framework/IOKit"):
     try: ctypes.CDLL(p)
     except Exception as e: print("dlopen FAILED", p, e)
+# 311: the Metal plugin (AMDRadeonX6000MTLDriver) is cache-resident but only
+# MAPPED INTO A PROCESS once a device exists, and atos -p can only name what
+# the target process has mapped. DSC_METAL=1 creates the default device so the
+# driver loads; without it the plugin image is simply absent from atos.
+import os
+if os.environ.get("DSC_METAL") == "1":
+    try:
+        m = ctypes.CDLL("/System/Library/Frameworks/Metal.framework/Metal")
+        m.MTLCreateSystemDefaultDevice.restype = ctypes.c_void_p
+        d = m.MTLCreateSystemDefaultDevice()
+        print("MTLCreateSystemDefaultDevice ->", hex(d or 0))
+    except Exception as e: print("Metal device FAILED", e)
 time.sleep(1800)' &
 PID=$!
 trap 'kill $PID 2>/dev/null' EXIT
