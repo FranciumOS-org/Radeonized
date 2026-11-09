@@ -237,9 +237,17 @@ static unsigned int hook(void *hw, void *al, const void *desc, const void *st,
                      *(const uint64_t *)((const char *)desc + gUsageOff2);
     int isRT = (usage & gUsageRT) != 0;
     unsigned int want = orig;
+    // 312, mirrored here in 3mip: a MULTISAMPLED surface on the remap path
+    // keeps the driver's own mode, as the kext's cave has done since 312.
+    // Without this `fix` was no longer the cave's policy - it remapped MSAA
+    // colour to a mode AddrLib refuses, the texture came back nil, and
+    // Spotify's GPU process died three times and fell back to software. That
+    // is what made the first Spotify reading of `fixmip` worthless: the old
+    // policy looked fixed too.
+    int msaa = d[6] >= 2;
     if (gMode == M_NOX) want = nox(orig);
-    else if (isRT) want = (gMode == M_FIX || gMode == M_FIXMIP) ? nox(orig) : orig;
-    else if (gMode == M_FIXMIP && d[5] > 1) want = nox(orig);  // mipmapped
+    else if (isRT) want = (gMode == M_FIX || gMode == M_FIXMIP) && !msaa ? nox(orig) : orig;
+    else if (gMode == M_FIXMIP && d[5] > 1) want = msaa ? orig : nox(orig);  // mipmapped
     else want = 0;                                     // non-render-target
     if (isRT) { if (gRT >= 0) want = (unsigned int)gRT; }
     else      { if (gNonRT >= 0) want = (unsigned int)gNonRT; }

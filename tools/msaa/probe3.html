@@ -1,0 +1,44 @@
+<!doctype html><html><head><meta charset="utf-8"><title>WebGL 2x2</title>
+<style>body{font:12px ui-monospace,monospace;background:#111;color:#ddd;padding:10px}
+#out{white-space:pre-wrap}</style></head><body><div id="cv"></div><div id="out">…</div>
+<script>
+var L=[];function p(s){L.push(s);document.getElementById('out').textContent=L.join('\n');}
+var EM={0:'NONE',1280:'INVALID_ENUM',1281:'INVALID_VALUE',1282:'INVALID_OPERATION',
+        1285:'OUT_OF_MEMORY',1286:'INVALID_FRAMEBUFFER_OPERATION'};
+var FM={36053:'COMPLETE',36054:'INCOMPL_ATTACH',36055:'MISSING_ATTACH',
+        36057:'INCOMPL_DIMS',36061:'UNSUPPORTED',36182:'INCOMPL_MULTISAMPLE'};
+function run(name, attrs, w, h){
+  var c=document.createElement('canvas'); c.width=w; c.height=h;
+  c.style.width='48px'; c.style.height='48px'; c.style.border='1px solid #444';
+  document.getElementById('cv').appendChild(c);
+  var gl=c.getContext('webgl2',attrs);
+  if(!gl){p(name+': getContext NULL');return;}
+  var a=gl.getContextAttributes();
+  var fbs=gl.checkFramebufferStatus(gl.FRAMEBUFFER);
+  gl.clearColor(0.2,0.6,1,1); gl.clear(gl.COLOR_BUFFER_BIT);
+  var e1=gl.getError();
+  var px=new Uint8Array(4);
+  gl.readPixels(0,0,1,1,gl.RGBA,gl.UNSIGNED_BYTE,px);
+  var e2=gl.getError();
+  p(name+'  ['+w+'x'+h+']');
+  p('   got aa='+a.antialias+' depth='+a.depth+' stencil='+a.stencil+
+    '  SAMPLES='+gl.getParameter(gl.SAMPLES)+'  buf='+gl.drawingBufferWidth+'x'+gl.drawingBufferHeight);
+  p('   fbstatus '+fbs+' '+(FM[fbs]||'?')+'   err(clear) '+e1+' '+(EM[e1]||'?')+
+    '   err(read) '+e2+' '+(EM[e2]||'?'));
+  p('   readback ['+px.join(',')+']   '+((px[0]==51&&px[1]==153&&px[2]==255)?'OK':'*** WRONG ***'));
+}
+p('MAX_SAMPLES probe:');
+run('1. aa=T depth=T (BROWSER DEFAULT)', {preserveDrawingBuffer:true}, 64, 64);
+run('2. aa=F depth=T              ', {preserveDrawingBuffer:true,antialias:false}, 64, 64);
+run('3. aa=T depth=F              ', {preserveDrawingBuffer:true,depth:false}, 64, 64);
+run('4. aa=F depth=F (PROBE 2)    ', {preserveDrawingBuffer:true,antialias:false,depth:false,stencil:false}, 64, 64);
+p('--- repeat 1 and 4 INTERLEAVED, and at page size ---');
+run('5. aa=T depth=T again        ', {preserveDrawingBuffer:true}, 64, 64);
+run('6. aa=F depth=F again        ', {preserveDrawingBuffer:true,antialias:false,depth:false,stencil:false}, 64, 64);
+run('7. aa=T depth=T  1280x720    ', {preserveDrawingBuffer:true}, 1280, 720);
+run('8. aa=F depth=F  1280x720    ', {preserveDrawingBuffer:true,antialias:false,depth:false}, 1280, 720);
+p('--- no preserveDrawingBuffer (what real pages use) ---');
+run('9. aa=T depth=T no-preserve  ', {}, 64, 64);
+run('10.aa=F depth=F no-preserve  ', {antialias:false,depth:false}, 64, 64);
+try{fetch('/collect',{method:'POST',body:'PROBE3\n'+L.join('\n')});}catch(e){}
+</script></body></html>

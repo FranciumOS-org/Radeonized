@@ -25,6 +25,9 @@
 //   mipprobe            full matrix (5 sizes, 160 rows)
 //   mipprobe quick      64x64 and 300x300 only
 //   mipprobe verbose    per-level mismatch / zero / unwritten percentages
+//   mipprobe newcave    write THIS BUILD's cave and detour into this process
+//                       first: the bytes the kext will place after the next
+//                       boot, run against the real driver in the boot before.
 //   mipprobe unpatch    put the driver's ORIGINAL prologue back in this process
 //                       first (tools/mipprobe_unpatch.c). The kext places the
 //                       swizzle detour once per pid, so this is an in-boot A/B
@@ -46,6 +49,10 @@ print("device: \(dev.name)")
 let unpatch = CommandLine.arguments.contains("unpatch")
 print("swizzle detour at start: \(rb_detour_state()) (1 present, 0 original, -1 neither, -2 not found)")
 if unpatch { print("removing detour in this process: rc \(rb_detour_remove()), now \(rb_detour_state())") }
+print("cave in memory at start: \(rb_cave_state()) (1 this build's row, 0 other bytes - the running kext's if they differ)")
+if CommandLine.arguments.contains("newcave") {
+    print("installing this build's cave and detour in this process: rc \(rb_cave_install()), cave \(rb_cave_state()) detour \(rb_detour_state())")
+}
 
 struct Fmt { let f: MTLPixelFormat; let name: String; let bpp: Int; let bgra: Bool }
 let fmts = [Fmt(f: .r8Unorm, name: "r8", bpp: 1, bgra: false),
@@ -284,6 +291,21 @@ for fm in fmts {
         }
     }
 }
-print("swizzle detour at end: \(rb_detour_state())")
+// 312's subject, kept in view because 3mip rewrote the cave that 312 fixed:
+// a multisampled COLOUR texture must still allocate. nil here means the MSAA
+// guard was lost in the merge of the two policies.
+var msaaNil = 0, msaaAll = 0
+for f in [MTLPixelFormat.bgra8Unorm, .rgba8Unorm, .r8Unorm] {
+    for n in [2, 4, 8] where dev.supportsTextureSampleCount(n) {
+        let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: f, width: 64, height: 64, mipmapped: false)
+        d.textureType = .type2DMultisample; d.sampleCount = n
+        d.storageMode = .private; d.usage = [.renderTarget, .shaderRead]
+        msaaAll += 1
+        if dev.makeTexture(descriptor: d) == nil { msaaNil += 1 }
+    }
+}
+print("MSAA colour textures (312): \(msaaAll - msaaNil) of \(msaaAll) allocated")
+if msaaNil > 0 { anyBad = true }
+print("swizzle detour at end: \(rb_detour_state()), cave \(rb_cave_state())")
 print(anyBad ? "RESULT: at least one level did not hold its contents" : "RESULT: every level held its contents")
 exit(anyBad ? 1 : 0)

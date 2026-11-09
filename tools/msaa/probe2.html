@@ -1,0 +1,70 @@
+<!doctype html><html><head><meta charset="utf-8"><title>WebGL probe 2</title>
+<style>body{font:12px ui-monospace,monospace;background:#111;color:#ddd;padding:10px}
+#out{white-space:pre-wrap}</style></head>
+<body><canvas id="c" width="64" height="64"></canvas><div id="out">…</div>
+<script>
+var L=[];function p(s){L.push(s);document.getElementById('out').textContent=L.join('\n');}
+function E(gl,tag){var e=gl.getError(),m={0:'NONE',1280:'INVALID_ENUM',1281:'INVALID_VALUE',
+ 1282:'INVALID_OPERATION',1285:'OUT_OF_MEMORY',1286:'INVALID_FRAMEBUFFER_OPERATION'};
+ p('   err after '+tag+': '+e+' '+(m[e]||'?'));return e;}
+function FBS(gl,tag){var s=gl.checkFramebufferStatus(gl.FRAMEBUFFER),
+ m={36053:'COMPLETE',36054:'INCOMPLETE_ATTACHMENT',36055:'MISSING_ATTACHMENT',
+    36057:'INCOMPLETE_DIMENSIONS',36061:'UNSUPPORTED',36182:'INCOMPLETE_MULTISAMPLE'};
+ p('   fbstatus '+tag+': '+s+' '+(m[s]||'?'));return s;}
+var c=document.getElementById('c');
+var gl=c.getContext('webgl2',{preserveDrawingBuffer:true,antialias:false,depth:false,stencil:false,alpha:true});
+p('context: '+(gl?'webgl2':'NONE'));
+if(gl){
+ var at=gl.getContextAttributes();p('attrs: '+JSON.stringify(at));
+ p('drawingBuffer: '+gl.drawingBufferWidth+'x'+gl.drawingBufferHeight);
+ E(gl,'creation');
+ p('-- A: DEFAULT framebuffer --');
+ gl.bindFramebuffer(gl.FRAMEBUFFER,null); FBS(gl,'default');
+ gl.clearColor(0.2,0.6,1,1); gl.clear(gl.COLOR_BUFFER_BIT); E(gl,'clear(default)');
+ var px=new Uint8Array(4);
+ gl.readPixels(0,0,1,1,gl.RGBA,gl.UNSIGNED_BYTE,px); E(gl,'readPixels(default)');
+ p('   default readback: ['+px.join(',')+']  expect ~[51,153,255,255]');
+ p('-- B: OUR OWN framebuffer (render to texture) --');
+ var tex=gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D,tex);
+ gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,64,64,0,gl.RGBA,gl.UNSIGNED_BYTE,null);
+ gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.NEAREST);
+ E(gl,'texImage2D');
+ var fb=gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER,fb);
+ gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,tex,0);
+ E(gl,'attach'); FBS(gl,'ours');
+ gl.viewport(0,0,64,64);
+ gl.clearColor(1,0,0,1); gl.clear(gl.COLOR_BUFFER_BIT); E(gl,'clear(ours)');
+ gl.readPixels(0,0,1,1,gl.RGBA,gl.UNSIGNED_BYTE,px); E(gl,'readPixels(ours)');
+ p('   ours clear readback: ['+px.join(',')+']  expect [255,0,0,255]');
+ function sh(t,s){var o=gl.createShader(t);gl.shaderSource(o,s);gl.compileShader(o);
+  if(!gl.getShaderParameter(o,gl.COMPILE_STATUS))p('   shader FAIL: '+gl.getShaderInfoLog(o));return o;}
+ var pr=gl.createProgram();
+ gl.attachShader(pr,sh(gl.VERTEX_SHADER,'attribute vec2 a;void main(){gl_Position=vec4(a,0.,1.);}'));
+ gl.attachShader(pr,sh(gl.FRAGMENT_SHADER,'void main(){gl_FragColor=vec4(0.,1.,0.,1.);}'));
+ gl.linkProgram(pr);
+ p('   link: '+gl.getProgramParameter(pr,gl.LINK_STATUS));
+ gl.useProgram(pr);
+ var b=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,b);
+ gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,3,-1,-1,3]),gl.STATIC_DRAW);
+ var a=gl.getAttribLocation(pr,'a');gl.enableVertexAttribArray(a);
+ gl.vertexAttribPointer(a,2,gl.FLOAT,false,0,0);
+ gl.drawArrays(gl.TRIANGLES,0,3); E(gl,'drawArrays(ours)');
+ gl.readPixels(32,32,1,1,gl.RGBA,gl.UNSIGNED_BYTE,px); E(gl,'readPixels(ours,draw)');
+ p('   ours DRAW readback: ['+px.join(',')+']  expect [0,255,0,255]');
+ p('-- C: back to default, draw there --');
+ gl.bindFramebuffer(gl.FRAMEBUFFER,null); FBS(gl,'default again');
+ gl.viewport(0,0,c.width,c.height);
+ gl.drawArrays(gl.TRIANGLES,0,3); E(gl,'drawArrays(default)');
+ gl.readPixels(32,32,1,1,gl.RGBA,gl.UNSIGNED_BYTE,px);
+ p('   default DRAW readback: ['+px.join(',')+']  expect [0,255,0,255]');
+ p('-- D: toDataURL (the compositing path) --');
+ try{var u=c.toDataURL('image/png');p('   dataURL len '+u.length+' head '+u.slice(0,30));}
+ catch(e){p('   toDataURL threw: '+e);}
+ p('-- E: extensions / limits --');
+ p('   MAX_RENDERBUFFER: '+gl.getParameter(gl.MAX_RENDERBUFFER_SIZE));
+ p('   SAMPLES: '+gl.getParameter(gl.SAMPLES));
+ p('   ext count: '+(gl.getSupportedExtensions()||[]).length);
+ c.addEventListener('webglcontextlost',function(){p('!! CONTEXT LOST');});
+}
+try{fetch('/collect',{method:'POST',body:'PROBE2\nUA: '+navigator.userAgent+'\n'+L.join('\n')});}catch(e){}
+</script></body></html>
