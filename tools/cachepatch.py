@@ -93,6 +93,15 @@ def build_cave():
     jmp_at = len(w)
     w += bytes([0xEB, 0])                            # jmp OUT
     rt = len(w)
+    # 312: a MULTISAMPLED render target keeps Apple's own mode. The remap
+    # below turns 27 (64KB_R_X) into 10 (64KB_D) and AddrLib refuses 10 for
+    # numFrags > 1 with ADDR_INVALIDPARAMS, so the sizing call never wrote its
+    # outputs, newTextureWithDescriptor returned nil, and every WebGL page
+    # (antialias:true) came up white. MTLTextureDescriptorPrivate +0x30 is the
+    # sample count (the sizing function tests it `>= 2` at 0x...243b3).
+    w += bytes([0x48, 0x83, 0x7B, 0x30, 0x02])       # cmp qword [rbx+0x30], 2
+    jae_at = len(w)
+    w += bytes([0x73, 0])                            # jae OUT  (MSAA: keep)
     w += bytes([0x83, 0xF8, 0x1B])                   # cmp eax, 27
     ja_at = len(w)
     w += bytes([0x77, 0])                            # ja OUT
@@ -116,12 +125,13 @@ def build_cave():
     w[jnz_at + 1] = rt - (jnz_at + 2)
     w[jmp_at + 1] = out - (jmp_at + 2)
     w[ja_at + 1] = out - (ja_at + 2)
+    w[jae_at + 1] = out - (jae_at + 2)
     struct.pack_into("<i", w, lea_at + 3, table_at - (lea_at + 7))
     struct.pack_into("<i", w, call_at + 1, tramp_at - (call_at + 5))
     tramp_end = tramp_at + len(PROLOGUE) + 5
     struct.pack_into("<i", w, tramp_at + len(PROLOGUE) + 1,
                      (FN_VM + len(PROLOGUE)) - (CAVE_VM + tramp_end))
-    for v in (w[jnz_at + 1], w[jmp_at + 1], w[ja_at + 1]):
+    for v in (w[jnz_at + 1], w[jmp_at + 1], w[ja_at + 1], w[jae_at + 1]):
         assert 0 <= v < 128, "a short jump went out of range"
     return bytes(w)
 

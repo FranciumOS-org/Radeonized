@@ -70,3 +70,8 @@ paragraph on the card.
 
 **Keep away from `docs/HANDOFF-NEXT.md`** — that is the external-display
 line and it is active.
+
+## 312 update
+Cause found and patched (cave skips the remap for sampleCount >= 2). FMASK
+candidate dead. Remaining: install plugin to EFI (user), reboot, run
+`tools/msaa/sz.m` then `probe3.html`; check the picture is not garbled.

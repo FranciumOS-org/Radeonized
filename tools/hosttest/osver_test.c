@@ -177,6 +177,21 @@ int osver_tests(void)
          * prologue is left as context. */
         CHECK(r->fn_repl[0] == 0xE9,
               "the detour starts with a rel32 jmp");
+        /* 312: a multisampled render target must keep Apple's own swizzle
+         * mode. The guard is `cmp qword [rbx+0x30], 2 ; jae OUT`. Without it
+         * the remap turns 64KB_R_X into 64KB_D, AddrLib answers
+         * ADDR_INVALIDPARAMS and every MSAA colour texture is nil. Only the
+         * Tahoe row was regenerated (Sequoia has no machine to derive it on),
+         * so only that row is required to carry it. */
+        if (r->darwin == 25) {
+            static const unsigned char guard[] = { 0x48, 0x83, 0x7B, 0x30, 0x02, 0x73 };
+            int found = 0;
+            for (j = 0; j + (int)sizeof(guard) <= (int)r->cave_len; j++) {
+                found += memcmp(r->cave_repl + j, guard, sizeof(guard)) == 0;
+            }
+            CHECK(found == 1,
+                  "the Tahoe cave skips the remap for sampleCount >= 2 - MSAA colour keeps its _X mode (312)");
+        }
         CHECK(r->cave_vm > r->text_vm && r->fn_vm > r->text_vm,
               "both addresses are inside the image, above its __TEXT base");
         CHECK(r->cave_vm >= r->cave_anchor,

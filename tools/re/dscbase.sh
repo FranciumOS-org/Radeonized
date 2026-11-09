@@ -26,8 +26,11 @@ case "$1" in
   CoreGraphics)  P=/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics ;;
   IOPresentment) P=/System/Library/PrivateFrameworks/IOPresentment.framework/IOPresentment ;;
   IOKit)         P=/System/Library/Frameworks/IOKit.framework/IOKit ;;
+  # 311: the Metal plugin that sizes textures. Cache-resident (the file is not
+  # on disk), but dyld_info reads it from the cache all the same.
+  MTLDriver)     P=/System/Library/Extensions/AMDRadeonX6000MTLDriver.bundle/Contents/MacOS/AMDRadeonX6000MTLDriver ;;
   /*)            P="$1" ;;
-  *) echo "usage: $0 <SkyLight|CoreDisplay|CoreGraphics|IOPresentment|IOKit|/abs/path>" >&2
+  *) echo "usage: $0 <SkyLight|CoreDisplay|CoreGraphics|IOPresentment|IOKit|MTLDriver|/abs/path>" >&2
      exit 2 ;;
 esac
 
