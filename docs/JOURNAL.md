@@ -66707,3 +66707,74 @@ the faulting address 0x100000 past R14 both times. Neither backtrace has a
 RembrandtGPU frame. It killed a break-it run mid-way and left the Darwin 24
 row on the old cave in the working tree; `make mtlcave` restored it and the
 five breaks above are the re-run.
+
+## 3mip-c (2026-11-10, boot 521) — the owed verification is in, off the live boot, and IntelliJ's own descriptors are read
+
+3mip-b ended owing one reading: the mip-term cave running **as the kext places
+it**, with no injection. `rbgpu-boot` 521, loaded plugin
+**`6151555F-0425-3F3A-95CD-8C9C29651067`** — the build 3mip-b made — so the
+owed run was free.
+
+```
+build/out/mipprobe (no argument)
+  ...160 rows, every one ok
+  MSAA colour textures (312): 9 of 9 allocated
+  swizzle detour at end: 1, cave 1
+  RESULT: every level held its contents
+```
+
+So **0 / 160 BAD against the running kext**, where the pre-merge build measured
+40 / 160, and 312's MSAA allocation holds at 9 of 9 in the same run. Both terms
+are live in the cave at once, placed by the kernel, in a process that was
+launched normally. `cave 1` is read out of the process's own memory, so this is
+not "the kext says armed" (rule 20).
+
+### Rule 15, from the other direction
+
+`build/out/cavecheck` run from **main's** worktree printed
+`CAVE ... absent` with the detour PRESENT — a verdict that reads as a
+half-written patch. It is not: main's `darwin25.h` carries the pre-312 cave
+(163 bytes) and memory holds this branch's (166 bytes), so the compare was
+against the wrong expectation. A byte-level diff localised it — the memory
+bytes are a different policy, not a corrupt copy of the same one. **A cave
+check is only a check when it is run from the tree the loaded plugin was built
+from**, and the loaded UUID is what says which tree that is.
+
+### The injected process is visible in the kext's own counters
+
+With `mtlswizzle.dylib` in IntelliJ, this boot's diag reads `mtlk2_moved 1`,
+`mtlk2_failed 1` against `mtlk2_patched 76`. Exactly one process in 422 user
+client opens was refused, and it is the one whose prologue the tool had already
+replaced with its own 13-byte absolute jump: 2om's compare-before-write found
+neither the original nor its own bytes and **wrote nothing**. The fail-safe is
+measured, not argued, and it also means an injected run carries **no cave
+policy at all** — which is what makes `log` a true no-fix control.
+
+### IntelliJ's textures, measured (the user's glyph report)
+
+`RBGPU_SWIZZLE=log`, which overrides nothing, on the user's own IntelliJ
+2026-11-10. Every texture JBR created is **flat** (`mip=1`) and
+**single-sampled** (`smp=1`), so neither 312's guard nor 3mip's mip term is
+reached by anything in this app:
+
+| descriptor | usage | driver's mode | our policy sends it to |
+|---|---|---|---|
+| fmt=1 (A8) **512x512** | `0x1` ShaderRead | 26 (64KB_S_X) | **0 LINEAR** (non-RT) |
+| fmt=1 (A8) 256x160 | `0x5` RT+SR | 26 | `nox(26)` = 9 |
+| fmt=80 (BGRA8) 640x400, 800x651, 192x96 | `0x5` / `0x0` | 27 (64KB_R_X) | 27 -> `nox` / LINEAR |
+| fmt=80 32x32, 20x20, 28x28 | `0x5` / `0x0` | 22 (4KB_D_X), 2 | `nox` / LINEAR |
+| fmt=253 (D32S8) every size | `0x7` | 24 (Z_X) | **24, untouched** |
+
+The 512x512 A8 sample-only texture is the glyph atlas 2nl identified by this
+exact descriptor, and it is the one our policy makes LINEAR — 2np's original
+fix. **A `usage` of `0x0` appears on several BGRA8 descriptors** and is read as
+not-a-render-target, so those take LINEAR too; whether a usage-0 texture is
+ever a render target later is not established here.
+
+**Nothing is concluded about the cause yet.** Four policies are reachable in
+this app with no boot and no build, each a launch of the user's own IntelliJ,
+and the observation is the user's (rule 45): `log` (no policy at all),
+`fixmip` (the cave's policy, line for line, as the positive control),
+`auto` (render targets left exactly as the driver chose) and `nox` (non-render
+targets no longer forced linear). The ladder is written down before the runs so
+that each outcome names a term rather than a feeling.
