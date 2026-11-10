@@ -66802,3 +66802,80 @@ Two things follow, and the second is the one that matters:
 
 My own restatement of the user's report ("IntelliJ has the glyph issue") is
 what sent run 1 at the IDE. The report said *programs launched from it*.
+
+## 3gl (2026-11-10, boot 521) — THE USER'S BROKEN APP IS NOT ON METAL AT ALL, AND THE GL DRIVER HAS ITS OWN SWIZZLE CHOOSER
+
+The app is `~/Downloads/EscapeRoom`, a **JavaFX 21.0.6** student project
+(`org.example.demo.Launcher`, FXML + a `PuzzleBoard` canvas), launched from
+IntelliJ. Everything below is one boot, no build, no kext change, no sudo.
+
+### It renders through OpenGL, from the app's own words
+
+`-Dprism.verbose=true`:
+
+```
+Prism pipeline init order: es2 sw
+Prism pipeline name = com.sun.prism.es2.ES2Pipeline
+GLFactory using com.sun.prism.es2.MacGLFactory
+Graphics Vendor: ATI Technologies Inc.
+       Renderer: AMD Radeon 680M OpenGL Engine
+        Version: 2.1 ATI-7.1.8
+```
+
+JavaFX 21 has no Metal pipeline on macOS; Prism's order is `es2 sw` and es2
+is **legacy OpenGL 2.1**.
+
+### And the GL driver is a DIFFERENT IMAGE, outside everything we patch
+
+`vmmap` on the live pid:
+
+```
+1097e4000-109931000  r-x  .../AMDRadeonX6000GLDriver.bundle/.../AMDRadeonX6000GLDriver
+7ffb25a14000-...     r-x  OpenGL.framework/.../GLEngine.bundle/GLEngine
+7ffb2829f000-7ffb283e1000  r-x/r-x   AMDRadeonX6000MTLDriver   (shared cache)
+7ffb283e1000-7ffb283e2000  r-x/rwx   AMDRadeonX6000MTLDriver   <- OUR PATCHED PAGE
+7ffb283e2000-7ffb28648000  r-x/r-x   AMDRadeonX6000MTLDriver
+```
+
+So this process **is** patched — `mtlk2_patched` went 76 -> 80 across its
+launch and the one COW `rwx` page in the cache is the page holding our detour
+at `0x7ffb283e122d` — and the patch is irrelevant to it, because the pixels
+are chosen in an image our cave does not live in. The GL driver is loaded from
+`/System/Library/Extensions` at `0x1097e4000`, **not** from the shared cache,
+so it is reached by neither the cave rows (shared-cache addresses) nor the 2om
+placement.
+
+### The GL driver has its own chooser, and it is named
+
+```
+nm -m .../AMDRadeonX6000GLDriver:
+  0x000168b4 (__TEXT,__text)  _glrAMD_GFX10_DetermineSwizzleMode
+```
+
+The twin of `amdMtl_HWL_DetermineSwizzleMode`, in a bundle that also carries
+its **own** copy of AddrLib (`Addr2V2::Lib::ComputeSubResourceOffset...`,
+`AddrComputeBaseSwizzle`, `GetHwSwizzleTypeFromUbmSwizzleMode`). Nothing in
+this project has ever read or patched it. That is the candidate, and unlike
+the register surveys it comes with a function, a file offset and an in-process
+control.
+
+**What this explains without being asked to:** why exactly one application is
+wrong while the desktop, Chromium, Spotify and the IDE itself are right — they
+are Metal clients and this one is not. It also sits next to 311's adjacent
+reading: Steam's crash was `AMDRadeonX6000GLDriver` / `GLEngine` too. Same
+unpatched image, different symptom.
+
+### The A/B, with the prediction written first
+
+Two instances of the same app, same boot, same classes, both on screen at
+once, differing only in the pipeline:
+
+- pid 21472, `es2` — OpenGL, the GL driver's chooser, unpatched.
+- pid 21722, `-Dprism.order=sw` — `com.sun.prism.sw.SWPipeline`, the CPU
+  rasterizer, which allocates no GPU texture for the content at all.
+
+**Predicted before the user looked:** es2 wrong, sw correct. If instead both
+are wrong the fault is not the swizzle choice and the GL chooser is dead as a
+candidate before a line is written for it; if both are right the symptom was
+not reproduced and nothing here is a reading (rule 45 - the observation is the
+user's, and it needs its control in the same window of time).
