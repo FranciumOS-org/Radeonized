@@ -25,6 +25,12 @@
 //
 //   RBGPU_GLSWIZZLE=log   (default) observe only
 //   RBGPU_GLSWIZZLE=off   load, find, verify, and patch NOTHING (the control)
+//   RBGPU_GLSWIZZLE=cave  place the GENERATED cave and detour from
+//                         src/common/rb_glcave.h - the exact bytes the kext
+//                         will write, at the same two places, in this
+//                         process. No trampoline and no C hook: this is the
+//                         kext's own mechanism, proven in userspace before it
+//                         is given to the kernel (3mip-b's `newcave`).
 //   RBGPU_GLSWIZZLE=nox   map every _X mode to its non-X equivalent, the same
 //                         28-byte table the Metal cave uses. NOT the cave's
 //                         full policy: nothing is forced LINEAR here, because
@@ -47,6 +53,7 @@
 #include <mach-o/dyld.h>
 #include <mach-o/loader.h>
 #include <unistd.h>
+#include "../src/common/rb_glcave.h"
 
 // The chooser's prologue, read off the on-disk bundle at 0x168b4:
 //   push rbp / mov rbp,rsp / push r14 / push rbx / sub rsp,0x70   (11 bytes)
@@ -71,7 +78,7 @@ typedef unsigned int (*glswz_fn)(uint64_t a1, uint64_t a2, uint64_t a3,
                                  uint64_t r9, uint64_t s1, uint64_t s2,
                                  uint64_t s3);
 
-enum { G_LOG, G_OFF, G_NOX };
+enum { G_LOG, G_OFF, G_NOX, G_CAVE };
 
 // The cave's table, unchanged (2nr). Z modes are not touched.
 static unsigned int nox(unsigned int m)
@@ -154,6 +161,62 @@ static unsigned int hook(uint64_t a1, uint64_t a2, uint64_t a3,
     return mode;
 }
 
+
+// ---------------------------------------------------------------------------
+// The kext's own mechanism, in userspace. Same order as rbgpu_mtlk_place():
+// read first, write only on an exact match of `find` (or find `repl` already
+// there), and the CAVE is verified present before the detour that jumps into
+// it is written. A row that is wrong for this build writes nothing.
+static int place_one(unsigned char *at, const uint8_t *find,
+                     const uint8_t *repl, unsigned int len, const char *what)
+{
+    if (!memcmp(at, repl, len)) {
+        fprintf(stderr, "glswz: %s already placed at %p\n", what, (void *)at);
+        return 1;
+    }
+    if (memcmp(at, find, len)) {
+        fprintf(stderr, "glswz: %s at %p is NEITHER the original nor ours - "
+                        "writing nothing (the row is for another build)\n",
+                what, (void *)at);
+        return 0;
+    }
+    vm_address_t pg = (vm_address_t)at & ~(vm_address_t)(getpagesize() - 1);
+    vm_size_t span = ((vm_address_t)at + len) - pg;
+    kern_return_t kr = vm_protect(mach_task_self(), pg, span, FALSE,
+                                  VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
+    if (kr != KERN_SUCCESS) {
+        fprintf(stderr, "glswz: %s vm_protect(rw) failed with %d - nothing "
+                        "written\n", what, kr);
+        return 0;
+    }
+    memcpy(at, repl, len);
+    vm_protect(mach_task_self(), pg, span, FALSE,
+               VM_PROT_READ | VM_PROT_EXECUTE);
+    int ok = memcmp(at, repl, len) == 0;
+    fprintf(stderr, "glswz: %s written at %p, verify %s\n", what, (void *)at,
+            ok ? "ok" : "FAILED");
+    return ok;
+}
+
+static void place_cave(unsigned char *base)
+{
+    unsigned char *cave = base + RB_GLCAVE_CAVE_OFF - RB_GLCAVE_ANCHOR;
+    unsigned char *fn   = base + RB_GLCAVE_FN_OFF;
+    fprintf(stderr, "glswz: cave row - fn_off 0x%x cave_off 0x%x anchor %u "
+                    "cave_len %u fn_len %u\n",
+            RB_GLCAVE_FN_OFF, RB_GLCAVE_CAVE_OFF, RB_GLCAVE_ANCHOR,
+            RB_GLCAVE_CAVE_LEN, RB_GLCAVE_FN_LEN);
+    if (!place_one(cave, rb_glcave_cave_find, rb_glcave_cave_repl,
+                   RB_GLCAVE_CAVE_LEN, "CAVE")) {
+        fprintf(stderr, "glswz: the cave is not in place, so the DETOUR is "
+                        "not written - it would jump into padding\n");
+        return;
+    }
+    place_one(fn, rb_glcave_fn_find, rb_glcave_fn_repl,
+              RB_GLCAVE_FN_LEN, "DETOUR");
+    fflush(stderr);
+}
+
 static void patch_image(const struct mach_header *mh, intptr_t slide)
 {
     (void)slide;
@@ -165,6 +228,7 @@ static void patch_image(const struct mach_header *mh, intptr_t slide)
     const char *m = getenv("RBGPU_GLSWIZZLE");
     if (m && !strcmp(m, "off")) { gMode = G_OFF; }
     else if (m && !strcmp(m, "nox")) { gMode = G_NOX; }
+    else if (m && !strcmp(m, "cave")) { gMode = G_CAVE; }
     if (getenv("RBGPU_GLSWIZZLE_DUMP")) {
         gDumpBudget = atoi(getenv("RBGPU_GLSWIZZLE_DUMP"));
     }
@@ -204,10 +268,16 @@ static void patch_image(const struct mach_header *mh, intptr_t slide)
     fprintf(stderr, "glswz: GL driver at %p, chooser at %p (file offset "
                     "0x%lx), mode=%s\n", (void *)base, (void *)fn,
             (unsigned long)(fn - base),
-            gMode == G_OFF ? "off" : gMode == G_NOX ? "nox" : "log");
+            gMode == G_OFF ? "off" : gMode == G_NOX ? "nox"
+                                   : gMode == G_CAVE ? "cave" : "log");
     if (gMode == G_OFF) {
         fprintf(stderr, "glswz: mode=off - the chooser is deliberately NOT "
                         "patched\n");
+        gDone = 1; return;
+    }
+
+    if (gMode == G_CAVE) {
+        place_cave(base);
         gDone = 1; return;
     }
 

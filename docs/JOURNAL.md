@@ -67025,3 +67025,95 @@ by dyld at a per-process address. Candidates, none chosen yet:
 `tools/glswizzle.c`, `make glswizzle`. Workaround for today, for one process
 at a time: `DYLD_INSERT_LIBRARIES=build/out/glswizzle.dylib
 RBGPU_GLSWIZZLE=nox`.
+
+## 3gl-d (2026-11-10) — THE OPENGL FIX IS IN THE KEXT. No boot spent writing it.
+
+`make glcave` -> `src/common/rb_glcave.h`, `-rbgpuglcave`, plugin UUID
+**`5A8533F2-D28A-3407-AD86-A437C80BC73F`**. Built, tested, **not installed**.
+
+### What is new, and it is exactly one thing
+
+Every patch this project places starts from a dyld shared-cache slide.
+**AMDRadeonX6000GLDriver is not in the cache** — dyld loads it from
+`/System/Library/Extensions` at a per-process address — so the kext gets the
+base from the client's own dyld image list: `task_info(TASK_DYLD_INFO)` for
+`all_image_info_addr`, then `_vm_map_read_user` for the stable head of
+`dyld_all_image_infos` (version, `infoArrayCount`, `infoArray`) and a bounded
+walk of 24-byte entries, matching the path by substring. Two new solved
+symbols, `_task_info` and `_current_task`, so `mtlk_syms` is an **eight**-bit
+mask now and "all resolved" is **0xFF** — the comment that said 0x3F is
+corrected in place.
+
+**Nothing else is new.** `rbgpu_mtlk_place()` is reused unchanged — read
+before write, write only on an exact `find` (or find `repl` already there),
+and the CAVE verified present before the DETOUR that jumps into it — and the
+call site is 2xu's `newUserClient` hook, in the client's own context where
+`_vm_map_read_user` takes its fast copyin path.
+
+**A pid is not retired on the first visit**, unlike mtlk2: the GL image is
+dlopened when a GL context is created, which can be after a process's first
+accelerator user client, so one look is not an answer. Four attempts per pid
+bounds the dyld walk for the overwhelming majority of processes, which are
+Metal clients that will never load this image.
+
+### The policy is `nox` alone, and that is a refusal to guess
+
+No LINEAR term, no mip term, no MSAA term. The Metal cave can tell a render
+target from a sampled texture because 2nq located `usage` in the descriptor;
+**nothing has located it among this chooser's arguments**, so the kext cannot
+make that distinction and does not pretend to. 2nq also measured the cost of
+pretending: a render target forced linear returns a nil pipeline state and the
+client dereferences it.
+
+### The bytes were proven in userspace before the kernel was given them
+
+`RBGPU_GLSWIZZLE=cave` places **the generated row itself** — same bytes, same
+two places, same read-before-write order — in the application's own process,
+with no trampoline and no C hook. Boot 521:
+
+```
+glswz: cave row - fn_off 0x168b4 cave_off 0xec3d0 anchor 19 cave_len 130 fn_len 15
+glswz: CAVE written at 0x1102d63bd, verify ok
+glswz: DETOUR written at 0x1102008b4, verify ok
+```
+
+### The hosttest runs the cave, and four guards were broken on purpose
+
+`osver_test.c` maps the emitted cave executable, replaces its trampoline with
+`mov eax,<mode>; ret` and calls it, against the table written out in C rather
+than read from the bytes. All 64 modes agree; 27 -> 10 and 22 -> 6 are named
+cases, because 27 and 22 are the two modes every caller in the user's
+application actually got.
+
+```
+nox table 27 -> 11                      3 FAIL   error: 0
+detour rel32 off by one                 2 FAIL   error: 0
+table bound cmp eax,28                  2 FAIL   error: 0
+anchor made of the zero run itself      GENERATOR REFUSES: "the cave pattern
+                                        occurs 12486 times, expected 1"
+```
+
+The fourth is the honest one. Its first form — forcing `anchor` to 16 without
+moving the cave — **fired nothing**, because for this build's run alignment
+the two expressions are equal, so the break was **inert** and its 0 FAILs
+said nothing (305b's twelfth check, again). Reintroducing the real defect —
+placing the cave 16 bytes into the run so the anchor is made of the zeroes it
+is searching for — is caught, and **by the generator rather than the
+hosttest**, with the count printed. That is where that guard lives, and it is
+the same 12486 that caught it the first time.
+
+**Owed, and not claimed:** no boot has run this. `glc_patched` must be read
+from `RBGPUDiag` with a GL client up, and the picture is the user's.
+
+### Also open, from the user, not measured here
+
+**macOS Recovery does not finish booting with the plugin armed** — the Apple
+progress bar fills forever. `docs/CACHE-RECOVERY.md` makes Recovery the way
+back from a bad cache patch, so **the documented rescue does not work in the
+situation it exists for** (rule 21, which was written about exactly this).
+Nothing here has measured a Recovery boot; what is known is that OpenCore
+injects the plugin into every entry it boots, that arming is the default, and
+that the NVRAM disarms are read before anything else runs. So the lever is
+`sudo nvram rbgpu-arm=0` before rebooting into Recovery and
+`sudo nvram -d rbgpu-arm` afterwards, since that key is a **durable** disarm
+(rule 9). Untested, and recorded as a lever rather than a finding.

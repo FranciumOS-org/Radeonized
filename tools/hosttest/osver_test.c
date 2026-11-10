@@ -18,6 +18,7 @@
  * files. A row with no bit, or a bit with no row, is drift that nothing else
  * in the build would notice. */
 #include "rbgpu_mtlcave.h"
+#include "rb_glcave.h"
 
 #define CHECK(cond, what) do { \
     printf((cond) ? "ok   %s\n" : "FAIL %s\n", (what)); \
@@ -25,6 +26,77 @@
 } while (0)
 
 int osver_tests(void);
+
+#if defined(__x86_64__)
+
+/* 3gl-d: THE OPENGL CAVE, RUN THE SAME WAY.
+ *
+ * It is a second cave in a second image - AMDRadeonX6000GLDriver, which an
+ * OpenGL client draws through and which is NOT in the dyld shared cache - and
+ * its policy is `nox` alone, with no LINEAR term, because nothing has located
+ * `usage` among that chooser's arguments (3gl-c). So the model here is the
+ * table and nothing else, and the test executes the emitted bytes rather than
+ * describing them.
+ *
+ * The chooser takes at least seven arguments, four of which the body reads,
+ * so the cave copies three stack arguments before calling the trampoline.
+ * This type passes nine, which is what makes those copies legal to perform.
+ */
+typedef unsigned (*rb_glcave_fn)(uint64_t, uint64_t, uint64_t, const void *,
+                                 const void *, uint64_t, uint64_t, uint64_t,
+                                 uint64_t);
+
+/* The `call TRAMP` in gen_glcave.py's build_cave(): push rbp(1) mov(3)
+ * push rbx(1) sub(4) and three load/store pairs (4+4, 4+5, 4+5) = 35. */
+#define RB_GLCAVE_CALL_AT 35u
+
+static uint8_t *glcave_map(uint32_t *tramp)
+{
+    const uint8_t *code = rb_glcave_cave_repl + RB_GLCAVE_ANCHOR;
+    uint32_t used = RB_GLCAVE_CAVE_LEN - RB_GLCAVE_ANCHOR;
+    int32_t rel;
+    uint8_t *m;
+
+    if (used < RB_GLCAVE_CALL_AT + 5u || code[RB_GLCAVE_CALL_AT] != 0xE8) {
+        return 0;
+    }
+    memcpy(&rel, code + RB_GLCAVE_CALL_AT + 1, 4);
+    *tramp = (uint32_t)((int32_t)(RB_GLCAVE_CALL_AT + 5u) + rel);
+    if (*tramp + 6u > used) {
+        return 0;
+    }
+    m = mmap(0, 4096, PROT_READ | PROT_WRITE | PROT_EXEC,
+             MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (m == MAP_FAILED) {
+        return 0;
+    }
+    memcpy(m, code, used);
+    return m;
+}
+
+static unsigned glcave_ask(uint8_t *m, uint32_t tramp, unsigned orig)
+{
+    m[tramp] = 0xB8;                         /* mov eax, orig */
+    memcpy(m + tramp + 1, &orig, 4);
+    m[tramp + 5] = 0xC3;                     /* ret */
+    return ((rb_glcave_fn)(void *)m)(0, 0, 0, 0, 0, 0, 0, 0, 0);
+}
+
+/* The table written out, from the journal's statement of it and not from the
+ * emitted bytes. Z modes and every non-_X mode are left alone. */
+static unsigned glcave_model(unsigned orig)
+{
+    switch (orig) {
+    case 21: return 5;
+    case 22: return 6;
+    case 23: return 6;
+    case 25: return 9;
+    case 26: return 10;
+    case 27: return 10;
+    default: return orig;
+    }
+}
+#endif
 
 /* 3mip: THE CAVE IS CODE, SO RUN IT.
  *
@@ -372,6 +444,76 @@ int osver_tests(void)
                      rb_mtlcave_rows[0].cave_repl + rb_mtlcave_rows[0].cave_anchor,
                      r->cave_used - 4u) == 0,
               "every row carries the same cave outside the one address-dependent displacement");
+    }
+#endif
+
+#if defined(__x86_64__)
+    /* --- 3gl-d: the OpenGL cave ------------------------------------- */
+    CHECK(RB_GLCAVE_CAVE_LEN > RB_GLCAVE_ANCHOR,
+          "the GL cave's length covers more than its anchor");
+    CHECK(RB_GLCAVE_CAVE_LEN <= RBGPU_MTL_MAXLEN &&
+          RB_GLCAVE_FN_LEN <= RBGPU_MTL_MAXLEN,
+          "both GL patterns fit rbgpu_mtlk_place()'s buffer, which is what the kext reuses");
+    {
+        uint32_t i, zero = 1, anchored = 1;
+        for (i = RB_GLCAVE_ANCHOR; i < RB_GLCAVE_CAVE_LEN; i++) {
+            if (rb_glcave_cave_find[i] != 0) { zero = 0; }
+        }
+        for (i = 0; i < RB_GLCAVE_ANCHOR; i++) {
+            if (rb_glcave_cave_find[i] != rb_glcave_cave_repl[i]) { anchored = 0; }
+        }
+        CHECK(zero, "the GL cave goes into a run of zeroes - nothing is overwritten");
+        CHECK(anchored,
+              "find and repl share the anchor, so the bytes before the cave are not touched");
+        /* An anchor made of the zeroes it is looking for matched 12486 places
+         * in __const when this was first written. A pattern made of the thing
+         * it searches for is not a pattern (rule 26). */
+        zero = 1;
+        for (i = 0; i < RB_GLCAVE_ANCHOR; i++) {
+            if (rb_glcave_cave_find[i] != 0) { zero = 0; }
+        }
+        CHECK(!zero, "the anchor carries REAL context bytes, not more of the zero run");
+    }
+    CHECK(rb_glcave_fn_find[0] == 0x55 && rb_glcave_fn_find[1] == 0x48 &&
+          rb_glcave_fn_find[2] == 0x89 && rb_glcave_fn_find[3] == 0xE5,
+          "the GL detour replaces the chooser's own prologue");
+    {
+        int32_t rel = 0;
+        uint32_t i, nops = 1;
+        memcpy(&rel, rb_glcave_fn_repl + 1, 4);
+        CHECK(rb_glcave_fn_repl[0] == 0xE9,
+              "the GL detour is a rel32 jump, so the bytes are position independent");
+        CHECK((uint32_t)((int64_t)RB_GLCAVE_FN_OFF + 5 + rel) == RB_GLCAVE_CAVE_OFF,
+              "and it lands exactly on the cave");
+        for (i = 5; i < RB_GLCAVE_FN_LEN; i++) {
+            if (rb_glcave_fn_repl[i] != 0x90) { nops = 0; }
+        }
+        CHECK(nops,
+              "the rest of the replaced prologue is nops, so no half instruction is left");
+    }
+    {
+        uint32_t tramp = 0;
+        uint8_t *m = glcave_map(&tramp);
+        CHECK(m != 0, "the GL cave maps executable and its call reaches its own trampoline");
+        if (m) {
+            unsigned orig, wrong = 0;
+            CHECK(glcave_ask(m, tramp, 27) == 10,
+                  "64KB_R_X (27) becomes 64KB_D (10) - the mode every caller in the user's app got");
+            CHECK(glcave_ask(m, tramp, 22) == 6,
+                  "4KB_D_X (22) becomes 4KB_D (6) - the other mode measured in that app");
+            CHECK(glcave_ask(m, tramp, 24) == 24,
+                  "a Z mode (24) is left alone");
+            CHECK(glcave_ask(m, tramp, 0) == 0,
+                  "LINEAR stays LINEAR - this cave never forces it and never undoes it");
+            CHECK(glcave_ask(m, tramp, 40) == 40,
+                  "a mode past the table is returned untouched rather than read out of it");
+            for (orig = 0; orig < 64; orig++) {
+                if (glcave_ask(m, tramp, orig) != glcave_model(orig)) { wrong++; }
+            }
+            CHECK(wrong == 0,
+                  "the GL cave agrees with the stated nox table for all 64 modes");
+            munmap(m, 4096);
+        }
     }
 #endif
 
