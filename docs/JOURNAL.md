@@ -66879,3 +66879,36 @@ are wrong the fault is not the swizzle choice and the GL chooser is dead as a
 candidate before a line is written for it; if both are right the symptom was
 not reproduced and nothing here is a reading (rule 45 - the observation is the
 user's, and it needs its control in the same window of time).
+
+### 3gl, the reading — THE PREDICTION IS WRONG, AND MY "CONTROL" WAS NOT ONE
+
+Predicted: es2 wrong, sw correct. Measured, both windows on screen together:
+
+- **es2** — layout correct, **glyphs eaten** (strokes missing, holes through
+  the text), and the `PuzzleBoard` canvas a field of coloured blocks.
+- **sw** — **worse**: the entire window, text and canvas alike, is noise.
+
+The prediction failed because the B side removes nothing. `vmmap` on both
+pids: **8 `AMDRadeonX6000GLDriver` regions and 8 `GLEngine` regions in EACH**.
+JavaFX's glass layer creates a GL context to **present** the window whatever
+Prism draws with, so the sw pipeline does not bypass the GL driver — it hands
+it one big CPU-rendered frame per repaint instead of many small textures,
+which is why it is worse rather than better. **Rule 39, by me, in the check
+written to test my own candidate**: a configuration that does not remove the
+suspect is not a control, and I called it one in the entry above before the
+run.
+
+**The GL chooser is not weakened by this.** Both windows are GL clients and
+both are wrong; the es2/sw difference now reads as *how much* content goes
+through one texture, not *whether* it does.
+
+**A third client, unprompted:** the user launched Steam. Its embedded browser
+shows **scrambled images with sharp text** — CEF on legacy OpenGL, 311's
+image — and **some tiles correct themselves within about two seconds** while
+others stay wrong. A re-upload landing correctly is new information and does
+not fit a purely static wrong layout; it is recorded, not explained.
+
+So the population is now three independent OpenGL clients (JavaFX es2, JavaFX
+sw presentation, Steam/CEF) against every Metal client on the machine being
+right. Next instrument: the GL driver's own chooser, logged the way
+`mtlswizzle` logs Metal's, with no override on the first run.
