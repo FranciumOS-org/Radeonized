@@ -66961,3 +66961,67 @@ dereferences it.
 window is correct, or at least visibly better than the es2 run. If it is
 unchanged, the GL chooser is read but not the cause, and the next suspect is
 how the GL driver *uploads* into whatever mode it picked.
+
+## 3gl-c (2026-11-10, boot 521) — THE `_X` MODES ARE THE CAUSE ON THE OPENGL PATH, AND `nox` FIXES IT, WITH ITS CONTROL IN THE SAME FRAME
+
+The prediction above held. Two windows of the user's own JavaFX application,
+side by side on one screen, **the same `glswizzle.dylib` injected into both**
+so the injection is not the variable — one env var apart:
+
+| window | `RBGPU_GLSWIZZLE` | overrides applied | what the user saw |
+|---|---|---|---|
+| back | `log` | **0** | glyphs eaten, strokes missing, the canvas a field of blocks |
+| front | `nox` | **6** (`27 -> 10`, `22 -> 6`) | **text clean, the photograph correct** |
+
+Screenshot on file. This is the shape rule 44 asks for — interleaved, inside
+one boot, at single-window granularity — and rule 45's: the deliverable is
+something a human observes, so the observation is the user's and it has its
+control in the same window of time. 3mip's trap is avoided by construction:
+both sides carry the injection, so "an overriding hook changes the app" cannot
+explain the difference.
+
+**So the long-open `_X` swizzle defect reaches the OpenGL path, and the cave's
+own 28-byte table is the right answer there too.** Metal clients have had this
+since 2om; OpenGL clients never did, because every instrument and every fix in
+this tree acted on an image OpenGL does not use.
+
+### What is established, and what is not
+
+Established: `glrAMD_GFX10_DetermineSwizzleMode` returns `_X` modes; remapping
+them with `nox` in the client's own process makes a broken OpenGL application
+render correctly; the control was in the same frame.
+
+**Not established, stated so it is not assumed later:**
+
+- **n=1 application.** Steam's CEF and any other GL client are untested. One
+  app is not a policy (rule 18).
+- **No LINEAR term, and that is deliberate.** The function's arity is unknown
+  and `usage` has not been located among its arguments, so this tool cannot
+  tell a render target from a sampled texture. 2nq is why that matters: a
+  render target forced linear returns a nil pipeline state and JBR
+  dereferences it. `nox` needs no such distinction, which is exactly why it
+  was the first thing tried.
+- **Nothing about a kext-side version works yet.** This is a wrapper, the
+  thing 2om existed to abolish.
+
+### The permanent version, and the one new problem
+
+The placement machinery already exists and is proven: `rbgpu_mtlk_place()`
+reads before it writes, writes only on an exact pattern match, and runs in the
+client's own process context from `newUserClient` (2xu). It needs one thing it
+has never needed: **the GL driver is not in the dyld shared cache**, so there
+is no `_vm_shared_region_slide` to derive an address from. The image is loaded
+by dyld at a per-process address. Candidates, none chosen yet:
+
+1. Walk the task's `all_image_infos` for the bundle path and take its base.
+2. Scan the client's mapped regions for the 32-byte prologue, once per pid,
+   the way the tool does in userspace — bounded, but a scan in the kernel.
+3. Ask whether the mode can be moved without patching at all: the GL driver
+   builds AddrLib from the same `gbAddrConfig` the kext reports (2nt's lever,
+   `RBGPU_GBADDRCONFIG`), so a value that made the chooser pick non-`_X`
+   modes would need no injection anywhere. Untested, and the mode choice looks
+   like policy rather than a derived value, so this is the least likely.
+
+`tools/glswizzle.c`, `make glswizzle`. Workaround for today, for one process
+at a time: `DYLD_INSERT_LIBRARIES=build/out/glswizzle.dylib
+RBGPU_GLSWIZZLE=nox`.
