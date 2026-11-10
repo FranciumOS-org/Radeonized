@@ -862,13 +862,21 @@ is unknown and `usage` is not located among its arguments (2nq: a render
 target forced linear returns a nil pipeline state and kills JBR).
 **Known GL clients here:** JavaFX/Prism `es2` — and its `sw` pipeline too,
 since glass presents through GL either way — and Steam's embedded CEF (311's
-`gpusKillClientExt` crash is the same image). Workaround today is a wrapper:
-`DYLD_INSERT_LIBRARIES=build/out/glswizzle.dylib RBGPU_GLSWIZZLE=nox`.
-**The permanent version is not written.** 2xu's placement machinery applies
-unchanged except for one thing it has never needed — **no shared-cache slide
-exists for this image**, so its base must be found per process
-(`all_image_infos` walk, a bounded pattern scan once per pid, or 2nt's
-`gbAddrConfig` lever if the mode turns out to be derived rather than policy).
+`gpusKillClientExt` crash is the same image). **3gl-d/e PUT IT IN THE KEXT, DEFAULT-ON.** `src/common/rb_glcave.h`
+(`make glcave`) is a second cave, placed from 2xu's `newUserClient` hook by
+`rbgpu_mtlk_place()` unchanged — read before write, cave verified before the
+detour. The one new thing is the ADDRESS: no shared-cache slide exists for
+this image, so the base comes from the client's own dyld image list
+(`task_info(TASK_DYLD_INFO)` + a bounded walk; `_task_info`/`_current_task`
+join the solved symbols, so `mtlk_syms` is an **eight**-bit mask and all
+resolved is **0xFF**). A pid is **not** retired on the first visit, unlike
+mtlk2 — the GL image is dlopened when a context is created, after a process's
+first user client — so four attempts per pid. Token **`-rbgpuglcave`**,
+default-on, disarm `-rbgpunoglcave`; `RB_DEFAULT_ON_COUNT` **52**. The
+hosttest EXECUTES the emitted cave for all 64 modes. Still a wrapper for
+anything the kext cannot reach:
+`DYLD_INSERT_LIBRARIES=build/out/glswizzle.dylib RBGPU_GLSWIZZLE=nox`
+(`log`/`off`/`nox`/`cave`; `cave` places the generated row itself).
 
 ---
 
@@ -880,6 +888,14 @@ and the hosttest checks it — **read that file, not a copy of it.**
 disarm and everything not ours (**`wdt=-1` above all** — Apple's arg, needed by
 the default-on `-rbgpuforceenable`, and without it a frozen boot panics at 120 s
 with no SSH window).
+
+**RECOVERY AND THE INSTALLER BOOT STOCK (3rec).** The plugin declares
+`LiluAPI::AllowNormal` **alone**. `AllowInstallerRecovery` sat in the config
+from milestone 0, copied from a template and never reasoned about, and it is
+why Recovery hung with the progress bar filling forever — localised by the
+user in two trips (`rbgpu-arm=0` did **not** help, `-rbgpuoff` did, so it was
+the plugin before any feature gate). Recovery is the documented way back
+(`docs/CACHE-RECOVERY.md`), so it has to boot stock to be a rescue (rule 21).
 
 **Rescue, in order of bluntness:**
 - `sudo nvram rbgpu-arm=0` — accelerator off next boot (and the framebuffer
