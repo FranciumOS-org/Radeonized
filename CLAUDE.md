@@ -839,6 +839,37 @@ unprogrammed, and the only finding available is a **non-zero** `ENC_TYPE_SEL`
 on LINKC. `tools/diolook.sh`; read-only, no setter, and the caller that
 programs it is **not** identified.
 
+### The OpenGL path — a SECOND driver image, and the swizzle fix never reached it
+
+**3gl / boot 521: the `_X` defect reaches OpenGL clients, and `nox` fixes
+them.** Every swizzle instrument and the cave itself act on
+`amdMtl_HWL_DetermineSwizzleMode` in **AMDRadeonX6000MTLDriver**, inside the
+dyld shared cache. An OpenGL client does not use that image at all: it draws
+through **`AMDRadeonX6000GLDriver`**, loaded from
+`/System/Library/Extensions` at a per-process address **outside the cache**,
+with its **own copy of AddrLib** and its own chooser
+**`glrAMD_GFX10_DetermineSwizzleMode`** (file offset `0x168b4`). Nothing here
+had ever read it. `tools/glswizzle.c` (`make glswizzle`) trampolines it —
+32-byte pattern, exactly-one-occurrence refusal, `vm_protect`, 15-byte
+prologue copy — and its default mode **overrides nothing**.
+On the user's JavaFX app every caller gets **27 (64KB_R_X)** or
+**22 (4KB_D_X)**. `RBGPU_GLSWIZZLE=nox` applies the cave's own 28-byte table
+and the app renders **correctly** — measured with the **control in the same
+frame**: two windows, the same dylib injected in both, `log` 0 overrides and
+broken beside `nox` 6 overrides and clean. **Not a policy yet:** n=1
+application, and the tool has **no LINEAR term** because the function's arity
+is unknown and `usage` is not located among its arguments (2nq: a render
+target forced linear returns a nil pipeline state and kills JBR).
+**Known GL clients here:** JavaFX/Prism `es2` — and its `sw` pipeline too,
+since glass presents through GL either way — and Steam's embedded CEF (311's
+`gpusKillClientExt` crash is the same image). Workaround today is a wrapper:
+`DYLD_INSERT_LIBRARIES=build/out/glswizzle.dylib RBGPU_GLSWIZZLE=nox`.
+**The permanent version is not written.** 2xu's placement machinery applies
+unchanged except for one thing it has never needed — **no shared-cache slide
+exists for this image**, so its base must be found per process
+(`all_image_infos` walk, a bounded pattern scan once per pid, or 2nt's
+`gbAddrConfig` lever if the mode turns out to be derived rather than policy).
+
 ---
 
 ## Boot-args and dials
