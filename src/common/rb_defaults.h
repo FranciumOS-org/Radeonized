@@ -53,6 +53,17 @@ static const char *const rb_default_on_tokens[] = {
     "-rbgpuagdccaps", "-rbgpuownfb", "-rbgpufbaty", "-rbgpufbamtr",
     "-rbgpufbhubp", "-rbgpufbflipall", "-rbgpufbflippend", "-rbgpufbnotready",
     "-rbgpufbotgany", "-rbgpufbretire", "-rbgpufbpoll", "-rbgpuschedtick",
+    /* 3gl-d: the OpenGL swizzle cave. Default-on for the same reason the
+     * Metal one is: without it every OpenGL client on this machine renders
+     * the `_X` swizzle defect - eaten glyphs and scrambled images - while
+     * every Metal client is correct, which is what the user reported. The
+     * failure mode is the behaviour of every boot before it: the row is
+     * keyed on the Darwin major and authorised by a byte compare at the
+     * place, so a wrong row writes NOTHING and the client simply renders the
+     * way it did yesterday. Read-before-write, cave verified before the
+     * detour that jumps into it. Disarm: `-rbgpunoglcave`, or `-rbgpustock`.
+     */
+    "-rbgpuglcave",
     /* 2CA: the GPU's name and carve-out size read from the chip instead of
      * hardcoded. Default-on because on this machine the derived answer is
      * byte-identical to the literal it replaces, so the only observable

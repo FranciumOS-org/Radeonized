@@ -67117,3 +67117,69 @@ that the NVRAM disarms are read before anything else runs. So the lever is
 `sudo nvram rbgpu-arm=0` before rebooting into Recovery and
 `sudo nvram -d rbgpu-arm` afterwards, since that key is a **durable** disarm
 (rule 9). Untested, and recorded as a lever rather than a finding.
+
+## 3gl-e (2026-11-10) — the OpenGL cave is DEFAULT-ON, and Recovery gets a measurement rather than a guess
+
+### Default-on
+
+`-rbgpuglcave` is in `rb_default_on_tokens[]`, the check is `rbgpu_arg()` and
+not `checkKernelArgument()`, and the disarm is **`-rbgpunoglcave`**, derived
+from the token's own name; `-rbgpustock` turns it off with everything else.
+`RB_DEFAULT_ON_COUNT` is **52**, asserted, so the table cannot drift
+unnoticed. Plugin UUID **`66D65E0A-07B2-38B5-BA11-467942DCFBA1`**.
+
+Why it is safe to default: the failure mode is the behaviour of every boot
+before it. The row is keyed on the Darwin major and authorised by a byte
+compare at the place, so a wrong row writes **nothing** and the client renders
+the way it did yesterday. Break-it: removing the token from the table failed
+**3** checks, including the named one that pins the derived negative.
+
+### Recovery: one fact, one circle, and the way out of it
+
+**The fact, read from the EFI backup rather than assumed:**
+`logs/efi-backups/20261109-163747-install/config.plist` has
+`RembrandtGPU.kext` under `Kernel/Add` with **`MinKernel` and `MaxKernel`
+both empty** and `Misc/Entries` **empty**. OpenCore injects by boot, not by
+entry, so **the plugin loads in the Recovery boot too**, and arming is the
+default there as everywhere.
+
+**What is NOT established:** which half hangs, or that it is us at all. No
+Recovery boot has ever been instrumented here.
+
+**The circle:** the detection a real fix needs - a marker that says "this is
+Recovery" at plugin init, with no vnode work (rule 27) - cannot be written
+honestly until the marker has been READ in a Recovery boot, and Recovery is
+the thing that will not come up.
+
+**What a normal boot shows**, so the comparison exists when the other side
+arrives (`ioreg -p IODeviceTree -n chosen -rl`, boot 521):
+
+```
+boot-file          boot\System\Library\KernelCollections\BootKernelExtensions.kc
+boot-file-path     ...\BF6293D7-E373-403D-87F3-5E9D1338F4AB\System\Library\CoreServices\boot.efi
+root-snapshot-name com.apple.os.update-ECF5104E...
+bootroot-active    present
+apfs-preboot-uuid  BF6293D7-E373-403D-87F3-5E9D1338F4AB
+```
+
+A Recovery boot should differ in at least `boot-file-path` and
+`root-snapshot-name`, but **"should" is inference and this file does not
+record inference as a marker.**
+
+**The way out, in two trips that cost no code:**
+
+1. `sudo nvram rbgpu-arm=0` (a **durable** disarm - rule 9 - so
+   `sudo nvram -d rbgpu-arm` afterwards), then boot Recovery. If it comes up,
+   the hang is in the accelerator half and the framebuffer is irrelevant,
+   since the aux collection is not loaded there anyway.
+2. If it still hangs, `sudo tools/efi.sh bootarg add -rbgpuoff` - the
+   documented rescue, which stops `init()` entirely - and boot Recovery again.
+   If THAT comes up, it is the plugin and the first trip localises it to
+   something outside the arm gate. If it still hangs, **it is not us**, and
+   the user's premise is wrong in a way worth knowing.
+
+Either way, from Recovery's Terminal: `ioreg -p IODeviceTree -n chosen -rl`.
+That one capture is what turns the detection from a guess into a row, and
+then the plugin can decline in Recovery by default - failing safe toward
+ARMED, because a false positive costs a desktop's acceleration while a false
+negative only leaves today's behaviour.

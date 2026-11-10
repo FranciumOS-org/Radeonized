@@ -8059,7 +8059,11 @@ static mach_vm_address_t rbgpu_glc_image_base(vm_map_t map)
 static void rbgpu_glc_try(void)
 {
     if (g_glcOn == 0) {
-        if (!checkKernelArgument("-rbgpuglcave")) {
+        // 3gl-d: DEFAULT-ON (rb_defaults.h), so this is rbgpu_arg and not
+        // checkKernelArgument - the disarm is `-rbgpunoglcave`, derived from
+        // the token's own name, and `-rbgpustock` turns it off with
+        // everything else.
+        if (!rbgpu_arg("-rbgpuglcave")) {
             g_glcOn = 2;
         } else if (getKernelVersion() != RB_GLCAVE_DARWIN) {
             // An OS with no row gets no patch and says so, exactly as the

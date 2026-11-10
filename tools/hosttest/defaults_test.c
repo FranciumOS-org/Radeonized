@@ -44,7 +44,7 @@ int defaults_tests(void)
      * number is asserted so the table cannot drift by accident - a token
      * arriving or leaving should cost a line in a journal entry, not go
      * unnoticed, and this assertion is what made 2z4 say so. */
-    CHECK(RB_DEFAULT_ON_COUNT == 51,
+    CHECK(RB_DEFAULT_ON_COUNT == 52,
           "the table holds boot 231's 45 tokens, 2y2's three brightness "
           "tokens, 2z4's -rbgpunopg, 2CA's -rbgpufbgpuname and 2CE's "
           "-rbgpumtlname");
@@ -58,6 +58,17 @@ int defaults_tests(void)
               rb_off_token("-rbgpumtlname", o, sizeof(o)) &&
               strcmp(o, "-rbgpunomtlname") == 0,
               "-rbgpumtlname is default-on and disarmed by -rbgpunomtlname");
+
+    /* 3gl-d: the OpenGL cave. The negative is derived from the token's own
+     * name, so this also pins that `-rbgpunoglcave` is what turns it off -
+     * the thing rule 30 is about, checked rather than assumed. */
+    {
+        char off[64];
+        CHECK(rb_default_on("-rbgpuglcave") &&
+              rb_off_token("-rbgpuglcave", off, sizeof(off)) &&
+              strcmp(off, "-rbgpunoglcave") == 0,
+              "-rbgpuglcave is default-on and disarmed by -rbgpunoglcave");
+    }
     }
 
     /* 2z4: the new token must be disarmable, and its negative must not
