@@ -66778,3 +66778,27 @@ and the observation is the user's (rule 45): `log` (no policy at all),
 `auto` (render targets left exactly as the driver chose) and `nox` (non-render
 targets no longer forced linear). The ladder is written down before the runs so
 that each outcome names a term rather than a feeling.
+
+### 3mip-c, run 1 of the ladder — the result INVERTS the premise
+
+`log` mode, which places no policy at all, made the **IDE's own** text break.
+The user then corrected the report: IntelliJ itself was **never** the broken
+thing in this boot. What is broken is a **program launched from** the IDE (plus
+one other application named separately), and the IDE's own window was correct
+until the injection removed the cave from its process.
+
+Two things follow, and the second is the one that matters:
+
+1. **The cave is load-bearing for the IDE.** 2ol's result still holds on this
+   OS and this JBR: with the policy the IDE's text is right, and the moment the
+   policy is gone it is wrong. That is a positive control obtained for free,
+   and it is the first in-boot A/B on IntelliJ since 2ol.
+2. **The subject is a CHILD process, not the IDE.** So runs 2-4 of the ladder
+   were aimed at the wrong process and are not run. A child JVM gets its own
+   mapping of the shared cache and its own `newUserClient`, so the kext should
+   patch it exactly like any other process — and whether it did is a counter
+   read, not an injection: `mtlk2_patched` and `mtlk2_pid` before and after the
+   child is launched.
+
+My own restatement of the user's report ("IntelliJ has the glyph issue") is
+what sent run 1 at the IDE. The report said *programs launched from it*.
