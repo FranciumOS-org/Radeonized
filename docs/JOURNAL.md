@@ -66912,3 +66912,52 @@ So the population is now three independent OpenGL clients (JavaFX es2, JavaFX
 sw presentation, Steam/CEF) against every Metal client on the machine being
 right. Next instrument: the GL driver's own chooser, logged the way
 `mtlswizzle` logs Metal's, with no override on the first run.
+
+## 3gl-b (2026-11-10, boot 521) — THE GL CHOOSER IS READ FOR THE FIRST TIME, AND IT RETURNS THE `_X` MODES
+
+`tools/glswizzle.c` + `make glswizzle`: the GL twin of `mtlswizzle`, a
+trampoline on `glrAMD_GFX10_DetermineSwizzleMode` inside
+`AMDRadeonX6000GLDriver`. The bundle is a plain on-disk Mach-O loaded at its
+own address, so no kernel help is needed — `vm_protect`, a 15-byte prologue
+copy (`push rbp; mov rbp,rsp; push r14; push rbx; sub rsp,0x70; vxorps`, a
+whole number of instructions, no branch, nothing rip-relative) and a 13-byte
+absolute jump, the same shape as 2nq's. The function is found by a **32-byte
+pattern with an exactly-one-occurrence refusal**, not by the 0x168b4 offset,
+so a different build moves the address without moving the tool.
+
+Default mode changes nothing (rule 16). EscapeRoom on `es2`, log only:
+
+```
+glswz: GL driver at 0x117591000, chooser at 0x1175a78b4 (file offset 0x168b4)
+glswz: HOOKED ... (verify ok) - this mode OVERRIDES NOTHING
+  desc+16=0x4500 ... => mode=27
+  desc+16=0x4400 ... => mode=27
+  desc+16=0x4400 ... => mode=22
+  ... six distinct callers, every one 27 or 22
+```
+
+**27 = 64KB_R_X and 22 = 4KB_D_X — the `_X` family**, which is this project's
+original defect and precisely what the Metal cave remaps away. So the GL path
+chooses the modes nobody fixes, in the one application class that is broken,
+while every Metal client on the machine has had those same modes remapped
+since 2om.
+
+That is a mechanism and not two numbers side by side: the function is named,
+its answers are read, the clients that use it are the broken ones, and the
+clients that do not are correct.
+
+**Arity and `usage` are NOT established.** The body reads rcx, r8, r9 and one
+stack argument; which of them carries usage is unknown, so this tool has
+**no LINEAR policy** — only `nox`, the cave's 28-byte table. 2nq's lesson is
+why: a render target forced linear returns a nil pipeline state and JBR
+dereferences it.
+
+### The override, with the prediction written first
+
+`RBGPU_GLSWIZZLE=nox` on the same app, same boot: 6 overrides applied,
+`27 -> 10` and `22 -> 6`, process alive and not crashed.
+
+**Predicted before the user looked:** if the `_X` choice is the cause, this
+window is correct, or at least visibly better than the es2 run. If it is
+unchanged, the GL chooser is read but not the cause, and the next suspect is
+how the GL driver *uploads* into whatever mode it picked.

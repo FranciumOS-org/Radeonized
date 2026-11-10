@@ -216,6 +216,13 @@ mtlswizzle: $(OUT)/mtlswizzle.dylib
 $(OUT)/mtlswizzle.dylib: tools/mtlswizzle.c | $(OUT)
 	clang -dynamiclib -O2 -Wall -o $@ $<
 
+# glswizzle (3gl): the GL driver's own chooser,
+# glrAMD_GFX10_DetermineSwizzleMode, which lives in a bundle OUTSIDE the dyld
+# shared cache and which nothing in this tree has ever patched. Log only.
+glswizzle: $(OUT)/glswizzle.dylib
+$(OUT)/glswizzle.dylib: tools/glswizzle.c | $(OUT)
+	clang -dynamiclib -O2 -Wall -o $@ $<
+
 # usageprobe (2nq): which descriptor field is Metal's `usage`?
 usageprobe: $(OUT)/usageprobe
 $(OUT)/usageprobe: tools/usageprobe.m | $(OUT)
