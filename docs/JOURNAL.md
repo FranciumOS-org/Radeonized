@@ -67183,3 +67183,66 @@ That one capture is what turns the detection from a guess into a row, and
 then the plugin can decline in Recovery by default - failing safe toward
 ARMED, because a false positive costs a desktop's acceleration while a false
 negative only leaves today's behaviour.
+
+## 3rec (2026-11-10) — RECOVERY HANGS BECAUSE WE ASKED TO RUN THERE. One line, never reasoned about, since milestone 0.
+
+### The two trips localised it, and they were the user's
+
+| trip | what it disarms | Recovery |
+|---|---|---|
+| `sudo nvram rbgpu-arm=0` | the accelerator arm, plugin otherwise alive | **still hangs** |
+| `-rbgpuoff` | `init()` entirely (the documented rescue) | **comes up** |
+
+So it is **this plugin, before any feature gate** — not the accelerator, not
+the framebuffer (whose collection Recovery does not even load), and not
+something outside our code.
+
+### The cause, read rather than guessed
+
+```c
+PluginConfiguration ADDPR(config) = {
+    ...
+    LiluAPI::AllowNormal | LiluAPI::AllowInstallerRecovery,
+```
+
+`AllowInstallerRecovery` is a Lilu run-mode flag: a plugin declares the
+environments it is willing to start in, and Lilu does the detection. We
+declared Recovery. `git log -S` puts that line in **`d1933eb`, "Lilu plugin
+milestone 0: empty RembrandtGPU.kext"** — copied out of a plugin template
+before this project had any code in it — and the journal has **never
+mentioned it once** in everything since. It was not a decision; it was a
+default nobody read.
+
+**The fix is to stop declaring it.** `LiluAPI::AllowNormal` alone, so Lilu
+declines to start us in Recovery and in the macOS installer, with its own
+detection and no device-tree marker of ours. **And the resulting boot is
+exactly the one the user already measured coming up**, because `-rbgpuoff`
+and "the plugin never starts" are the same environment from the OS's side.
+That is what makes this a fix rather than a candidate: the fixed state has
+been observed, before the fix.
+
+Plugin UUID **`04C138CE-8DD6-3336-8A76-D78B8CEB552C`**, 0 libraries from the
+system KC, 0 `IOGraphicsFamily`.
+
+### What it costs, said plainly
+
+The same flag covers the macOS installer, so we no longer load there either.
+Nothing here wants us in either place: every feature exists to make a desktop
+work, and `docs/CACHE-RECOVERY.md` makes Recovery the documented way back from
+a bad shared-cache patch — a rescue that has to boot stock to be a rescue
+(rule 21, written about exactly this failure, and which this file had been
+quietly violating for the whole project).
+
+**Not established:** WHICH part of init hangs there. The question is now
+unasked rather than answered, and deliberately: with the flag gone the code
+never runs in that environment, so the hang has no reachable path. If it ever
+matters, `-rbgpudbg` in a Recovery boot with the flag restored is the way,
+and the IODeviceTree:/chosen capture recorded in 3gl-e is the marker work
+that would be needed to decline selectively instead of entirely.
+
+### A second thing this retires
+
+3gl-e wrote down a two-trip plan and a marker-capture plan for a detection of
+our own. **The marker work is not needed** — Lilu already had the detection
+and we had opted out of it. The plan did its job by being cheap enough to run
+before any of that was written.

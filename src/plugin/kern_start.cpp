@@ -39,7 +39,21 @@ static void pluginStart() {
 PluginConfiguration ADDPR(config) = {
     xStringify(PRODUCT_NAME),
     parseModuleVersion(xStringify(MODULE_VERSION)),
-    LiluAPI::AllowNormal | LiluAPI::AllowInstallerRecovery,
+    // 3rec: AllowNormal ALONE. `AllowInstallerRecovery` was here from
+    // milestone 0, copied out of a Lilu plugin template and never once
+    // reasoned about in this journal - and it is what made the plugin load in
+    // the Recovery boot, which hangs with the Apple progress bar filling
+    // forever. The user localised it in two trips: `rbgpu-arm=0` did NOT
+    // help, so it is not the accelerator arm, and `-rbgpuoff` DID, so it is
+    // this plugin before any feature gate. Dropping the flag makes Lilu
+    // itself decline to start us there, using its own detection rather than a
+    // marker of ours - and the resulting boot is exactly the `-rbgpuoff` one
+    // the user measured coming up. It covers the macOS installer for the same
+    // reason. Nothing on this machine needs us in either environment: the
+    // accelerator, the framebuffer and the caves all exist to make a DESKTOP
+    // work, and Recovery is the documented way back from a bad one
+    // (docs/CACHE-RECOVERY.md), so it must boot stock.
+    LiluAPI::AllowNormal,
     bootargOff,
     arrsize(bootargOff),
     bootargDebug,
