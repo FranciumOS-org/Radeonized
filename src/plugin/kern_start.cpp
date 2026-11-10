@@ -7004,6 +7004,7 @@ void RGPU::installKernelLogHooks(KernelPatcher &patcher) {
 #include "rb_retire.h"   /* 2zd: who drives frame retirement */
 #include "rb_gpuname.h" /* 2CA: the chip's own name and carve-out size */
 #include "rbgpu_mtlcave.h"
+#include "../common/rb_glcave.h"
 
 // 2xz: WHICH PATCH ROW, AND WHAT HAPPENS WHEN THERE IS NONE.
 //
@@ -7192,6 +7193,15 @@ static bool     g_mtlkMovedSaid = false;
 // same meaning is written only for the first 8 execs, so after the report
 // budget runs out this global is the only carrier.
 static int      g_mtlkLastMatch = -1;
+
+// 3gl-d: the two kernel symbols the OpenGL cave adds, declared here because
+// the symbol table below takes their addresses. What they are for is at
+// rbgpu_glc_try(): AMDRadeonX6000GLDriver is not in the shared cache, so its
+// per-process base comes from the client's own dyld image list.
+typedef kern_return_t (*t_rbGlcTaskInfo)(task_t, uint32_t, void *, uint32_t *);
+typedef task_t (*t_rbGlcCurrentTask)(void);
+static t_rbGlcTaskInfo    g_glcTaskInfo    = nullptr;
+static t_rbGlcCurrentTask g_glcCurrentTask = nullptr;
 
 // ---------------------------------------------------------------------------
 // 2qo (2026-10-25): the IOPresentment gate, placed at ONE CALL SITE.
@@ -7758,10 +7768,19 @@ static void rbgpu_mtlk_install(KernelPatcher &patcher) {
         // 2xu: the late path needs the CURRENT map, not a task's, because it
         // runs on the client's own thread - which is the whole point, since
         // current_map() == map takes vm_map_read_user's fast copyin path.
-        // NOTE: mtlk_syms is now a SIX-bit mask, so "all resolved" is 0x3F,
-        // not the 0xF that macOS 15 captures show.
+        // NOTE: mtlk_syms is now an EIGHT-bit mask (3gl-d added two), so
+        // "all resolved" is 0xFF - not the 0x3F of 2xu, and not the 0xF that
+        // macOS 15 captures show.
         { "_current_map",      reinterpret_cast<void **>(&g_mtlkCurrentMap) },
         { "_proc_selfpid",     reinterpret_cast<void **>(&g_mtlkProcSelfPid) },
+        // 3gl-d: the OpenGL cave needs the process's dyld image list, because
+        // AMDRadeonX6000GLDriver is NOT in the shared cache and therefore has
+        // no slide to derive an address from. task_info(TASK_DYLD_INFO) is
+        // the documented way to the list and both of these are plain kernel
+        // symbols, solved exactly like the six above. With them the mask is
+        // EIGHT bits - "all resolved" is 0xFF, not 0x3F.
+        { "_task_info",        reinterpret_cast<void **>(&g_glcTaskInfo) },
+        { "_current_task",     reinterpret_cast<void **>(&g_glcCurrentTask) },
     };
     uint64_t have = 0;
     for (size_t i = 0; i < arrsize(syms); i++) {
@@ -7899,6 +7918,240 @@ static void rbgpu_mtlk_try_late(void) {
         rbgpu_diag_set_num("mtlk2_moved", g_mtlk2Moved);
     }
     rbgpu_diag_set_num("mtlk2_calls", g_mtlk2Calls);
+}
+
+
+// ---------------------------------------------------------------------------
+// 3gl-d (2026-11-10): THE OPENGL CAVE.
+//
+// Everything above acts on AMDRadeonX6000MTLDriver, inside the dyld shared
+// cache. 3gl measured an application that is broken on this machine and found
+// it is not a Metal client at all: JavaFX renders through Prism's `es2`
+// pipeline - legacy OpenGL - and so draws through **AMDRadeonX6000GLDriver**,
+// a bundle dyld loads from /System/Library/Extensions at a per-process
+// address OUTSIDE the cache, carrying its own copy of AddrLib and its own
+// chooser, `glrAMD_GFX10_DetermineSwizzleMode`. It returns the `_X` modes -
+// 27 and 22 on every caller - which is the defect the Metal cave has remapped
+// since 2om and which nothing had ever remapped here.
+//
+// 3gl-c measured the fix in the application's own process with its control in
+// the same frame: `log` 0 overrides and broken beside `nox` 6 overrides and
+// clean, the same dylib injected on both sides so the injection is not the
+// variable. This places the same policy from the kext, so no wrapper is
+// needed and a process that strips DYLD_INSERT_LIBRARIES is covered too.
+//
+// THE ONE NEW PROBLEM, AND HOW IT IS SOLVED. Every other patch here starts
+// from a cache slide. This image has none, so the base comes from the
+// process's own dyld image list: task_info(TASK_DYLD_INFO) gives
+// all_image_info_addr, and `dyld_all_image_infos` is read with the same
+// _vm_map_read_user the rest of this file uses, in the client's own context
+// where that call takes its fast copyin path. Only the first three fields are
+// touched (version, infoArrayCount, infoArray) and they are the stable head
+// of a documented structure.
+//
+// NOTHING ELSE IS NEW. rbgpu_mtlk_place() is reused unchanged: it reads
+// before it writes, writes only on an exact match of `find` (or finds `repl`
+// already there), and the CAVE is verified present before the DETOUR that
+// jumps into it is written. A row that is wrong for this build writes nothing
+// anywhere, which is what makes keying on the Darwin major honest.
+//
+// THE POLICY IS `nox` ALONE - no LINEAR term - and that is deliberate. The
+// Metal cave can tell a render target from a sampled texture because 2nq
+// located `usage` in the descriptor. Nothing has located it among THIS
+// function's arguments, so the kext cannot make that distinction and must not
+// pretend to; 2nq also measured what the pretence costs, which is a nil
+// pipeline state and a client that dereferences it.
+//
+// OPT-IN: `-rbgpuglcave`. No existing token begins with `rbgpugl`, so rule 30
+// is satisfied in both directions.
+struct rb_glc_dyld_info {
+    uint64_t all_image_info_addr;
+    uint64_t all_image_info_size;
+    int32_t  all_image_info_format;
+};
+#define RB_GLC_TASK_DYLD_INFO       17u
+#define RB_GLC_TASK_DYLD_INFO_COUNT 5u
+
+
+static uint32_t g_glcOn      = 0;   // 0 unchecked, 1 armed, 2 off, 3 no row
+static uint64_t g_glcCalls   = 0;   // entered with everything ready
+static uint64_t g_glcFound   = 0;   // the GL image was located in a client
+static uint64_t g_glcPatched = 0;   // cave AND detour verified
+static uint64_t g_glcFailed  = 0;
+static uint64_t g_glcMoved   = 0;   // read OK, bytes neither find nor repl
+static int      g_glcPids[96] = {};
+static uint8_t  g_glcTries[96] = {};
+static int      g_glcNPids   = 0;
+
+// The GL image's path, matched as a substring without libkern's strstr so the
+// search is this file's own and bounded.
+static bool rbgpu_glc_contains(const char *hay, size_t n, const char *needle)
+{
+    size_t m = 0;
+    while (needle[m] != '\0') { m++; }
+    if (m == 0 || m > n) { return false; }
+    for (size_t i = 0; i + m <= n; i++) {
+        size_t j = 0;
+        while (j < m && hay[i + j] == needle[j]) { j++; }
+        if (j == m) { return true; }
+    }
+    return false;
+}
+
+// The client's AMDRadeonX6000GLDriver load address, or 0. Every read is of
+// user memory in the caller's own map and every failure returns 0 rather than
+// guessing (rule 14).
+static mach_vm_address_t rbgpu_glc_image_base(vm_map_t map)
+{
+    struct rb_glc_dyld_info info;
+    uint32_t count = RB_GLC_TASK_DYLD_INFO_COUNT;
+    uint8_t head[16];
+    uint32_t n = 0;
+    uint64_t arr = 0;
+
+    memset(&info, 0, sizeof(info));
+    if (g_glcTaskInfo(g_glcCurrentTask(), RB_GLC_TASK_DYLD_INFO,
+                      &info, &count) != KERN_SUCCESS) {
+        return 0;
+    }
+    if (info.all_image_info_addr == 0) {
+        return 0;
+    }
+    if (g_mtlkVmMapReadUser(map, info.all_image_info_addr,
+                            head, sizeof(head)) != KERN_SUCCESS) {
+        return 0;
+    }
+    memcpy(&n, head + 4, sizeof(n));
+    memcpy(&arr, head + 8, sizeof(arr));
+    // An index is not a count (rule 33), and a count read out of another
+    // process is not trusted: bound it before it becomes a loop.
+    if (arr == 0 || n == 0 || n > 4096) {
+        return 0;
+    }
+    for (uint32_t i = 0; i < n; i++) {
+        uint8_t ent[24];
+        uint64_t load = 0, path = 0;
+        char buf[64];
+
+        if (g_mtlkVmMapReadUser(map, arr + (uint64_t)i * 24,
+                                ent, sizeof(ent)) != KERN_SUCCESS) {
+            return 0;
+        }
+        memcpy(&load, ent, sizeof(load));
+        memcpy(&path, ent + 8, sizeof(path));
+        if (load == 0 || path == 0) {
+            continue;
+        }
+        // 64 bytes reaches past "/System/Library/Extensions/AMDRadeon..." for
+        // the name, and a path that ends before that simply does not match.
+        // A read that fails is skipped, not treated as a verdict.
+        if (g_mtlkVmMapReadUser(map, path, buf, sizeof(buf)) != KERN_SUCCESS) {
+            continue;
+        }
+        if (rbgpu_glc_contains(buf, sizeof(buf), "AMDRadeonX6000GLDriver")) {
+            return (mach_vm_address_t)load;
+        }
+    }
+    return 0;
+}
+
+// Called from the newUserClient hook, in the client's own process context.
+static void rbgpu_glc_try(void)
+{
+    if (g_glcOn == 0) {
+        if (!checkKernelArgument("-rbgpuglcave")) {
+            g_glcOn = 2;
+        } else if (getKernelVersion() != RB_GLCAVE_DARWIN) {
+            // An OS with no row gets no patch and says so, exactly as the
+            // Metal table does. A near miss is worth nothing here: every
+            // offset in the row is inside one build of one bundle.
+            g_glcOn = 3;
+        } else {
+            g_glcOn = 1;
+        }
+        rbgpu_diag_set_num("glc_on", g_glcOn);
+    }
+    if (g_glcOn != 1) {
+        return;
+    }
+    if (!g_glcTaskInfo || !g_glcCurrentTask || !g_mtlkCurrentMap ||
+        !g_mtlkProcSelfPid || !g_mtlkVmMapReadUser || !g_mtlkVmMapWriteUser) {
+        rbgpu_diag_set_num("glc_ready", 0);
+        return;
+    }
+
+    const int pid = g_mtlkProcSelfPid();
+    if (pid <= 0) {
+        return;
+    }
+    // Unlike mtlk2 a pid is NOT retired on the first visit. The GL image is
+    // dlopened when a GL context is created, which can be after the process's
+    // first accelerator user client, so one look is not an answer. Four
+    // attempts per pid bounds the dyld walk for the overwhelming majority of
+    // processes, which are Metal clients that will never load this image.
+    int slot = -1;
+    for (int i = 0; i < g_glcNPids; i++) {
+        if (g_glcPids[i] == pid) { slot = i; break; }
+    }
+    if (slot >= 0) {
+        if (g_glcTries[slot] >= 4) { return; }
+        g_glcTries[slot]++;
+    } else if (g_glcNPids < (int)arrsize(g_glcPids)) {
+        slot = g_glcNPids++;
+        g_glcPids[slot] = pid;
+        g_glcTries[slot] = 1;
+    }
+
+    vm_map_t map = g_mtlkCurrentMap();
+    if (map == nullptr) {
+        rbgpu_diag_set_num("glc_map", 0);
+        return;
+    }
+    g_glcCalls++;
+    rbgpu_diag_set_num("glc_calls", g_glcCalls);
+
+    mach_vm_address_t base = rbgpu_glc_image_base(map);
+    if (base == 0) {
+        return;             // not a GL client, or not loaded yet. Not a failure.
+    }
+    g_glcFound++;
+    rbgpu_diag_set_num("glc_found", g_glcFound);
+    rbgpu_diag_set_num("glc_base", base);
+
+    const bool report = g_glcPatched == 0 && g_glcFailed < 8;
+    mach_vm_address_t cavePlace = base + RB_GLCAVE_CAVE_OFF - RB_GLCAVE_ANCHOR;
+    mach_vm_address_t fnPlace   = base + RB_GLCAVE_FN_OFF;
+
+    // ORDER IS THE SAFETY PROPERTY, as on both Metal paths: the detour is a
+    // jump into the cave, so the cave must be verified present in THIS
+    // process before the detour is written.
+    bool caveOk = rbgpu_mtlk_place(map, cavePlace,
+                                   rb_glcave_cave_find, rb_glcave_cave_repl,
+                                   RB_GLCAVE_CAVE_LEN,
+                                   "glc_cave_match", "glc_cave_prot",
+                                   "glc_cave_write", "glc_cave_verify", report);
+    if (!caveOk) {
+        g_glcFailed++;
+        if (g_mtlkLastMatch == 0) { g_glcMoved++; }
+        rbgpu_diag_set_num("glc_failed", g_glcFailed);
+        rbgpu_diag_set_num("glc_moved", g_glcMoved);
+        return;
+    }
+    bool detOk = rbgpu_mtlk_place(map, fnPlace,
+                                  rb_glcave_fn_find, rb_glcave_fn_repl,
+                                  RB_GLCAVE_FN_LEN,
+                                  "glc_det_match", "glc_det_prot",
+                                  "glc_det_write", "glc_det_verify", report);
+    if (detOk) {
+        g_glcPatched++;
+        rbgpu_diag_set_num("glc_patched", g_glcPatched);
+        rbgpu_diag_set_num("glc_pid", pid);
+    } else {
+        g_glcFailed++;
+        if (g_mtlkLastMatch == 0) { g_glcMoved++; }
+        rbgpu_diag_set_num("glc_failed", g_glcFailed);
+        rbgpu_diag_set_num("glc_moved", g_glcMoved);
+    }
 }
 
 
@@ -16338,6 +16591,8 @@ static IOReturn hooked_newuc_2xu(void *self, task_t owningTask, void *sid,
     // BEFORE the original: the point of this hook is to be ahead of anything
     // the new user client does.
     rbgpu_mtlk_try_late();
+    // 3gl-d: the OpenGL half, same context, same reason to be early.
+    rbgpu_glc_try();
     return orig_newuc_2xu ? orig_newuc_2xu(self, owningTask, sid, type, handler)
                           : kIOReturnUnsupported;
 }

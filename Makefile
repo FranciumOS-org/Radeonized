@@ -488,6 +488,11 @@ $(OUT)/blset: tools/blset.m | $(OUT)
 mtlcave:
 	@env -u DYLD_INSERT_LIBRARIES python3 tools/gen_cavepatch.py
 
+# glcave (3gl-d): the OpenGL cave, derived from the GL driver bundle on this
+# machine and written to src/common/rb_glcave.h.
+glcave:
+	@env -u DYLD_INSERT_LIBRARIES python3 tools/gen_glcave.py
+
 .PHONY: osrange
 osrange:
 	@minname=$$(awk '/#define RB_OS_MIN_DARWIN/ {print $$3}' src/common/rb_osver.h | sed 's/RB_OS_//'); 	 maxname=$$(awk '/#define RB_OS_MAX_DARWIN/ {print $$3}' src/common/rb_osver.h | sed 's/RB_OS_//'); 	 minw=$$(python3 -c "print('$$minname'.capitalize())"); 	 maxw=$$(python3 -c "print('$$maxname'.capitalize())"); 	 n=$$(grep -c "KernelVersion::$$minw,"  src/plugin/kern_start.cpp); 	 m=$$(grep -c "KernelVersion::$$maxw,"  src/plugin/kern_start.cpp); 	 if [ "$$n" != 1 ] || [ "$$m" != 1 ]; then 	   echo "  FAIL rb_osver.h declares $$minw..$$maxw but kern_start.cpp's PluginConfiguration"; 	   echo "       has $$n KernelVersion::$$minw and $$m KernelVersion::$$maxw (want 1 each)."; 	   echo "       The two must agree or the kext's declared range is a fiction."; 	   exit 1; 	 fi; 	 echo "  OSVER declared range $$minw..$$maxw, matrix and PluginConfiguration agree"
