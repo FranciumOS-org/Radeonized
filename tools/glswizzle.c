@@ -80,6 +80,51 @@ typedef unsigned int (*glswz_fn)(uint64_t a1, uint64_t a2, uint64_t a3,
 
 enum { G_LOG, G_OFF, G_NOX, G_CAVE };
 
+// 3gl-f: an extra, EXPLICIT mapping on top of whatever policy is selected,
+// so a candidate row can be tried in userspace without a kext or a boot.
+//
+//   RBGPU_GLSWIZZLE_MAP=2:1,24:8      "mode 2 becomes 1, mode 24 becomes 8"
+//
+// It is applied AFTER the policy, so `nox` plus a map is nox with that row
+// replaced, and `log` plus a map overrides ONLY the named modes - which makes
+// `log` with one row the cleanest single-variable experiment this tool can
+// run. Both sides are bounded to 0..27, the range the cave's table covers;
+// anything outside is refused at parse time and the map stays empty, because
+// a silently ignored row would look exactly like a row that did nothing.
+static unsigned int gMap[28];
+static int gMapOn;
+
+static void map_parse(const char *s)
+{
+    unsigned int from = 0, to = 0;
+    int n = 0;
+    for (unsigned int i = 0; i < 28; i++) { gMap[i] = i; }
+    while (*s) {
+        if (sscanf(s, "%u:%u", &from, &to) != 2) {
+            fprintf(stderr, "glswz: REFUSING the map - `%s` is not from:to\n", s);
+            gMapOn = 0;
+            return;
+        }
+        if (from > 27 || to > 27) {
+            fprintf(stderr, "glswz: REFUSING the map - %u:%u is outside "
+                            "0..27\n", from, to);
+            gMapOn = 0;
+            return;
+        }
+        gMap[from] = to;
+        gMapOn = 1;
+        n++;
+        while (*s && *s != ',') { s++; }
+        if (*s == ',') { s++; }
+    }
+    if (n == 0) { gMapOn = 0; }
+}
+
+static unsigned int map_apply(unsigned int m)
+{
+    return (gMapOn && m < 28) ? gMap[m] : m;
+}
+
 // The cave's table, unchanged (2nr). Z modes are not touched.
 static unsigned int nox(unsigned int m)
 {
@@ -126,7 +171,7 @@ static unsigned int hook(uint64_t a1, uint64_t a2, uint64_t a3,
                          uint64_t s1, uint64_t s2, uint64_t s3)
 {
     unsigned int orig = gTramp ? gTramp(a1, a2, a3, desc, r8, r9, s1, s2, s3) : 0;
-    unsigned int mode = (gMode == G_NOX) ? nox(orig) : orig;
+    unsigned int mode = map_apply((gMode == G_NOX) ? nox(orig) : orig);
 
     // The four descriptor fields the body itself reads, by offset, named by
     // what the instruction does rather than by a guess at the meaning.
@@ -229,6 +274,16 @@ static void patch_image(const struct mach_header *mh, intptr_t slide)
     if (m && !strcmp(m, "off")) { gMode = G_OFF; }
     else if (m && !strcmp(m, "nox")) { gMode = G_NOX; }
     else if (m && !strcmp(m, "cave")) { gMode = G_CAVE; }
+    if (getenv("RBGPU_GLSWIZZLE_MAP")) {
+        map_parse(getenv("RBGPU_GLSWIZZLE_MAP"));
+        if (gMapOn) {
+            fprintf(stderr, "glswz: map armed:");
+            for (unsigned int i = 0; i < 28; i++) {
+                if (gMap[i] != i) { fprintf(stderr, " %u->%u", i, gMap[i]); }
+            }
+            fprintf(stderr, "\n");
+        }
+    }
     if (getenv("RBGPU_GLSWIZZLE_DUMP")) {
         gDumpBudget = atoi(getenv("RBGPU_GLSWIZZLE_DUMP"));
     }

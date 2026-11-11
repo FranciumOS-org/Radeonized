@@ -67375,3 +67375,43 @@ all; a matched one produces a recoverable boot.
 Nothing here can be measured on this machine, which reports `1681`. The
 hosttest passes and all three bundles carry both ids; that is a check of the
 plists, not of the hardware.
+
+### 3gl-f: the small-icon defect is NOT the GL chooser, and the control is what says so
+
+Boot with `-rbgpunoglcave` (kext cave off, dylib owns the chooser). Steam's
+text, game names and cover art are correct under `nox`; the small monochrome
+badge glyphs speckle. 3gl-f added `RBGPU_GLSWIZZLE_MAP=from:to,...` to
+`tools/glswizzle.c`, applied AFTER the policy, so one row can be changed in
+userspace with no kext and no boot.
+
+**The descriptor is decoded** (`DUMP=40`, bytes 0..7 little-endian): bytes
+**2-3 are width**, **4-5 are height**, 6-7 depth 1, 0-1 an id that also
+appears at +0x30. The chooser's answer is a pure function of size here:
+
+    8x8, 15x15, 16x16        -> 2   (ADDR_SW_256B_D)
+    46x46, 53x96             -> 22  (4KB_D_X)
+    105x105 ... 2048x2048    -> 27  (64KB_R_X)
+
+So the badge class (~14px) takes **mode 2, which `nox` does not touch** -
+`NOX` covers only 21/22/23/25/26/27. That looked like the whole answer.
+
+**It is not.** Four runs, same pages, map armed and every row logged as
+overridden each time:
+
+    2 -> 1   (256B_S)    no visible change
+    2 -> 0   (LINEAR)    no visible change, no crash
+    2 -> 27  (64KB_R_X)  no visible change
+
+**Three mutually incompatible swizzles plus the original cannot produce
+pixel-identical output from a real texture**, so mode 2's answer is not what
+draws these icons. The `2 -> 27` run is the instrument check rule 39 asks for:
+without it, "`2 -> 1` did nothing" and "`2 -> 0` did nothing" would have read
+as two candidates dying rather than as a dial that reaches nothing.
+
+**The next question is not which mode.** Only ONE process per run prints
+`glswz: GL driver at ...` while Steam spawns several helpers, and this boot
+has the Metal cave ON (`-rbgpunoglcave` disarms the GL one only). If the
+badges are drawn by a helper that never loads `AMDRadeonX6000GLDriver` they
+are not an OpenGL surface at all, and they are a different defect from 3gl,
+living where `mtlk2` already runs. Unmeasured: which process and which API
+draws them.
