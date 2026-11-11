@@ -60,8 +60,12 @@ final class AppModel: ObservableObject {
         guard let release else { return }
         let backup = BackupStore.newFolder(.framebuffer)
         await perform("Installing the framebuffer into the system collection") {
-            try await Privileged.run([
-                "fb-install", release.framebufferKext.path, backup.path, self.owner,
+            // The UUID is read here, from the binary we are about to install, and
+            // the helper checks it inside the collection after the write.
+            let binary = release.framebufferKext.appendingPathComponent("Contents/MacOS/RBAMDFramebuffer")
+            let uuid = try MachOUUID.read(from: binary)
+            return try await Privileged.run([
+                "fb-install", release.framebufferKext.path, backup.path, self.owner, uuid,
             ])
         }
     }
