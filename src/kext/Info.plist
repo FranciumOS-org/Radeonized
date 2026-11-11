@@ -10,8 +10,9 @@
 	<string>com.rembrandtgpu.probe</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
+	<!-- 3br: display name only. IOClass stays RembrandtProbe. -->
 	<key>CFBundleName</key>
-	<string>RembrandtProbe</string>
+	<string>Radeonized Probe</string>
 	<key>CFBundlePackageType</key>
 	<string>KEXT</string>
 	<key>CFBundleShortVersionString</key>

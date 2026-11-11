@@ -277,7 +277,12 @@ void rbgpu_log(const char *fmt, ...) {
         vsnprintf(s_log_buf, sizeof(s_log_buf), fmt, args);
         va_end(args);
 
-        IOLog("RembrandtGPU: %s\n", s_log_buf);
+        /* 3br: the brand in the log is Radeonized. Nothing in tools/ greps
+         * this prefix (checked), so it is display only; the bundle id, the
+         * class names, the -rbgpu* boot-args and the rbgpu-* NVRAM keys are
+         * deliberately UNCHANGED, because the EFI config.plist, this
+         * machine's NVRAM and 60 000 lines of journal all cite them. */
+        IOLog("Radeonized: %s\n", s_log_buf);
         rbgpu_process_multiline_locked(nullptr, s_log_buf);
         IOLockUnlock(g_diagLock);
     }

@@ -10,8 +10,10 @@
 	<string>com.rembrandtgpu.fb</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
+	<!-- 3br: display name only. CFBundleExecutable, CFBundleIdentifier and
+	     IOClass stay RBAMDFramebuffer / com.rembrandtgpu.fb. -->
 	<key>CFBundleName</key>
-	<string>RBAMDFramebuffer</string>
+	<string>Radeonized Framebuffer</string>
 	<key>CFBundlePackageType</key>
 	<string>KEXT</string>
 	<key>CFBundleShortVersionString</key>
