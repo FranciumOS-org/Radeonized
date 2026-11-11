@@ -580,6 +580,19 @@ plugin: hosttest osrange $(PLUGIN_OBJS) $(PLUGIN_SRC)/Info.plist
 	@! grep -n '\$$(' $(PLUGIN_BUNDLE)/Contents/Info.plist
 	@$(CXX) $(ARCH) $(MINOS) -isysroot $(SDK) -nostdlib -Xlinker -kext \
 	    -L$(MKSDK)/Library/x86_64 $(PLUGIN_OBJS) -lkmod -o $(PLUGIN_BIN)
+	@# 3fxf: refuse a kext that still references one of OUR OWN symbols as
+	@# undefined. `-Xlinker -kext` leaves every undefined symbol for the
+	@# kernel linker by design, which is correct for the KPI and silently
+	@# fatal for ours: 3fxe deleted `yc_rlc_img` and left a stale `extern`
+	@# behind, the link succeeded, `kmutil libraries -p` listed no problem,
+	@# and the GOT slot came up holding a wild pointer that page-faulted
+	@# 19.4 s into every accelerated boot. The KPI names never match these
+	@# patterns, so a hit here is always a dangling reference of ours.
+	@if env -u DYLD_INSERT_LIBRARIES nm -u $(PLUGIN_BIN) \
+	    | grep -E 'yc_|rbgpu|_rb_|Rembrandt|RBAMD|RBGPU'; then \
+	    echo "  FAIL undefined symbol(s) of OUR OWN above - dangling extern"; \
+	    rm -f $(PLUGIN_BIN); exit 1; \
+	fi
 ifneq ($(NOFW),1)
 	@# 3fxe: AMD's licence requires its notices to be reproduced in the
 	@# materials provided WITH the microcode. A README in the repository does

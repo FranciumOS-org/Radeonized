@@ -68112,3 +68112,59 @@ Development build `0F85A443`, release `CBEDD914`. `make clean` does not touch
 `build-release/`, which is its own `BUILD_DIR`, so a stale `fw_blobs.o` kept a
 deployment-target warning alive through two rebuilds; `make clean RELEASE=1`
 is the other half. 45 pre-existing warnings, unchanged. **Not booted.**
+
+## 3FXF (2026-11-11) — the 19.4 s panic: 3fxe left a dangling `extern`, and the link said nothing
+
+**Three identical panics on `CBEDD914` (the 3fxe release), uptimes 19.38 /
+19.36 / 19.70 s, an accelerated desktop each time.** `type = 14=page fault`,
+CR2 = RAX = `0xffffff8052a00000`, "wild deref, missing or invalid metadata",
+reached from `_thread_call_delayed_timer`. The user worked around it with
+`-rbgpuoff`.
+
+**Cause: `yc_rlc_img` no longer exists.** 3fxe deleted
+`src/plugin/fw_yellow_carp.cpp`, which defined `extern const uint8_t
+yc_rlc_img[25088]`, and left the block-scope `extern const uint8_t
+yc_rlc_img[];` declaration at `kern_start.cpp:19729` behind — 2jm's `ymatch`
+check, which compares the first eight dwords of the RLC autoload buffer
+against our own image. `nm -n` on the shipped binary shows `U _yc_rlc_img`:
+**the symbol stayed UNDEFINED in the linked kext.** `-Xlinker -kext` leaves
+every undefined symbol for the kernel linker by design — correct for the KPI,
+silently fatal for ours — and nothing bound it, so the GOT slot at `0x18c080`
+came up holding whatever was there and `cmpl (%rax), %r10d` faulted.
+
+**The symbol attribution in the panic was unreliable and the registers were
+not.** `__Z20rbgpu_ring_probe_2hkj + 0x133f` is a 0x3520-byte gap of unnamed
+statics, so `+0x133f` names nothing; but **RBX `0x6000`** is
+`RLC_HYP_BOOTLOAD_SIZE`, **R13 `0x87f800000`** is `RLC_HYP_BOOTLOAD_ADDR`, and
+**RCX/R9 `0x400`** is 2jm's own 1024-dword loop with every dword non-zero.
+That is 2jm's code and nothing else, and it placed the function from hardware
+state rather than from the symboliser (rule 29's shape).
+
+**And it runs on every armed boot**: my own first reading said
+`-rbgpuringprobe` was absent from the boot-args and the probe returned early.
+It is **default-on** (`rb_defaults.h:104`, with the other instruments), which
+the boot-args do not show because a default needs no token — rule 34's arm
+read off the wrong surface.
+
+**`kmutil libraries -p` IS NOT A GUARD FOR THIS.** Run against the panicking
+binary it lists every KPI import and says nothing at all about
+`_yc_rlc_img` — no "not found", no "unresolved", exit 0. Rule 26: the search
+was the instrument, and the check CLAUDE.md already mandates after a plugin
+change cannot see a dangling reference of ours.
+
+**The fix is two parts.**
+1. `ymatch` now compares against the RLC payload **sliced out of the embedded
+   container** (`rb_fwhdr_payload` on `yc_rlc_file`), inside `#if RB_FW_YC`,
+   and is a **code** rather than a bool (rule 14): `1` our payload, `0` not,
+   `-1` no yellow_carp image in this build, `-2` the container would not slice
+   with `ysl` naming the refusal. The slice is **byte-identical** to the
+   deleted array's first 32 bytes — `45 23 a4 84 …`, then `$PS1` and
+   `0x00006000`, the same `0x6000` the register reports — so the reading the
+   check was built for is unchanged.
+2. **The Makefile now refuses the link** if `nm -u` on the plugin binary shows
+   an undefined symbol matching `yc_|rbgpu|_rb_|Rembrandt|RBAMD|RBGPU`, and
+   deletes the binary. No KPI name matches those, so a hit is always ours.
+   Break-it check: a deliberate `yc_rlc_img_BREAK` reference **fails the build
+   with the symbol named**, and the restored tree builds.
+
+Release UUID **C46520CF** (dev AFF02C0A). Not yet booted.

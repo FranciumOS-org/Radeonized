@@ -19726,15 +19726,54 @@ void rbgpu_ring_probe_2hk(unsigned phase) {
                 unsigned nz = 0;
                 for (int i = 0; i < 1024; i++) if (dw[i]) nz++;
 
-                extern const uint8_t yc_rlc_img[];
-                auto yw = reinterpret_cast<const uint32_t *>(yc_rlc_img);
-                int ymatch = 1;
-                for (int i = 0; i < 8; i++) if (d[i] != yw[i]) { ymatch = 0; break; }
+                /* 3fxf: `ymatch` compares against the RLC payload SLICED
+                 * out of the embedded container, not against a separate
+                 * `yc_rlc_img` array - 3fxe deleted that array and left this
+                 * `extern` declaration behind, so the symbol stayed UNDEFINED
+                 * in the linked kext, the GOT slot came up holding whatever
+                 * the loader left in it (0xffffff8052a00000), and the
+                 * dereference below page-faulted 19.4 s into every accelerated
+                 * boot. `kmutil libraries` lists it as resolvable and says
+                 * nothing - rule 26, the search was the instrument.
+                 *
+                 * `ymatch` is a CODE now, not a bool (rule 14): the two ways
+                 * it can be unanswerable are distinct from a mismatch.
+                 *   1   the first eight dwords are our RLC payload
+                 *   0   they are not
+                 *  -1   no yellow_carp image is compiled into this build
+                 *  -2   the container would not slice (refusal in ysl) */
+                int ymatch = -1;
+                int ysl    = 0;
+#if RB_FW_YC
+                {
+                    extern const uint8_t  yc_rlc_file[];
+                    extern const uint32_t yc_rlc_file_len;
+                    uint32_t yoff = 0, ysize = 0;
+                    ysl = rb_fwhdr_payload(yc_rlc_file, yc_rlc_file_len,
+                                           &yoff, &ysize);
+                    if (ysl != RB_FWHDR_OK) {
+                        ymatch = -2;
+                    } else if (ysize < 32) {
+                        ymatch = -2;
+                        ysl    = RB_FWHDR_E_SHORT;
+                    } else {
+                        const uint8_t *yb = yc_rlc_file + yoff;
+                        ymatch = 1;
+                        for (int i = 0; i < 8; i++) {
+                            uint32_t yv = static_cast<uint32_t>(yb[i * 4 + 0])
+                                       | (static_cast<uint32_t>(yb[i * 4 + 1]) << 8)
+                                       | (static_cast<uint32_t>(yb[i * 4 + 2]) << 16)
+                                       | (static_cast<uint32_t>(yb[i * 4 + 3]) << 24);
+                            if (d[i] != yv) { ymatch = 0; break; }
+                        }
+                    }
+                }
+#endif
 
                 snprintf(n, sizeof(n),
-                         "pa=%llx sz=%x nz=%u/1024 ymatch=%d | "
+                         "pa=%llx sz=%x nz=%u/1024 ymatch=%d ysl=%d | "
                          "%08x %08x %08x %08x %08x %08x %08x %08x",
-                         bpa, bsz, nz, ymatch,
+                         bpa, bsz, nz, ymatch, ysl,
                          d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7]);
                 mp->release();
                 md->release();
@@ -19745,7 +19784,10 @@ void rbgpu_ring_probe_2hk(unsigned phase) {
         rbgpu_log("2jm: nz=0 means the RLC is pointed at an empty buffer and "
                   "the latch CANNOT set. ymatch=1 means our yellow_carp RLC "
                   "image is in place and the buffer is not the problem. "
-                  "ymatch=0 with nz>0 means something else is there.");
+                  "ymatch=0 with nz>0 means something else is there. "
+                  "ymatch=-1 means no yellow_carp image is in this build and "
+                  "-2 means the container would not slice, ysl naming the "
+                  "refusal - neither is a reading of the buffer.");
     }
 
     // 2jk (2026-10-19): the four RLC_HYP registers nobody has read.
