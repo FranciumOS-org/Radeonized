@@ -67962,3 +67962,57 @@ has to be read: the release binary carries those images with each container's
 whether that is redistributable. One `cat /lib/firmware/LICENSE.amdgpu` on any
 Linux machine settles it, and **a binary carrying them must not be published
 until it is.**
+
+## 3FXD — LICENSE.amdgpu retrieved, and the clause I was worried about does not exist
+
+Read from
+`https://gitlab.com/api/v4/projects/48890189/repository/files/LICENSES%2FLICENSE.amdgpu/raw?ref=main`.
+Four earlier attempts failed because the file **moved**: it is no longer at the
+repository root, it is in `LICENSES/`, and GitLab's own file view renders
+client-side so the browser pane shows nothing useful. The route that works is
+the API's raw-file endpoint with the path URL-encoded, after reading
+`default_branch` (`main`) and the numeric project id (48890189) from
+`/api/v4/projects/kernel-firmware%2Flinux-firmware`. Rule 26 in its plainest
+form: four "not found" results were an instrument failing, not a fact.
+
+**The grant:** *"Permission is hereby granted, free of any license fees, to any
+person obtaining a copy of this microcode (the 'Software'), to install,
+reproduce, copy and distribute copies, in binary form only, of the Software and
+to permit persons to whom the Software is provided to do the same"*, on two
+conditions — no reverse engineering, decompilation or disassembly of the
+microcode, and redistributions must reproduce the copyright notice, the
+permission notice and the disclaimers in the accompanying documentation or
+materials. Plus an "as is" warranty disclaimer, a US$10 liability cap, and a
+United States export-control notice.
+
+**There is no "without modification" clause.** 3fwc's blocker — *"it permits
+redistribution in binary form; these arrays carry each image with its
+0x100-byte container header stripped, which is a modification, and the exact
+clause decides it"* — rested on a clause I had remembered rather than read, and
+the file does not contain it. The thing the licence actually requires, and the
+thing this repository had never done, is **reproduce the notices**: there was
+no copy of `LICENSE.amdgpu` anywhere in the tree and no notice in the README.
+That is the obligation, and it was the one part nobody had looked at while four
+boots' worth of attention went to a clause that does not exist.
+
+Done: `third_party/LICENSE.amdgpu` carries the text verbatim, `third_party/README.md`
+carries the summary, the disclaimers and the export notice and states what the
+binary contains, and the README's licensing section is corrected — it had the
+"modification" claim and also claimed "nothing in the shipping configuration
+reads them", which boot 542's `yc_swapped 12` disproves.
+
+Nothing in this project reverse engineers, decompiles or disassembles the AMD
+microcode; the images are moved as opaque bytes. (The static analysis in
+`tools/re/` is aimed at Apple's binaries, which is a different question under a
+different licence and is not governed by this one.)
+
+**Still a judgment call, and it is the user's:** the licence grants
+distribution of *copies*, and what the arrays hold is each image's payload
+(offset 0x100, `ucode_size_bytes`) rather than the whole `.bin`. The payload
+bytes are bit-exact; the container header is absent. The stricter form is
+available at the cost of a refactor and a boot — `firmware/linux/` still holds
+all seven `.bin` files, so each array could carry a whole file and every use
+site could take an offset, which would make every distributed byte a verbatim
+file copy. The five RLC sub-images would become offsets into `yellow_carp_rlc.bin`
+rather than separate arrays, which is arguably cleaner than what is there now.
+Not done, because the licence does not require it.

@@ -226,10 +226,18 @@ anything else:
   it uses the image already present in the machine it is installed on.
 - The **AMD firmware images** from linux-firmware are transcribed into
   `src/plugin/fw_yellow_carp*.cpp` and are compiled into the plugin. They keep
-  AMD's own license (`LICENSE.amdgpu` in linux-firmware), and **whether that
-  license covers this use is not settled**: it permits redistribution in
-  binary form, and these arrays hold each image with its 0x100-byte container
-  header stripped, which is a modification. Settle that before publishing a
-  binary. `NOFW=1` builds without them and nothing in the shipping
-  configuration reads them — but see the open race in the next section, which
-  is why a release is not built that way yet.
+  AMD's own license, reproduced verbatim in
+  [`third_party/LICENSE.amdgpu`](third_party/LICENSE.amdgpu) as that license
+  requires, with the summary and the notices in
+  [`third_party/README.md`](third_party/README.md). It permits installing,
+  reproducing, copying and distributing the microcode **in binary form only**,
+  free of license fees, on three conditions: no reverse engineering,
+  decompilation or disassembly of the microcode, and reproduction of the
+  copyright notice, permission notice and disclaimers in the accompanying
+  materials — which is what those two files are. It sets **no condition about
+  distributing the files unmodified**; an earlier version of this section said
+  otherwise and was wrong. Nothing here disassembles the microcode: the images
+  are moved as opaque bytes.
+  `NOFW=1` builds without them, but **that build is not expected to
+  accelerate**: boot 542 measured `yc_swapped 12`, so the images are consumed
+  twelve times on an accelerated boot and are functionally required.
