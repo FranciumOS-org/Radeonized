@@ -67674,3 +67674,90 @@ run in interrupt context — and not diagnosed. Unexplained, one occurrence.
 the firmware-less build really loses the race, which is now two readable
 boots' work; order the HWLibs/accelerator sequence rather than winning it on
 timing; and AMD's `LICENSE.amdgpu`, still not retrieved.
+
+## 3FX — the race is n=2 and the firmware was never the ballast; the ordering fix goes in the peer, not the accelerator hook (boot 539)
+
+Boot 539, release build `77D9D5F4`, verified armed before anything was read:
+`armed 1`, `arm_why 0`, `vbios_src 1`, and `sentinel_cleared_by 1` — the 60 s
+timer, not 3fwd's new accelerator signal, which is itself the first reading of
+the boot: the accelerator never attached, so the signal never fired. Zero
+accelerator instances, no `Metal Support` line in System Profiler, panel alive
+on `RBAMDFramebuffer`.
+
+The log pins the failure to a single millisecond:
+
+```
+14:01:16.056  IOGraphicsAccelerator2::start(): configureDevice failed
+14:01:16.056  IOGraphicsAccelerator::start: Failure exit
+14:01:16.057  child AMDRadeonX6000_AMDRadeonHWServicesNavi published
+```
+
+and the driver state trace names the step:
+
+```
+accelStart_entry      : 1
+createHWHandler       : 1
+createHWInterface     : 0
+configureDevice_entry : 0
+```
+
+`2cn: accelerator start entered` is stamped 6604.7 ms; the first
+`HWLibs: hooked …` line is 6673 ms. The margin is **−68.3 ms**, against boot
+536's −67.8 ms. So this is the same failure twice, on two verified-armed
+boots, and 3fwc's n=1 becomes n=2.
+
+**The keep-the-firmware decision rests on nothing.** Boot 539 ran the release
+build *with* `fw_yellow_carp.cpp` and `fw_yellow_carp_rlc.cpp` compiled in —
+the 1.3 MB that 3fwc kept precisely because it was thought to win this race —
+and it lost by the same 68 ms. Every verified win (534, 538) was a development
+build and every verified loss (536, 539) a release build, and the only
+remaining difference between them is the 44 544-byte baked VBIOS, which is not
+a credible mechanism for 68 ms. What 3fwc measured as a 3 ms margin in three
+archived boots was never shown to be caused by the firmware images, and rule
+17 applies to my own earlier reading of it: two numbers moving together is not
+a mechanism.
+
+**3fwc's proposed fix would have deadlocked, and that was readable without a
+boot.** The plan was to wait, bounded, inside the `2cn` accelerator-start hook
+until the HWLibs patches landed. HWLibs' personality has
+`IOProviderClass = AMDRadeonX6000_AMDRadeonHWServicesInterface`, and
+`HWServicesNavi` *is* a `HWServicesInterface` — `ioreg -rd1 -c` on that class
+returns the Navi object itself, and `AMDRadeonX6800_AMDRadeonHWLibsX6800` sits
+in the tree as its direct child. IOKit therefore cannot match HWLibs until
+`HWServices::start` returns and registers, and the accelerator's start runs
+*inside* that start on the same thread — boot 539 shows thread `0:899` for the
+`configureDevice failed` line and for the `childPublished` that follows it one
+millisecond later. A wait in the hook would have held the only thread that can
+release the thing it is waiting for. The boot 3fwc budgeted for this is saved.
+
+**So the wait has to happen before HWServices starts at all, which puts it in
+the peer.** `RembrandtGPUPeer::start` now calls
+`OSKextLoadKextWithIdentifier("com.apple.kext.AMDRadeonX6800HWLibs")`
+immediately before it publishes `RBGPULoad` / `LoadHWServices`. The load is
+synchronous and Lilu's patcher callback fires inside it, so by the time the
+properties are published the HWLibs image is resident and every patch in
+`processHWLibs` has run. Loading the image also submits HWServices' own
+personalities, but those match on `LoadHWServices` and `RBGPULoad`, neither of
+which exists yet, so nothing starts early as a side effect. The kext's
+*IOService instance* is created by HWServices later and is irrelevant here:
+what `createHWInterface` needs is the patched `deviceTypeTable`, which lives in
+the image.
+
+The signal is `g_rb_hwlibs_patched`, set on the **last** line of
+`processHWLibs` so it means "every patch above has run" rather than "the
+callback was entered". The peer polls it with `IODelay` for at most 2000 ms —
+a flag that never comes up must not hold the boot — and publishes three
+numbers rather than one: `hwlibs_force_ret` (the `OSReturn`),
+`hwlibs_force_waits` (milliseconds spent waiting, so "already patched" and
+"timed out" are different readings) and `hwlibs_force_ok`. If the flag is
+still clear the log says so in as many words, because an unordered boot must
+not be mistaken for an ordered one that merely failed later.
+
+`_OSKextLoadKextWithIdentifier` resolves from `com.apple.kpi.libkern` in
+`BootKernelExtensions.kc` and `kmutil libraries` still reports **0** symbols
+from `SystemKernelExtensions.kc`, so the 2oz trap is clear. Development build
+`80DBE1CE`, release build `72DCC675`.
+
+**What this boot cannot say:** whether the ordering actually fixes the
+failure. That needs one armed boot on the new build, with
+`hwlibs_force_waits` and `hwlibs_force_ok` read before anything else.

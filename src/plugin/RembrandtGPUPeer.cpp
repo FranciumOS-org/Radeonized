@@ -10,6 +10,7 @@
 #include <libkern/c++/OSString.h>
 #include <libkern/c++/OSNumber.h>
 #include <libkern/c++/OSBoolean.h>
+#include <libkern/OSKextLib.h>   /* 3fx: OSKextLoadKextWithIdentifier */
 
 #include "RembrandtGPUPeer.hpp"
 #include "rb_defaults.h"
@@ -769,6 +770,59 @@ bool RembrandtGPUPeer::start(IOService *provider) {
                   "step, or `sudo tools/efi.sh vbios`.");
         rbgpu_diag_set_num("vbios_src", 0);
 #endif
+    }
+
+    /* 3fx: ORDER THE HWLIBS/ACCELERATOR SEQUENCE INSTEAD OF WINNING IT ON
+     * TIMING.
+     *
+     * HWServices spawns two children: HWLibs, by IOKit matching, and the
+     * accelerator, internally and synchronously inside its own start(). In
+     * boots 536 and 539 the accelerator entered start() ~68 ms BEFORE our
+     * HWLibs patch callback ran and died at createHWInterface with an
+     * unpatched deviceTypeTable - verified armed both times, state trace
+     * `createHWHandler 1 / createHWInterface 0 / configureDevice_entry 0`.
+     *
+     * Waiting inside the accelerator-start hook - 3fwc's proposal - would
+     * DEADLOCK. HWLibs' IOProviderClass is AMDRadeonX6000_AMDRadeonHWServices-
+     * Interface, which HWServicesNavi itself is, so IOKit cannot match HWLibs
+     * until HWServices::start RETURNS; the accelerator hook runs inside that
+     * start, on the same thread (boot 539: thread 0:899 for both the failure
+     * and the childPublished that follows it). So the wait has to happen
+     * BEFORE HWServices starts at all, which is here.
+     *
+     * Loading the kext image is what our patches need; its IOService instance
+     * is created by HWServices later and is irrelevant to this. Loading it now
+     * submits HWServices' personalities too, but those match on LoadHWServices
+     * / RBGPULoad, which this function has not published yet, so nothing
+     * starts early as a side effect.
+     *
+     * Rule 14: every path out says something, and the diag carries both the
+     * OSReturn and whether the patch flag actually came up. */
+    {
+        extern int rbgpu_hwlibs_patched(void);
+        OSReturn kr = OSKextLoadKextWithIdentifier("com.apple.kext.AMDRadeonX6800HWLibs");
+        rbgpu_diag_set_num("hwlibs_force_ret", (uint64_t)(uint32_t)kr);
+
+        /* The load is synchronous and Lilu's patcher callback fires inside it,
+         * so this poll should see the flag already set. It is bounded anyway:
+         * a flag that never comes up must not hold the boot, and the count is
+         * published so "0 waits" and "timed out" are different readings. */
+        uint32_t waits = 0;
+        while (!rbgpu_hwlibs_patched() && waits < 2000) {
+            IODelay(1000);   /* 1 ms, no sleep: this is a matching thread */
+            waits++;
+        }
+        rbgpu_diag_set_num("hwlibs_force_waits", waits);
+        rbgpu_diag_set_num("hwlibs_force_ok", rbgpu_hwlibs_patched() ? 1 : 0);
+        rbgpu_log("3fx: forced HWLibs load: OSReturn 0x%x, patched %d after "
+                  "%u ms of waiting (the diag line's own timestamp gives the "
+                  "absolute moment)",
+                  (unsigned)kr, rbgpu_hwlibs_patched(), waits);
+        if (!rbgpu_hwlibs_patched()) {
+            rbgpu_log("3fx: HWLibs is NOT patched and RBGPULoad is about to be "
+                      "published anyway - this boot is the unordered race "
+                      "again, and hwlibs_force_ret says why the load failed.");
+        }
     }
 
     pciDevice->setProperty("RBGPULoad", kOSBooleanTrue);

@@ -11268,6 +11268,16 @@ void rbgpu_autoload_flush_2jc(void) {
 static void rbgpu_route_autoload_2jc(KernelPatcher &patcher, size_t id,
                                      mach_vm_address_t address, size_t size);
 
+/* 3fx: the ordering signal. Set at the END of processHWLibs, so the peer can
+ * publish RBGPULoad knowing our HWLibs patches have actually applied rather
+ * than hoping they land first. Boots 536 and 539 both had the accelerator
+ * enter start() ~68 ms BEFORE this callback ran, and both died at
+ * createHWInterface with an unpatched deviceTypeTable. Read, never written,
+ * outside this function. */
+volatile int g_rb_hwlibs_patched = 0;
+
+int rbgpu_hwlibs_patched(void) { return g_rb_hwlibs_patched; }
+
 void RGPU::processHWLibs(KernelPatcher &patcher, size_t id, mach_vm_address_t address, size_t size) {
     rbgpu_log("Patching com.apple.kext.AMDRadeonX6800HWLibs");
     rbgpu_route_gvmwrite_2ie(patcher, id, address, size);
@@ -11339,6 +11349,13 @@ void RGPU::processHWLibs(KernelPatcher &patcher, size_t id, mach_vm_address_t ad
             rbgpu_log("H-SMU-1: failed to hook smu_init_function_pointer_list");
         }
     }
+
+    /* 3fx: last line of the function, so the flag means "every HWLibs patch
+     * above has run", not "the callback was entered". The peer waits on this
+     * before it publishes RBGPULoad. */
+    g_rb_hwlibs_patched = 1;
+    rbgpu_diag_set_num("hwlibs_patched", 1);
+    rbgpu_log("3fx: HWLibs patched - the accelerator may now be started");
 }
 
 // 2go: its own function, so the five RouteRequests do not sit on
