@@ -67306,3 +67306,38 @@ to accelerate is the failure this project cannot debug from inside.
 Not yet verified on hardware. The negative control is already in hand - this
 desktop boot reads signal 0 on both tests - and the positive is the next
 Recovery boot.
+
+### 3rec-b confirmed: boot 528, then Recovery
+
+Negative control first, which is the half that could regress. Boot 528 ran
+the gate build - `kmutil showloaded` reads
+`com.rembrandtgpu.plugin (1.0.0) 8DFDFA6B-C1D5-3BBF-9210-14735884E4CF`
+beside `com.rembrandtgpu.fb (0.1.0) B50C7750` (rule 15, every artifact the
+boot loads). The desktop came up accelerated, the log carries the engine
+`allocateMemoryResources` walk, `2bh buildCommand` and
+`2xw: sentinel cleared after 60000 ms`, so `rbgpu_recovery_boot()` answered
+"normal" and stood out of the way.
+
+Then the positive: Recovery came up **stock and complete**, in the user's
+words "wasnt accelerated but no need on recovery, it was all as it should be,
+wifi also working good". That is the `-rbgpuoff` boot they had already
+measured, now reached with no boot-arg - which is what the milestone was for,
+since a rescue that needs a boot-arg typed into a machine whose display is
+dark is not a rescue (rule 21).
+
+Two instrument notes, both mine.
+
+The check I handed the user, `ioreg -rl -c RembrandtGPUPeer | grep -i
+recovery`, matched `RBGPULog` - one of the log strings contains the word - so
+it printed a screenful and said nothing. Rule 26, in a command written to
+verify a rule-14 publish. Anchored form:
+`grep -E '^\s+"RBGPURecovery"'`.
+
+And that anchored form prints nothing on a normal boot anyway, because
+`rbgpu_diag_set_num("recovery", ...)` is called only inside the recovery
+branch. Same publish gap as `RBFBFsmArmed` in 310d: absence of the key is not
+a reading of 0. The affirmative evidence for the normal side is the loaded
+UUID plus an accelerated desktop, not the diag table. Publishing the 0
+unconditionally would cost a build and a boot and would buy nothing where it
+matters, because the Recovery boot has no display to read ioreg from - its
+verdict is whether the panel is taken, and it was.

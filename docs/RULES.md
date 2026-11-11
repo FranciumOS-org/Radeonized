@@ -889,13 +889,32 @@ disarm and everything not ours (**`wdt=-1` above all** — Apple's arg, needed b
 the default-on `-rbgpuforceenable`, and without it a frozen boot panics at 120 s
 with no SSH window).
 
-**RECOVERY AND THE INSTALLER BOOT STOCK (3rec).** The plugin declares
-`LiluAPI::AllowNormal` **alone**. `AllowInstallerRecovery` sat in the config
-from milestone 0, copied from a template and never reasoned about, and it is
-why Recovery hung with the progress bar filling forever — localised by the
-user in two trips (`rbgpu-arm=0` did **not** help, `-rbgpuoff` did, so it was
-the plugin before any feature gate). Recovery is the documented way back
-(`docs/CACHE-RECOVERY.md`), so it has to boot stock to be a rescue (rule 21).
+**RECOVERY AND THE INSTALLER BOOT STOCK (3rec-b). CONFIRMED ON HARDWARE.**
+Recovery hung with the progress bar filling forever — localised by the user in
+two trips (`rbgpu-arm=0` did **not** help, `-rbgpuoff` did, so it was the
+plugin before any feature gate; and rule 38 means the framebuffer had already
+declined the panel in the `arm=0` boot, so the framebuffer is eliminated).
+**3rec declared `LiluAPI::AllowNormal` alone and that was the WRONG LEVER** —
+the next Recovery boot logged our own `2xw: sentinel cleared` line with that
+build in the EFI (`04C138CE`, confirmed by `efi.sh status`). Lilu's run mode
+gates **Lilu's own callbacks only**; our `IOKitPersonalities` match
+`IOProviderClass IOResources` / `IOResourceMatch IOKit`, which exists in every
+boot, so IOKit starts `RembrandtGPUPeer` whatever Lilu decided. The
+declaration is still correct and stays. The **gate is
+`rbgpu_recovery_boot()`** in `RembrandtGPUPeer::start`, on the same line
+`-rbgpuoff` returns from: two OR'd `/chosen` signals, each with its
+normal-boot control measured — any of `boot-ramdmg-extents` / `container-dmg`
+/ `root-dmg` / `auth-root-dmg` present (**none** on a normal boot), or
+`boot-file` naming `com.apple.recovery.boot` / `macOS Install Data` (a normal
+boot reads `...KernelCollections\BootKernelExtensions.kc`). Both name sets
+were read out of the **EFI's own `Lilu.kext` binary** with `strings`, so we
+test what Lilu tests. Fails **safe towards normal**. Publishes
+`RBGPURecovery` — but **only in the recovery branch**, so its absence on a
+desktop boot is a publish gap, not a reading (rule 14). **Boot 528 on
+`8DFDFA6B`: desktop accelerates, gate inert; Recovery then came up stock and
+complete — unaccelerated, which is what it should be, Wi-Fi included.**
+Recovery is the documented way back (`docs/CACHE-RECOVERY.md`), so it has to
+boot stock to be a rescue (rule 21).
 
 **Rescue, in order of bluntness:**
 - `sudo nvram rbgpu-arm=0` — accelerator off next boot (and the framebuffer
