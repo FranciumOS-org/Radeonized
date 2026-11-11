@@ -16,6 +16,9 @@ final class AppModel: ObservableObject {
     @Published var reportText = ""
     @Published var reportSent: String?
 
+    /// Live view of the operation that is running (or the last one that ran).
+    let progress = OperationProgress()
+
     var selected: EFIVolume? { volumes.first { $0.id == selectedVolume } }
     var owner: String { NSUserName() }
 
@@ -35,8 +38,11 @@ final class AppModel: ObservableObject {
     // MARK: Release
 
     func fetchRelease() async {
-        await perform("Downloading the latest release") {
-            let bundle = try await ReleaseFetcher.fetchLatest()
+        let progress = self.progress
+        await perform("Downloading the latest Radeonized", slug: "download") {
+            let bundle = try await ReleaseFetcher.fetchLatest { event in
+                Task { @MainActor in progress.apply(event) }
+            }
             self.release = bundle
             return "Verified \(bundle.tag): SHA-256 matched. Unpacked to \(bundle.folder.path)"
         }
@@ -47,11 +53,11 @@ final class AppModel: ObservableObject {
     func installEFI() async {
         guard let release, let volume = selected else { return }
         let backup = BackupStore.newFolder(.efi)
-        await perform("Installing the EFI plugin on \(volume.id)") {
+        await perform("Radeonizing the EFI on \(volume.id)", slug: "efi-install") {
             let out = try await Privileged.run([
                 "efi-install", volume.id, release.efiKext.deletingLastPathComponent().path,
                 backup.path, self.owner,
-            ])
+            ], progress: self.progress)
             return out + "\nReboot, then check the plugin with Diagnostics."
         }
     }
@@ -59,14 +65,14 @@ final class AppModel: ObservableObject {
     func installFramebuffer() async {
         guard let release else { return }
         let backup = BackupStore.newFolder(.framebuffer)
-        await perform("Installing the framebuffer into the system collection") {
+        await perform("Radeonizing the framebuffer", slug: "fb-install") {
             // The UUID is read here, from the binary we are about to install, and
             // the helper checks it inside the collection after the write.
             let binary = release.framebufferKext.appendingPathComponent("Contents/MacOS/RBAMDFramebuffer")
             let uuid = try MachOUUID.read(from: binary)
             return try await Privileged.run([
                 "fb-install", release.framebufferKext.path, backup.path, self.owner, uuid,
-            ])
+            ], progress: self.progress)
         }
     }
 
@@ -79,12 +85,12 @@ final class AppModel: ObservableObject {
                 status = "No EFI partition selected."
                 return
             }
-            await perform("Restoring the EFI from \(item.date)") {
-                try await Privileged.run(["efi-restore", device, item.url.path, self.owner])
+            await perform("Restoring the EFI from \(item.date)", slug: "efi-restore") {
+                try await Privileged.run(["efi-restore", device, item.url.path, self.owner], progress: self.progress)
             }
         case .framebuffer:
-            await perform("Restoring the framebuffer collection from \(item.date)") {
-                try await Privileged.run(["fb-restore", item.url.path, self.owner])
+            await perform("Restoring the framebuffer from \(item.date)", slug: "fb-restore") {
+                try await Privileged.run(["fb-restore", item.url.path, self.owner], progress: self.progress)
             }
         }
     }
@@ -113,14 +119,19 @@ final class AppModel: ObservableObject {
 
     // MARK: Helpers
 
-    private func perform(_ title: String, _ work: () async throws -> String) async {
+    private func perform(_ title: String, slug: String, _ work: () async throws -> String) async {
         busy = true
         defer { busy = false }
+        progress.begin(title: title, slug: slug)
         status = title + "…"
         do {
-            status = try await work()
+            let message = try await work()
+            status = message
+            progress.finish(success: true, message: message)
         } catch {
-            status = "Failed: \(error.localizedDescription)"
+            let text = error.localizedDescription
+            status = "Failed: \(text)"
+            progress.finish(success: false, message: text)
         }
         await refresh()
     }

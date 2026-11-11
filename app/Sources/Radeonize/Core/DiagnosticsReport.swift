@@ -36,7 +36,19 @@ enum DiagnosticsReport {
 
         section("Newest panic report (first 200 lines)", latestPanic())
 
+        section("Last Radeonize operation log (newest 300 lines)", latestOperationLog())
+
         return redact(out)
+    }
+
+    private static func latestOperationLog() -> String {
+        let files = (try? FileManager.default.contentsOfDirectory(
+            at: OperationLog.folder, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
+        guard let newest = files.filter({ $0.pathExtension == "log" }).max(by: { modified($0) < modified($1) }),
+              let text = try? String(contentsOf: newest, encoding: .utf8) else {
+            return "no operation has run yet"
+        }
+        return "\(newest.lastPathComponent)\n" + lastLines(text, 300)
     }
 
     private static func filter(_ text: String, _ needles: [String]) -> String {

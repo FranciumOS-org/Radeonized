@@ -62,26 +62,28 @@ struct ContentView: View {
     @State private var pending: PendingAction?
 
     var body: some View {
-        Form {
-            compatibilitySection
-            releaseSection
-            installSection
-            backupSection
-            reportSection
+        VStack(spacing: 0) {
+            // Outside the form, so the log can still be copied while a step runs.
+            ProgressCard(progress: model.progress)
 
-            if !model.status.isEmpty {
-                Section("Status") {
-                    Text(model.status)
-                        .font(.system(.caption, design: .monospaced))
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+            Form {
+                compatibilitySection
+                releaseSection
+                installSection
+                backupSection
+                reportSection
+
+                if !model.status.isEmpty {
+                    Section("Status") {
+                        Text(model.status)
+                            .font(.system(.caption, design: .monospaced))
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
                 }
             }
-        }
-        .formStyle(.grouped)
-        .disabled(model.busy)
-        .overlay(alignment: .topTrailing) {
-            if model.busy { ProgressView().controlSize(.small).padding() }
+            .formStyle(.grouped)
+            .disabled(model.busy)
         }
         .alert(item: $pending) { action in
             Alert(

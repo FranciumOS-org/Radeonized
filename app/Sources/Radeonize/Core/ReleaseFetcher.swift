@@ -14,7 +14,11 @@ struct ReleaseBundle: Hashable {
 enum ReleaseFetcher {
     static let repo = "FranciumOS-org/Radeonized"
 
-    static func fetchLatest() async throws -> ReleaseBundle {
+    /// `report` gets the four steps and the download's byte progress as they happen.
+    static func fetchLatest(report: @escaping @Sendable (ProgressEvent) -> Void) async throws -> ReleaseBundle {
+        let total = 4
+        report(.step(1, total, "Asking GitHub for the latest release"))
+
         let api = URL(string: "https://api.github.com/repos/\(repo)/releases/latest")!
         var request = URLRequest(url: api)
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
@@ -46,13 +50,19 @@ enum ReleaseFetcher {
             throw RadeonizeError.message("The .sha256 file is not a SHA-256 checksum.")
         }
 
-        let (downloaded, _) = try await URLSession.shared.download(from: zipAsset.browser_download_url)
+        report(.step(2, total, "Downloading \(zipAsset.name)"))
+        let downloaded = try await Downloader.file(from: zipAsset.browser_download_url) { fraction, text in
+            report(.sub(fraction, text))
+        }
+
+        report(.step(3, total, "Checking the SHA-256 against the release"))
         let zipData = try Data(contentsOf: downloaded, options: .mappedIfSafe)
         let actual = SHA256.hash(data: zipData).map { String(format: "%02x", $0) }.joined()
         guard actual == expected else {
             throw RadeonizeError.message("Checksum mismatch: the download does not match the release's .sha256. Nothing was installed.")
         }
 
+        report(.step(4, total, "Unpacking the two kexts"))
         let folder = try cacheFolder(for: release.tag_name)
         let zipPath = folder.appendingPathComponent("release.zip")
         try? FileManager.default.removeItem(at: zipPath)
@@ -84,6 +94,72 @@ enum ReleaseFetcher {
             return url
         }
         return nil
+    }
+}
+
+/// Downloads one file and reports how far along it is, as bytes arrive.
+private final class Downloader: NSObject, URLSessionDownloadDelegate {
+    private let onProgress: @Sendable (Double?, String) -> Void
+    private var continuation: CheckedContinuation<URL, Error>?
+    private var session: URLSession?
+
+    private init(onProgress: @escaping @Sendable (Double?, String) -> Void) {
+        self.onProgress = onProgress
+    }
+
+    static func file(from url: URL, onProgress: @escaping @Sendable (Double?, String) -> Void) async throws -> URL {
+        let downloader = Downloader(onProgress: onProgress)
+        return try await withCheckedThrowingContinuation { continuation in
+            downloader.continuation = continuation
+            let session = URLSession(configuration: .default, delegate: downloader, delegateQueue: nil)
+            downloader.session = session
+            session.downloadTask(with: url).resume()
+        }
+    }
+
+    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
+                    didWriteData bytesWritten: Int64, totalBytesWritten: Int64,
+                    totalBytesExpectedToWrite: Int64) {
+        let done = ByteCountFormatter.string(fromByteCount: totalBytesWritten, countStyle: .file)
+        if totalBytesExpectedToWrite > 0 {
+            let all = ByteCountFormatter.string(fromByteCount: totalBytesExpectedToWrite, countStyle: .file)
+            let fraction = min(1, Double(totalBytesWritten) / Double(totalBytesExpectedToWrite))
+            onProgress(fraction, "\(done) of \(all)")
+        } else {
+            onProgress(nil, "\(done) so far")
+        }
+    }
+
+    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
+                    didFinishDownloadingTo location: URL) {
+        let code = (downloadTask.response as? HTTPURLResponse)?.statusCode ?? 0
+        guard code == 200 else {
+            finish(.failure(RadeonizeError.message("The download answered \(code).")))
+            return
+        }
+        // The system deletes `location` when this method returns, so move it first.
+        let kept = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".zip")
+        do {
+            try FileManager.default.moveItem(at: location, to: kept)
+            finish(.success(kept))
+        } catch {
+            finish(.failure(error))
+        }
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        if let error { finish(.failure(error)) }
+    }
+
+    private func finish(_ result: Result<URL, Error>) {
+        guard let continuation else { return }
+        self.continuation = nil
+        session?.finishTasksAndInvalidate()
+        session = nil
+        switch result {
+        case .success(let url): continuation.resume(returning: url)
+        case .failure(let error): continuation.resume(throwing: error)
+        }
     }
 }
 

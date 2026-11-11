@@ -7,20 +7,37 @@ enum Privileged {
         Bundle.module.url(forResource: "radeonize-helper", withExtension: "sh")
     }
 
-    static func run(_ args: [String]) async throws -> String {
+    /// Runs one helper command. While it runs, the helper's log file is read every
+    /// 0.3 s so the window can show each step as it starts.
+    @MainActor
+    static func run(_ args: [String], progress: OperationProgress) async throws -> String {
         guard let helper = helperURL?.path else {
             throw RadeonizeError.message("The helper script is missing from this build.")
         }
-        let command = (["/bin/sh", quote(helper)] + args.map(quote)).joined(separator: " ")
+        guard let logFile = progress.logFile?.path else {
+            throw RadeonizeError.message("No log file for this step.")
+        }
+        progress.note("Waiting for your administrator password…")
+
+        let parts = ["RADEONIZE_PROGRESS=\(quote(logFile))", "/bin/sh", quote(helper)] + args.map(quote)
+        let command = parts.joined(separator: " ")
         // AppleScript string: escape backslashes and double quotes.
         let escaped = command
             .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"")
         let script = "do shell script \"\(escaped)\" with administrator privileges"
 
+        let poller = Task { @MainActor in
+            while !Task.isCancelled {
+                progress.poll()
+                try? await Task.sleep(nanoseconds: 300_000_000)
+            }
+        }
         let result = await Task.detached(priority: .userInitiated) {
             Shell.run("/usr/bin/osascript", ["-e", script])
         }.value
+        poller.cancel()
+        progress.poll()
 
         guard result.status == 0 else {
             let message = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
