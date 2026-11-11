@@ -67939,3 +67939,26 @@ arguments either way.
 ordered in code, with the ordering published as three numbers, and the
 firmware images are no longer load-bearing for it — `NOFW=1` can be tested on
 its own merits rather than as a timing crutch.
+
+### 3FXC, two corrections to the entry above (same boot, 542)
+
+**The 2 GB VRAM reading is withdrawn as a finding.** The user had changed the
+allocation themselves. It is not a consequence of the single accelerator
+instance and there was never anything to explain.
+
+**"The firmware images are no longer load-bearing" was two claims and only one
+of them is true.** They are not load-bearing for the *race* — that stands, and
+is the whole point of 3fxc. They are load-bearing for the *driver*: this
+accelerated boot reads `yc_swapped 12` and `rlcsub_on 1`, so the yellow_carp
+images were substituted twelve times through `_IpiSetFwEntry`, feeding the PSP
+Rembrandt firmware where Apple would supply Navi 21's. 3fwc's "gating them
+changes nothing" is wrong as written; what it could support is that gating them
+does not change the *timing*.
+
+So **`NOFW=1` is predicted to break acceleration** and is not a cheap boot. It
+cannot be used to make the licence question disappear. AMD's `LICENSE.amdgpu`
+has to be read: the release binary carries those images with each container's
+0x100-byte header stripped, which is a modification, and the clause decides
+whether that is redistributable. One `cat /lib/firmware/LICENSE.amdgpu` on any
+Linux machine settles it, and **a binary carrying them must not be published
+until it is.**
