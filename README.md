@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <b>Graphics for the AMD Radeon 680M (Rembrandt) on macOS.</b><br>
+  <b>Graphics for the AMD Radeon Rembrandt on macOS.</b><br>
   A kernel extension, a Lilu plugin and a framebuffer for Rembrandt APUs, booted through OpenCore.
 </p>
 
