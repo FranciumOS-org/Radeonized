@@ -84,7 +84,8 @@ firmware set to iGPU-only (Eco) mode. Everything is recorded in
 
 It checks the Mac is a Rembrandt machine on a supported macOS, downloads the
 latest release and verifies its checksum before unpacking, lists the EFI
-partitions and marks the one holding OpenCore, then installs both kexts by
+partitions and marks the one holding OpenCore, reads this machine's own VBIOS
+out of its ACPI tables and puts it in the plugin, then installs both kexts by
 their two different mechanisms — the plugin into `EFI/OC/Kexts/` with
 `config.plist` edited to load it after Lilu, and the framebuffer into
 `/Library/Extensions/` with the auxiliary kernel collection rebuilt.
@@ -99,19 +100,55 @@ Reboot when it finishes.
 
 ## Building
 
-You need Xcode (or its Command Line Tools) and two sources that are not in
+You need Xcode (or its Command Line Tools) and three sources that are not in
 this repository:
 
 - **MacKernelSDK** headers and libraries, placed at `third_party/MacKernelSDK`.
 - **Lilu**, placed at `third_party/Lilu`. Lilu is BSD-3-Clause.
+- One Linux header, which `sh tools/fetch_linux_ref.sh` fetches into
+  `third_party/linux-ref` pinned to v6.6 and checked against its digest. The
+  host tests include it unmodified so they check the power-management code
+  against the kernel's own struct definitions rather than a transcription of
+  them.
 
 ```sh
-make kext tools     # build the probe kext and the host tests
-make fbkext         # build the framebuffer kext
-make plugin         # build the Lilu plugin (needs Lilu)
+sh tools/fetch_linux_ref.sh   # the one kernel header the tests include
+make kext tools               # build the probe kext and the host tests
+make fbkext                   # build the framebuffer kext
+make plugin                   # build the Lilu plugin (needs Lilu)
+make plugin RELEASE=1         # the same plugin, carrying nobody else's bytes
 ```
 
 `make kext` runs the host tests first. Never load a kext whose host tests fail.
+
+`RELEASE=1` is what a published binary is built with, and it builds into
+`build-release/` so it can never pick up an object file from a development
+build. It leaves out two things that are not this project's to hand on: the
+AMD firmware images the experimental PSP path can substitute, which nothing
+in the shipping configuration reads, and the board's VBIOS. Everything else
+is identical.
+
+## The VBIOS
+
+Apple's graphics stack wants the card's video BIOS as an `ATY,bin_image`
+property, and on an APU there is no ROM to read it from — the image lives in
+an ACPI table called VFCT, which is why a released build ships without one
+and picks up the machine's own instead.
+
+The app does this step by itself. By hand, it is:
+
+```sh
+sudo tools/efi.sh sysreport-on     # ask OpenCore to dump the ACPI tables, then reboot
+sudo tools/efi.sh vbios            # pull the image out of the VFCT table
+python3 tools/vbios_plist.py build-release/out/RembrandtGPU.kext firmware/680m-vbios.rom
+python3 tools/vbios_plist.py build-release/out/RembrandtGPU.kext --check
+```
+
+That writes the image into the kext's own `Info.plist`, where IOKit hands it
+to the driver on the next boot. A development build already has one compiled
+in, and the bundle's copy wins over it, so either can be swapped for the
+other without rebuilding. The peer logs which of the two it used, and says so
+plainly when it has neither.
 
 ## Installing manually
 
@@ -149,6 +186,8 @@ Recovery always boots stock, so it stays available as a way back.
 - `src/plugin/` — `RembrandtGPU`, the Lilu plugin that boots from the OpenCore EFI.
 - `src/common/` — shared C code used by the kexts, the plugin and the host tests.
 - `tools/` — build helpers, install scripts (`efi.sh`, `fbinstall.sh`) and probes.
+- `tests/data/` — the IP discovery table read off the GPU, which two of the
+  host tests check the code's register segments against.
 - `app/` — Radeonize, a macOS app that checks the Mac and installs the kexts.
 - `docs/PLAN.md`, `docs/JOURNAL.md`, `docs/RULES.md` — the plan, the measured
   record, and the engineering rules the code follows.
@@ -157,5 +196,18 @@ Every register offset in the code cites the Linux header it was taken from.
 
 ## License
 
-Code in this repository is MIT licensed. See `LICENSE`.
-Third-party code (Lilu, MacKernelSDK) keeps its own license.
+Code in this repository is MIT licensed. See `LICENSE`. That covers the code
+and nothing else, and the build is arranged so that it does not have to cover
+anything else:
+
+- **Lilu** and **MacKernelSDK** are fetched separately and keep their own
+  licenses. Lilu is BSD-3-Clause.
+- The one **Linux** header the tests include is GPL-2.0-only, is fetched by
+  `tools/fetch_linux_ref.sh` rather than copied in here, and is used by the
+  host tests only. Register offsets quoted in comments cite the kernel header
+  they came from.
+- The **VBIOS** belongs to the board vendor. A released build carries none;
+  it uses the image already present in the machine it is installed on.
+- The **AMD firmware images** from linux-firmware are not in this repository
+  and are not in a release build. A development build can compile them in for
+  the experimental PSP work, and they keep AMD's own license.

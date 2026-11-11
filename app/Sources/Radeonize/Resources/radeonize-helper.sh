@@ -7,6 +7,8 @@
 #   efi-restore  DEVICE BACKUP OWNER                 put the saved EFI state back
 #   fb-install   KEXT BACKUP OWNER UUID              install RBAMDFramebuffer.kext into the aux collection
 #   fb-restore   BACKUP OWNER                        put the saved aux collection (and kext) back
+#   sysreport    on|off DEVICE BACKUP OWNER          ask OpenCore to dump the ACPI tables
+#   vfct-dump    DEVICE DEST OWNER                   copy the dumped VFCT table off the EFI
 #
 # Uses only tools in the base system. No Xcode or Command Line Tools: the app
 # reads the framebuffer's UUID itself and passes it in, and config.plist is
@@ -174,6 +176,13 @@ efi_install() {
         restore_efi_files "$backup" "$oc"
         die "the copied kext does not match the staged binary; the EFI has been put back as it was"
     fi
+    # The VBIOS travels in Info.plist, so the binary matching is no longer
+    # enough: a short write there would leave the driver with no VBIOS and
+    # nothing would say so until the next boot.
+    if ! cmp -s "$kext/Contents/Info.plist" "$oc/Kexts/RembrandtGPU.kext/Contents/Info.plist"; then
+        restore_efi_files "$backup" "$oc"
+        die "the copied Info.plist does not match the staged one; the EFI has been put back as it was"
+    fi
 
     step 7 8 "Adding RembrandtGPU.kext to config.plist after Lilu"
     if ! edit_config "$oc/config.plist" add; then
@@ -324,6 +333,68 @@ fb_restore() {
     echo "restored the framebuffer state from $backup. Reboot to take effect."
 }
 
+# --- the VBIOS ---------------------------------------------------------------
+#
+# A released RembrandtGPU.kext carries no video BIOS: the image belongs to the
+# board vendor, so the installer uses the one already on this machine. There is
+# no ROM to read on an APU and macOS publishes no ACPI tables in the IO
+# registry here, so the only route is OpenCore's own SysReport, which dumps the
+# tables to the EFI partition on the next boot. Hence two verbs and one extra
+# reboot between them: `sysreport on`, reboot, `vfct-dump`, `sysreport off`.
+
+sysreport() {
+    state="$1"; dev="$2"; backup="$3"; owner="$4"
+    case "$state" in on) want=true ;; off) want=false ;; *) die "sysreport takes on or off" ;; esac
+
+    mount_efi "$dev"
+    check_efi
+    config="$MP/EFI/OC/config.plist"
+
+    mkdir -p "$backup"
+    if [ ! -f "$backup/config.plist" ]; then
+        cp "$config" "$backup/config.plist"
+        echo "$dev" > "$backup/efi-device"
+        echo "saved the EFI state to $backup"
+    fi
+
+    plutil -type Misc.Debug "$config" >/dev/null 2>&1 \
+        || die "$dev: config.plist has no Misc -> Debug dictionary"
+    plutil -replace Misc.Debug.SysReport -bool "$want" "$config" \
+        || die "could not set Misc -> Debug -> SysReport"
+    plutil -lint "$config" >/dev/null || die "config.plist no longer lints; restore from $backup"
+
+    got="$(plutil -extract Misc.Debug.SysReport raw "$config" 2>/dev/null || echo '?')"
+    case "$got:$want" in true:true|1:true|false:false|0:false) ;; *)
+        die "SysReport reads back as '$got' after asking for '$want'" ;;
+    esac
+    sync
+    chown -R "$owner" "$backup"
+    echo "SysReport is $state on $dev"
+}
+
+vfct_dump() {
+    dev="$1"; dest="$2"; owner="$3"
+
+    mount_efi "$dev"
+    acpi="$MP/SysReport/ACPI"
+    [ -d "$acpi" ] || acpi="$MP/EFI/SysReport/ACPI"
+    if [ ! -d "$acpi" ]; then
+        die "no SysReport/ACPI folder on $dev. Turn SysReport on and reboot once, so OpenCore dumps the ACPI tables."
+    fi
+    # The newest dump, by name: OpenCore numbers repeats.
+    table="$(ls "$acpi"/VFCT*.aml 2>/dev/null | sort | tail -1)"
+    if [ -z "$table" ]; then
+        echo "tables present: $(ls "$acpi" 2>/dev/null | tr '\n' ' ')" >&2
+        die "no VFCT*.aml in $acpi. This board may expose its VBIOS some other way."
+    fi
+
+    mkdir -p "$(dirname "$dest")"
+    cp "$table" "$dest"
+    cmp -s "$table" "$dest" || die "the copy of $(basename "$table") does not match the original"
+    chown "$owner" "$dest"
+    echo "copied $(basename "$table") ($(wc -c < "$dest" | tr -d ' ') bytes) to $dest"
+}
+
 # --- dispatch ----------------------------------------------------------------
 
 cmd="${1:-}"
@@ -353,6 +424,14 @@ case "$cmd" in
         [ $# -eq 2 ] || die "usage: fb-restore BACKUP OWNER"
         check_path "$1"; check_owner "$2"
         fb_restore "$@" ;;
+    sysreport)
+        [ $# -eq 4 ] || die "usage: sysreport on|off DEVICE BACKUP OWNER"
+        check_path "$2"; check_path "$3"; check_owner "$4"
+        sysreport "$@" ;;
+    vfct-dump)
+        [ $# -eq 3 ] || die "usage: vfct-dump DEVICE DEST OWNER"
+        check_path "$2"; check_owner "$3"
+        vfct_dump "$@" ;;
     *)
         die "unknown command '$cmd'" ;;
 esac

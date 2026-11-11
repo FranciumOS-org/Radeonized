@@ -32,6 +32,35 @@ the standard macOS administrator prompt. The helper is the only root code path. 
 - verifies (the EFI config lints; the UUID of the framebuffer is inside the live collection),
 - rolls back if verification fails.
 
+## The VBIOS step (not wired into the UI yet)
+
+A released `RembrandtGPU.kext` carries no video BIOS. The image belongs to the board
+vendor, so the installer has to use the one already on the machine it is installing on.
+There is no ROM to read on an APU, and macOS publishes no ACPI tables in the IO registry
+on this platform, so the only route is OpenCore's own SysReport, which dumps the tables
+to the EFI partition on the next boot. That costs one extra reboot.
+
+`Core/VFCT.swift` and two new helper verbs do the work; what is missing is the UI that
+sequences them. The order is:
+
+1. `radeonize-helper.sh sysreport on DEVICE BACKUP OWNER`, then ask for a reboot.
+2. After that boot, `radeonize-helper.sh vfct-dump DEVICE DEST OWNER` copies the dumped
+   table off the EFI.
+3. `VFCT.image(fromTable:named:)` takes the Rembrandt image out of it, and
+   `VFCT.inject(_:intoKextAt:)` writes it into the staged kext's `Info.plist` and reads
+   it back to confirm.
+4. `radeonize-helper.sh sysreport off DEVICE BACKUP OWNER`.
+5. Install as usual, and reboot.
+
+`VFCT.readImage(fromKextAt:)` says whether a staged or installed kext already carries an
+image, so steps 1 to 4 can be skipped when it does — which is also how to tell a
+development build, which has one compiled in, from a release build.
+
+The parser was checked against the real table from a TUF A15: it returns the same 44544
+bytes as `tools/vfct.py`, sha256 `27ed5802…`, round-trips through the plist, and refuses
+an empty, a truncated and a non-VFCT input. What has **not** been checked is that the
+kernel reads the property — that needs a boot.
+
 ## Before you ship
 
 - Replace the placeholder `endpoint` in `Sources/Radeonize/Core/DiagnosticsReport.swift`

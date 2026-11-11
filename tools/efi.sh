@@ -269,7 +269,14 @@ vbios)
     out="$root/firmware"
     mkdir -p "$out"
     cp "$vfct" "$out/VFCT.aml"
-    python3 "$root/tools/vfct.py" "$out/VFCT.aml" 1002:1681 "$out/680m-vbios.rom"
+    # 3id: both Rembrandt IDs. 1681 is the 680M/660M, 164d the plain one; a
+    # table carries only its own board's, so try each and report both failures.
+    if ! python3 "$root/tools/vfct.py" "$out/VFCT.aml" 1002:1681 "$out/680m-vbios.rom" &&
+       ! python3 "$root/tools/vfct.py" "$out/VFCT.aml" 1002:164d "$out/680m-vbios.rom"; then
+        echo "no 1002:1681 and no 1002:164d image in $out/VFCT.aml." >&2
+        python3 "$root/tools/vfct.py" "$out/VFCT.aml" >&2 || true
+        exit 1
+    fi
     shasum -a 256 "$out/680m-vbios.rom"
     chown -R "$user" "$out"
     backup
