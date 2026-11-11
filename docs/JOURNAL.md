@@ -67415,3 +67415,17 @@ badges are drawn by a helper that never loads `AMDRadeonX6000GLDriver` they
 are not an OpenGL surface at all, and they are a different defect from 3gl,
 living where `mtlk2` already runs. Unmeasured: which process and which API
 draws them.
+
+**3gl-f, the process map.** Steam running normally, `vmmap` per pid:
+`steam_osx` and one `Steam Helper` map **AMDRadeonX6000MTLDriver only**; ONE
+`Steam Helper` maps **both GL and MTL**; four more map neither. So the single
+`glswz: GL driver at ...` line per injected run was not a miss - exactly one
+process loads the GL image, and it is the one we hooked. That process maps
+Metal too (CEF/ANGLE can raster through either backend in one process), which
+reconciles the whole set of readings: the page content answers the GL chooser
+(`nox` fixes it, `log` breaks it) while the badges answer nothing we moved
+there. **Candidate: the badges are Metal-side**, in that process or shared in
+from the MTL-only helper as an IOSurface - and the Metal cave is ON this boot,
+so they would be a case its table does not cover, not an unpatched path.
+Untested; the discriminator is whether disarming the Metal cave changes them
+at all, which is the same inert-dial check `2 -> 27` just paid for.
