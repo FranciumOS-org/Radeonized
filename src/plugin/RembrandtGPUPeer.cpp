@@ -21,7 +21,21 @@
 // Defined with the rest of the arming gate, far below; called from start()
 // before anything reads an NVRAM key for a decision.
 static uint32_t rbgpu_gen_migrate(void);
+#if RB_VBIOS_BAKED
 #include "vbios_data.h"
+#endif
+
+/* 3fw: Linux's check_atom_bios() floor, and Apple's cosGetVbiosRomImage
+ * check: an option ROM at least 0x49 bytes long starting 0x55 0xAA. Enough
+ * to refuse a truncated or mistyped plist value; the ATOM table pointer is
+ * validated by the consumer, not here. */
+static bool rbgpu_vbios_plausible(OSData *d) {
+    if (!d || d->getLength() < 0x49) {
+        return false;
+    }
+    auto b = static_cast<const uint8_t *>(d->getBytesNoCopy());
+    return b != nullptr && b[0] == 0x55 && b[1] == 0xAA;
+}
 
 #define super IOService
 
@@ -719,10 +733,42 @@ bool RembrandtGPUPeer::start(IOService *provider) {
         name->release();
     }
 
-    auto vbios = OSData::withBytes(vbios_data, vbios_data_size);
-    if (vbios) {
+    /* 3fw: the board's VBIOS, which Apple's stack reads as `ATY,bin_image`.
+     * A release build bakes none in. The installer extracts the image from
+     * the machine's own ACPI VFCT table and writes it into this kext's
+     * Info.plist, so it arrives here as this service's own property and the
+     * only copy that ever moves is the one already on the owner's board.
+     * A build with RB_VBIOS_BAKED still carries the development image, and
+     * the bundle property wins over it so one can be swapped for the other
+     * with no rebuild. */
+    OSData *vbios = OSDynamicCast(OSData, getProperty("ATY,bin_image"));
+    if (vbios && rbgpu_vbios_plausible(vbios)) {
         pciDevice->setProperty("ATY,bin_image", vbios);
-        vbios->release();
+        rbgpu_log("Peer: ATY,bin_image from the bundle, %u bytes",
+                  vbios->getLength());
+        rbgpu_diag_set_num("vbios_src", 1);
+    } else {
+        if (vbios) {
+            rbgpu_log("Peer: the bundle's ATY,bin_image is not an option ROM "
+                      "(%u bytes); ignoring it", vbios->getLength());
+        }
+#if RB_VBIOS_BAKED
+        auto baked = OSData::withBytes(vbios_data, vbios_data_size);
+        if (baked) {
+            pciDevice->setProperty("ATY,bin_image", baked);
+            baked->release();
+            rbgpu_log("Peer: ATY,bin_image from the build, %zu bytes",
+                      vbios_data_size);
+            rbgpu_diag_set_num("vbios_src", 2);
+        }
+#else
+        /* 2eh: absence is not a result. Say it, so a boot with no VBIOS is
+         * never mistaken for one where the image was rejected downstream. */
+        rbgpu_log("Peer: NO ATY,bin_image published - this build bakes none "
+                  "in and the bundle carries none. Run the installer's VBIOS "
+                  "step, or `sudo tools/efi.sh vbios`.");
+        rbgpu_diag_set_num("vbios_src", 0);
+#endif
     }
 
     pciDevice->setProperty("RBGPULoad", kOSBooleanTrue);

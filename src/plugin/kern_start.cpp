@@ -258,7 +258,7 @@ static gc_set_fw_entry_info_fn_t        orig_gc_set_fw_entry_info           = nu
 // initialiser. Absence is not a result (2eh): it logs either way, so a boot
 // where the arg is off cannot be mistaken for one where the swap failed.
 static int g_rb_2jp_on = -1;
-static bool rbgpu_2jp_enabled(void) {
+__attribute__((unused)) static bool rbgpu_2jp_enabled(void) {
     if (g_rb_2jp_on < 0) {
         g_rb_2jp_on = rbgpu_arg("-rbgpurlcsub") ? 1 : 0;
         rbgpu_log("2jp: RLC sub-image substitution %s - ids 26/27/28/29/30, "
@@ -2872,6 +2872,11 @@ static uint8_t hooked_IpiSetFwEntry(void *instance, void *fw_entry) {
         // but whether it accepts a larger image for these two entries is
         // unknown. -rbgpurlcsub gates all five so a bad outcome is one
         // boot-arg away from reverted.
+#if RB_FW_YC
+        /* 3fw: the yellow_carp images are a build-time option. A release
+         * build omits src/plugin/fw_yellow_carp*.cpp, so this swap compiles
+         * out with them; the PSP hardware path it feeds is a dry run unless
+         * -rbgpupsphw, so nothing in the shipping configuration reads it. */
         extern const uint8_t yc_rlc_srlist_cntl_img[];
         extern const uint8_t yc_rlc_srlist_gpm_img[];
         extern const uint8_t yc_rlc_srlist_srm_img[];
@@ -2926,6 +2931,7 @@ static uint8_t hooked_IpiSetFwEntry(void *instance, void *fw_entry) {
             rbgpu_log("_IpiSetFwEntry YC-SWAP id=%u -> img=%p size=0x%x", d[0], yc_img, yc_size);
             rbgpu_diag_inc("yc_swapped");
         }
+#endif /* RB_FW_YC */
         // 2al: skip Navi21 TAP_DELAYS (ids 31-35: GLOBAL, SE0-SE3). Boot 35
         // (first -rbgpupsphw boot) proved the PSP itself initializes and loads
         // its own firmware on this PSP 13, but _psp_np_fw_load then died on

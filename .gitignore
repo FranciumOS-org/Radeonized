@@ -2,3 +2,5 @@ build/
 logs/
 .DS_Store
 firmware/
+third_party/
+build-release/

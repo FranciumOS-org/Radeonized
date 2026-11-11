@@ -13,7 +13,16 @@ PROJ_ROOT := .
 MKSDK     := $(PROJ_ROOT)/third_party/MacKernelSDK
 COMMON    := $(PROJ_ROOT)/src/common
 KEXT_SRC  := $(PROJ_ROOT)/src/kext
+# 3fw: RELEASE=1 builds the plugin with neither the yellow_carp firmware
+# images nor a baked-in VBIOS, so the only bytes in the artifact are ours.
+# It builds into its own tree, because the objects differ: a shared one would
+# hand a release a RembrandtGPUPeer.o that still carries the development ROM.
+RELEASE   ?= 0
+ifeq ($(RELEASE),1)
+BUILD_DIR := $(PROJ_ROOT)/build-release
+else
 BUILD_DIR := $(PROJ_ROOT)/build
+endif
 OUT       := $(BUILD_DIR)/out
 
 SDK   := $(shell xcrun --show-sdk-path 2>/dev/null)
@@ -99,12 +108,19 @@ all: kext tools
 # rb_smu13_test.c checks rb_smu13's table layouts against Linux's header in
 # docs/linux-ref. rb_smu13.o (kernel flags) is built only to prove it compiles
 # freestanding; nothing links it yet.
+# 3fw: the one GPL-2.0 kernel header the hosttest includes unmodified. It is
+# not redistributed here; tools/fetch_linux_ref.sh fetches it into
+# third_party/. A checkout from before the split still has docs/linux-ref.
+LINUX_REF := $(firstword $(wildcard third_party/linux-ref) $(wildcard docs/linux-ref) third_party/linux-ref)
+
 HOSTTEST_SRCS := tools/hosttest/hosttest.c tools/hosttest/drr_test.c tools/hosttest/smu13_test.c tools/hosttest/agdc_test.c tools/hosttest/otg_test.c tools/hosttest/hubp_test.c tools/hosttest/hpd_test.c tools/hosttest/pg_test.c tools/hosttest/dig_test.c tools/hosttest/enc_test.c tools/hosttest/digbe_test.c tools/hosttest/dpaltq_test.c tools/hosttest/aux_test.c tools/hosttest/dpcd_test.c tools/hosttest/dpalt_test.c tools/hosttest/dio_test.c tools/hosttest/dpcspipe_test.c tools/hosttest/strenc_test.c tools/hosttest/strprog_test.c tools/hosttest/phy_test.c tools/hosttest/phyfsm_test.c tools/hosttest/backlight_test.c tools/hosttest/defaults_test.c tools/hosttest/dmub_test.c tools/hosttest/osver_test.c tools/hosttest/retire_test.c tools/hosttest/gpuname_test.c tools/hosttest/dpdto_test.c tools/hosttest/dptx_test.c tools/hosttest/otgprog_test.c
 
 hosttest: $(COMMON_SRCS) $(COMMON_HDRS) $(HOSTTEST_SRCS) $(BUILD_DIR)/kext/rb_smu13.o tools/hosttest/agdc_lookup_test.cpp src/plugin/rbgpu_agdc_lookup.hpp tools/hosttest/otg_kernel_test.cpp tools/hosttest/otg_kernel_shim.hpp src/plugin/rbgpu_agdc_otg.cpp
 hosttest: tools/hosttest/fb_vbl_test.cpp tools/hosttest/fb_vbl_shim.hpp src/fbkext/RBAMDFramebufferVBL.cpp
 	@mkdir -p $(OUT)
-	@$(CC) $(HOST_CFLAGS) -Idocs/linux-ref -Isrc/plugin $(HOSTTEST_SRCS) $(COMMON_SRCS) -o $(OUT)/hosttest
+	@test -f $(LINUX_REF)/smu13_driver_if_yellow_carp.h || \
+	    { echo "missing third_party/linux-ref: run 'sh tools/fetch_linux_ref.sh'" >&2; exit 1; }
+	@$(CC) $(HOST_CFLAGS) -I$(LINUX_REF) -Isrc/plugin $(HOSTTEST_SRCS) $(COMMON_SRCS) -o $(OUT)/hosttest
 	@$(OUT)/hosttest $(wildcard tests/data/*.bin)
 	@$(CXX) $(filter-out -std=gnu11,$(HOST_CFLAGS)) -std=c++17 -Isrc/plugin tools/hosttest/agdc_lookup_test.cpp -o $(OUT)/agdc_lookup_test
 	@$(OUT)/agdc_lookup_test
@@ -425,11 +441,19 @@ fbkext: hosttest $(FBKEXT_OBJS) $(FBKEXT_SRC)/Info.plist
 LILU        := $(PROJ_ROOT)/third_party/Lilu/Lilu
 PLUGIN_SRC  := $(PROJ_ROOT)/src/plugin
 PLUGIN_VER  := 1.0.0
-PLUGIN_DEFS := -DPRODUCT_NAME=RembrandtGPU -DMODULE_VERSION=$(PLUGIN_VER) -DPLUGIN_VERSION='"$(PLUGIN_VER)"'
+ifeq ($(RELEASE),1)
+PLUGIN_FW_OBJS :=
+PLUGIN_FW_DEFS := -DRB_FW_YC=0 -DRB_VBIOS_BAKED=0
+else
+PLUGIN_FW_OBJS := $(BUILD_DIR)/plugin/fw_yellow_carp.o $(BUILD_DIR)/plugin/fw_yellow_carp_rlc.o
+PLUGIN_FW_DEFS := -DRB_FW_YC=1 -DRB_VBIOS_BAKED=1
+endif
+PLUGIN_DEFS := -DPRODUCT_NAME=RembrandtGPU -DMODULE_VERSION=$(PLUGIN_VER) -DPLUGIN_VERSION='"$(PLUGIN_VER)"' $(PLUGIN_FW_DEFS)
 PLUGIN_OBJS := $(BUILD_DIR)/plugin/kern_start.o $(BUILD_DIR)/plugin/RembrandtGPUPeer.o \
                $(BUILD_DIR)/plugin/rbgpu_agdc.o $(BUILD_DIR)/plugin/rbgpu_agdc_otg.o \
                $(BUILD_DIR)/plugin/plugin_start.o $(BUILD_DIR)/plugin/kmod_info.o \
-               $(BUILD_DIR)/plugin/rb_smu13.o $(BUILD_DIR)/plugin/rb_discovery.o $(BUILD_DIR)/plugin/fw_yellow_carp.o $(BUILD_DIR)/plugin/fw_yellow_carp_rlc.o
+               $(BUILD_DIR)/plugin/rb_smu13.o $(BUILD_DIR)/plugin/rb_discovery.o \
+               $(PLUGIN_FW_OBJS)
 VBIOS_ROM   := firmware/680m-vbios.rom
 VBIOS_HDR   := $(BUILD_DIR)/plugin/gen/vbios_data.h
 PLUGIN_BUNDLE := $(OUT)/RembrandtGPU.kext
@@ -445,7 +469,9 @@ $(BUILD_DIR)/plugin/%.o: $(PLUGIN_SRC)/%.cpp
 $(VBIOS_HDR): $(VBIOS_ROM) tools/vbios_header.py
 	@python3 tools/vbios_header.py $< $@
 
+ifneq ($(RELEASE),1)
 $(BUILD_DIR)/plugin/RembrandtGPUPeer.o: $(VBIOS_HDR)
+endif
 
 $(BUILD_DIR)/plugin/plugin_start.o: $(LILU)/Library/plugin_start.cpp
 	@mkdir -p $(dir $@)
