@@ -68168,3 +68168,29 @@ change cannot see a dangling reference of ours.
    with the symbol named**, and the restored tree builds.
 
 Release UUID **C46520CF** (dev AFF02C0A). Not yet booted.
+
+## 3FXF CONFIRMED ON HARDWARE — boot 546, and 3fxe is verified with it
+
+Plugin **C46520CF** from the EFI, `armed` 1, `arm_why` 0, boot **546**, no
+panic. The dangling `extern` was the whole of it.
+
+**3fxe's runtime slicing is now measured, not predicted:** `yc_swapped` **12**,
+`yc_rlc_swapped` **5**, **`yc_refused` absent**. The embedded containers feed
+the PSP the same twelve pointers the 80 000 lines of hex arrays did.
+`hwlibs_gate_ms` **6375**, `ok` 1, `regsvc` 1 — 3fxc's gate on its second boot
+(542 and 546), which is rule 44's two samples. `Metal Support: Metal 3`,
+`AMD Radeon 680M`.
+
+**And the fix bought the first ever reading of 2jm, which is not one of the
+three it was built for.** `rbgpu-blbuf b=546 pa=87f800000 sz=6000
+nz=1024/1024 ymatch=0 ysl=0 | ffffffff x8`. `ysl` 0 means the container
+sliced, so `ymatch` 0 is a real compare against the right bytes — but a whole
+page of `0xffffffff` is what an **unbacked physical read** returns, not
+microcode. **`nz` is degenerate at exactly the value it reports**: "every
+dword non-zero" cannot be told from "every dword reads as all ones", so
+2jm's documented `nz>0, ymatch=0` outcome ("something else is there") is not
+supported by this sample. Rule 48's form — a statistic that the consumer
+cannot act on. Not chased: 2jm is a dormant read-only probe, this chip loads
+by PSP autoload (`RLC_CNTL` 1, running) rather than RLC backdoor autoload, and
+nothing in the accelerated path reads that buffer. If it is ever re-opened the
+fix is an all-ones term beside `nz`, not more of `nz`.
