@@ -14,11 +14,23 @@
 > - `docs/EXTERNAL-DISPLAY.md` — the one open goal, in full.
 > - `docs/PLAN.md`, `docs/APPLE-STACK.md`, `docs/UPSTREAM.md`.
 
+**A SESSION OF REBOOTS NEEDS `-rbgpunosentinel` (3fwd).** A boot shorter than
+60 s leaves the latch, so the NEXT boot comes up stock with `arm_why 6` — and
+a stock boot is indistinguishable from a broken one unless `arm_why` is read.
+Rebooting to check a result, and a panic, both count as short. Five boots on
+2026-11-11 were spent this way and three were misread as driver failures,
+mine included. **Read `armed`/`arm_why` BEFORE concluding anything about a
+boot**, and add `-rbgpunosentinel` for the duration of a reboot session (2xx
+did the same). `sudo tools/efi.sh bootarg add -rbgpunosentinel`.
+
 Goal: graphics acceleration for the Radeon 680M (Rembrandt, `1002:1681` rev 0a,
 GC 10.3.3 / DCN 3.1.2 / PSP+SMU 13.0.x / SDMA 5.2.3) on macOS Ventura and up
 (`src/common/rb_osver.h` holds what is *measured* per OS, which is not the same
-as what loads). Machine: ASUS TUF A15 FA507NU (Ryzen 7 7735HS), **macOS 26.7.2
-(25G332, Darwin 25.6.0)**, OpenCore, csr-active-config **0xA43**.
+as what loads). Machine: ASUS TUF A15 FA507NU (Ryzen 7 7735HS), **macOS 26.7.3
+(25G342, Darwin 25.6.0)** since 2026-11-11 01:31 — the card said 26.7.2
+(25G332) for most of that day and nobody checked (rule 41); the kernel build is
+unchanged, userspace and the AMD kexts are not. OpenCore, csr-active-config
+**0x0A67** as read by `efi.sh status` on 2026-11-11.
 
 **IT WORKS.** An armed boot is an accelerated Mac: Metal bit-exact,
 `AMD Radeon 680M` / 4 GB / Metal 3 in System Profiler, `RBAMDFramebuffer`

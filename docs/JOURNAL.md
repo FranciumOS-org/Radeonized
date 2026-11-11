@@ -67620,3 +67620,57 @@ the Chromium and Android mirrors served nothing. It permits redistribution in
 binary form; these arrays carry each image with its 0x100-byte container
 header stripped, which is a modification, and the exact clause decides it.
 **A binary carrying them must not be published until that is settled.**
+
+## 3FWD — five boots lost to the sentinel, and the 3 ms race is n=1, not n=3 (boots 534-538)
+
+Boot 538 is accelerated: `armed 1`, `arm_why 0`, `sentinel 2`
+(`-rbgpunosentinel`), two accelerator instances, `Metal Support: Metal 3`,
+`vbios_src 2` on the development build `E1107B8C`. **macOS 26.7.3 (25G342),**
+so the whole stack works on the point release.
+
+**What actually consumed the afternoon was the sentinel, not the driver.** A
+boot shorter than 60 s leaves the latch and the next boot comes up stock. A
+reboot to check a result is a short boot. So is a panic. The session was:
+
+| boot | state | what it was read as |
+|---|---|---|
+| 534 | armed, accelerated | fine |
+| 535 | **stock**, `arm_why 6` | "unaccelerated" |
+| 536 | armed, failed at `createHWInterface` | "unaccelerated" — the one real datum |
+| 537 | **stock**, `arm_why 6` | "unaccelerated" |
+| 538 | armed, accelerated | fine |
+
+Three of those readings were stock boots in which the plugin deliberately did
+nothing, and two of them were counted — by me — as evidence that a build was
+broken. `-rbgpunosentinel` ended it in one boot, exactly as 2xx did for the
+same reason.
+
+**So 3fwc's evidence is n=1.** I wrote "three consecutive boots lost it by
+67.8 ms" in the commit message and the journal entry. Only boot **536** was
+ever verified armed; the other two were never checked for `arm_why` and are
+now known to have been stock or unverifiable. Boot 536's timestamps and state
+trace stand on their own — the patch really did land 68 ms after the
+accelerator gave up — but the claim of a deterministic, repeated failure does
+not. **The keep-the-firmware decision rests on one armed boot.** Rule 33, in
+its plainest form: establish which boot it is before reading anything, and I
+read three boots without establishing that any of them had armed.
+
+**The configuration changed under the session and nobody checked.** macOS
+updated to 26.7.3 (25G342) at 01:31 on 2026-11-11; `CLAUDE.md` said 26.7.2
+(25G332) all day and I read the card instead of the machine (rule 41). Boot
+536's own log carried the warning —
+`2qo: WindowServer - IOPresentment vendor constant NOT placed (bytes did not
+match - an OS update moves this site)` — and I read that line without acting
+on it. It does not explain 534 vs 536 (both are after the update), but every
+Apple offset this plugin uses is now on an OS nobody has re-measured.
+
+One panic, `Kernel-2026-11-11-134308`: `thread_invoke: preemption_level 1,
+possible cause: blocking while holding a spinlock, or within interrupt
+context @sched_prim.c:3033`. Kexts in the backtrace are `IOACPIFamily` and
+`IOSMBusFamily`; **ours are not named**. Not an exoneration — our code does
+run in interrupt context — and not diagnosed. Unexplained, one occurrence.
+
+**Open, in order:** re-measure the Apple offsets on 26.7.3; settle whether
+the firmware-less build really loses the race, which is now two readable
+boots' work; order the HWLibs/accelerator sequence rather than winning it on
+timing; and AMD's `LICENSE.amdgpu`, still not retrieved.
