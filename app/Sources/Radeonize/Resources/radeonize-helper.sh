@@ -184,7 +184,7 @@ fb_rollback() {
         rm -f "$LIVE" || true
     fi
     rm -rf "$FBEXT"
-    if [ "$(cat "$1/had-ext")" = yes ]; then
+    if [ "$(cat "$1/had-ext" 2>/dev/null || echo yes)" = yes ] && [ -d "$1/RBAMDFramebuffer.kext" ]; then
         cp -R "$1/RBAMDFramebuffer.kext" "$FBEXT" || true
         chown -R root:wheel "$FBEXT" || true
     fi
@@ -236,7 +236,9 @@ fb_install() {
         || fb_fail "the dry-run collection does not carry $uuid" "$backup"
     echo "dry run carries $uuid"
 
-    # Real write, then verify the UUID inside the live collection.
+    # Real write, then verify the UUID inside the live collection. The directory
+    # is created if it is missing, so a Mac with no aux collection is not an error.
+    mkdir -p "$(dirname "$LIVE")"
     kmutil create -n aux -a x86_64 --allow-missing-kdk -B "$BOOT" -S "$SYS" -A "$LIVE" -r /Library/Extensions >/dev/null 2>&1 || true
     kmutil inspect -B "$LIVE" --show-kext-uuids 2>/dev/null | grep -qiF "$uuid" \
         || fb_fail "the live collection does not carry $uuid" "$backup"
