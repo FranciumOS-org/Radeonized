@@ -1,0 +1,15 @@
+name = "radeonize-reports"
+main = "src/index.js"
+compatibility_date = "2026-01-01"
+
+# Reports are served only from the custom domain below, so the admin page is
+# always behind the Access application for that hostname.
+workers_dev = false
+routes = [
+  { pattern = "reports.example.com", custom_domain = true }
+]
+
+# Create the bucket once: npx wrangler r2 bucket create radeonize-reports
+[[r2_buckets]]
+binding = "REPORTS"
+bucket_name = "radeonize-reports"
