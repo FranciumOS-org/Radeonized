@@ -67341,3 +67341,37 @@ UUID plus an accelerated desktop, not the diag table. Publishing the 0
 unconditionally would cost a build and a boot and would buy nothing where it
 matters, because the Recovery boot has no display to read ioreg from - its
 verdict is whether the panel is taken, and it was.
+
+### 3id: the second Rembrandt device ID
+
+Rembrandt has TWO PCI device IDs and this tree matched one. Linux added both
+in the same July 2021 patch, under one chip:
+
+    {0x1002, 0x164D, ..., CHIP_YELLOW_CARP|AMD_IS_APU},
+    {0x1002, 0x1681, ..., CHIP_YELLOW_CARP|AMD_IS_APU},
+
+`pci.ids` names `1002:1681` "Rembrandt [Radeon 680M]" and `1002:164d` plain
+"Rembrandt", with no marketing name attached. So `164D` is NOT a SKU - not a
+620M, not anything - it is a second id for the same die, and a board carrying
+it matched none of our three Info.plists, so the kext simply never loaded
+there.
+
+Widened `IOPCIMatch` to `0x16811002 0x164d1002` in all eight personalities:
+six in `src/plugin/Info.plist`, one in `src/fbkext`, one in `src/kext`.
+
+**This is a match for hardware nobody in this project has seen**, and it is
+stated that way in the release notes rather than implied to be tested. The
+argument for it, before the release: the two ids are the same silicon and the
+same IP generation, every segment base, register offset and IP version we use
+is derived FROM THE CHIP rather than from the id, and the SKU name is already
+geometry-driven (`rb_gpuname.h`: 12 CU -> 680M, 6 CU -> 660M), so a `164D`
+board needs no extra code to name itself. The argument against is rule 47 -
+concluding something for a configuration never established - and it is
+answered by the recovery path rather than by reasoning: the boot sentinel
+makes a boot that does not survive 60 s come up stock with no command typed,
+and `-rbgpuoff` is the documented rescue. A blocked id produces no evidence at
+all; a matched one produces a recoverable boot.
+
+Nothing here can be measured on this machine, which reports `1681`. The
+hosttest passes and all three bundles carry both ids; that is a check of the
+plists, not of the hardware.
