@@ -68296,3 +68296,61 @@ because `$(PRODUCT_NAME)` is simultaneously the `IOClass`, the
 
 Release archive `Radeonized-3br.zip`, sha256 `d25b9903…`, both binaries
 **`cmp`-identical** to the ones boot 547 ran.
+
+## 3VB-B — macOS HAS THE CALL, AND IT IS A DICTIONARY LOOKUP. 3vb's 0xC0000 IS DEMOTED.
+
+3vb went down `amdgpu_get_bios()`'s fallback chain without first asking
+whether macOS exposes the table. It does. `nm` on
+`/System/Library/KernelCollections/BootKernelExtensions.kc`:
+
+    ffffff800147acda T __ZN23AppleACPIPlatformExpert16getACPITableDataEPKcj
+    ffffff800147adb6 T __ZN23AppleACPIPlatformExpert16setACPITableDataEPKcjP6OSData
+    ffffff8001476140 T __ZN23AppleACPIPlatformExpert17publishACPITablesEv
+
+**`T`, defined, not imported** — rule 1 satisfied. My own earlier reading
+(`VFCT` appears 0 times in `ioreg -l -w0`) proved only that nothing
+*publishes* it and I read it as proof that nothing can *fetch* it: the
+recurring error's "read the evidence already in hand" form again, one
+milestone after 3vb was written.
+
+**Disassembled in full** (`tools/re/kc_extract.py` then `otool -tV`,
+`build/re/acpi.dis`), 0xdc bytes, and it is simpler than the name suggests:
+
+    OSData *getACPITableData(const char *sig, uint32_t instance)
+        if (!sig)                 return NULL;
+        if (strlen(sig) != 4)     return NULL;   // cmpq $0x4, %rax
+        if (!this->[0x150])       return NULL;   // the table cache
+        char key[32];
+        instance ? snprintf(key, 32, "%4.4s-%d", sig, instance)
+                 : snprintf(key, 32, "%4.4s",    sig);
+        return OSDynamicCast(OSData,
+                 this->[0x150]->vtable[0x208](this->[0x150], key));
+
+So it is an **`OSDictionary::getObject` by a 4-character key** against a cache
+the expert built at init, with an `OSDynamicCast` on the way out. Three
+consequences:
+
+1. **`"VFCT"` is exactly 4 characters** and `instance` 0 gives the bare key.
+2. **A miss is a NULL, not a hazard.** No mapping, no register, no side
+   effect — the worst case is a clean refusal, which is what makes this a safe
+   probe rather than an experiment.
+3. **Rule 42: the dictionary owns the OSData.** The cast is borrowed, no
+   retain, so we copy the bytes and never touch the object. This is the shape
+   that panicked 2y1.
+
+The instance is `IOService::getPlatform()`, which on this machine *is* the
+`AppleACPIPlatformExpert`, so there is no lookup to get wrong.
+
+**What this does NOT establish:** whether `"VFCT"` is a key in that cache.
+`publishACPITables()` decides, and it has not been read. That is the one open
+question and it costs one boot, because the answer is a NULL or an OSData.
+
+**3vb's `0x000C_0000` shadow stays as the fallback and keeps its own argument**
+(`pci_fixup_video()` rewrites `PCI_ROM_RESOURCE` to it, which is what
+`amdgpu_read_bios()` reads on an APU). Its weakness is now stated: the shadow
+is written by a *legacy* BIOS, and OpenCore boots pure UEFI, so on this
+machine it may simply be empty. Both routes go in the SAME build so one boot
+asks both questions with each other as the control — a NULL from one and an
+ATOM image from the other is a result either way, and 2jm's all-ones read of
+an unbacked physical page in boot 547 is the precedent that the fallback's map
+does not fault.
