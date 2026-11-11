@@ -67886,3 +67886,56 @@ other. That is the question the next boot asks.
 
 Development build `FBE03F69`, release `B216DB5E`. `kmutil libraries` reports 0
 from `SystemKernelExtensions.kc`, `Info.plist` names IOGraphicsFamily 0 times.
+
+## 3FXC CONFIRMED ON HARDWARE — the gate held 6225 ms and the boot is accelerated (boot 542)
+
+Boot 542, release build `B216DB5E`, read before anything was claimed:
+
+```
+armed 1   arm_why 0   sentinel 2   vbios_src 1
+hwlibs_gate_ms      6225
+hwlibs_gate_ok      1
+hwlibs_gate_regsvc  1
+hwlibs_patched      1
+dev_type_patched    1
+accelerator instances 1
+Metal Support: Metal 3
+sentinel_cleared_by 2
+```
+
+**The ordering fix works.** The gate withheld `LoadAccelerator` for 6225 ms,
+published it once `rbgpu_hwlibs_patched()` came up, re-matched, and our
+accelerator instance started on a patched HWLibs. This is the first boot in
+this line where the sequence was *ordered* rather than won: nothing about it
+depends on which of two asynchronous children of HWServices happens to arrive
+first.
+
+**Two things only this boot could settle.**
+
+Our accelerator personality **starts alone**. There is **one** instance, not
+the two every previous accelerated boot had, because Apple's internal
+accelerator still entered start() ~66 ms before the patches and still died at
+`createHWInterface`. It detached and ours came up regardless. The question
+3fxc's entry left open — "whether an accelerator instance of ours can start
+when Apple's internal one has already failed and detached" — is answered yes.
+
+`registerService()` was **load-bearing**, and `hwlibs_gate_regsvc 1` says so
+in the same sample as the 6225 ms wait. The publish happened well after the
+node's matching had settled, which is exactly the condition boot 541 proved
+inert without the re-match.
+
+`sentinel_cleared_by 2` is 3fwd's accelerator signal firing for the first
+time: the latch cleared on attach rather than on the 60 s timer, so a
+deliberate reboot from here costs nothing.
+
+**One reading to carry forward, not chased here:** System Profiler reports
+**VRAM (Total) 2 GB**, where accelerated boots have reported 4 GB. The obvious
+candidate is that the 4 GB label came from the second accelerator instance
+this boot does not have, but that is a candidate and not a mechanism — no
+measurement here discriminates it, and `-rbgpufbvram` was not in this boot's
+arguments either way.
+
+**What is now closed:** the HWLibs/accelerator race, open since 3fwc. It is
+ordered in code, with the ordering published as three numbers, and the
+firmware images are no longer load-bearing for it — `NOFW=1` can be tested on
+its own merits rather than as a timing crutch.

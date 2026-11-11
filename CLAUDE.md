@@ -32,6 +32,16 @@ as what loads). Machine: ASUS TUF A15 FA507NU (Ryzen 7 7735HS), **macOS 26.7.3
 unchanged, userspace and the AMD kexts are not. OpenCore, csr-active-config
 **0x0A67** as read by `efi.sh status` on 2026-11-11.
 
+**THE HWLIBS RACE IS ORDERED (3fxc, boot 542).** HWServices spawns two
+asynchronous children — HWLibs by IOKit matching, its own accelerator
+internally — and Apple's accelerator enters `start()` 65-68 ms before our
+HWLibs patches apply, dying at `createHWInterface`. **Ours waits instead:**
+`LoadAccelerator` is withheld until `rbgpu_hwlibs_patched()`, then published
+**with `registerService()`** (a property set after matching has settled starts
+nothing — boot 541). Read `hwlibs_gate_ms` / `hwlibs_gate_ok` /
+`hwlibs_gate_regsvc`. An accelerated boot now has **one** accelerator
+instance, not two.
+
 **IT WORKS.** An armed boot is an accelerated Mac: Metal bit-exact,
 `AMD Radeon 680M` / 4 GB / Metal 3 in System Profiler, `RBAMDFramebuffer`
 owning the panel, Apple's `AMDRadeonX6000` compositing for it, ~91-140 fps,
