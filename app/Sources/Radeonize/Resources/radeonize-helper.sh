@@ -3,10 +3,14 @@
 #
 # The app calls it through one administrator prompt per step:
 #
-#   efi-install  DEVICE STAGE BACKUP OWNER   add RembrandtGPU.kext to the EFI after Lilu
-#   efi-restore  DEVICE BACKUP OWNER         put the saved EFI state back
-#   fb-install   STAGE BACKUP OWNER          install RBAMDFramebuffer.kext into the aux collection
-#   fb-restore   BACKUP OWNER                put the saved aux collection (and kext) back
+#   efi-install  DEVICE STAGE BACKUP OWNER           add RembrandtGPU.kext to the EFI after Lilu
+#   efi-restore  DEVICE BACKUP OWNER                 put the saved EFI state back
+#   fb-install   KEXT BACKUP OWNER UUID              install RBAMDFramebuffer.kext into the aux collection
+#   fb-restore   BACKUP OWNER                        put the saved aux collection (and kext) back
+#
+# Uses only tools in the base system. No Xcode or Command Line Tools: the app
+# reads the framebuffer's UUID itself and passes it in, and config.plist is
+# edited with plutil.
 #
 # Each step saves what it is about to replace, writes, and verifies before it
 # returns. The logic follows tools/efi.sh and tools/fbinstall.sh in the
@@ -50,39 +54,58 @@ check_efi() {
     [ -f "$MP/EFI/OC/config.plist" ] || die "$DEV has no EFI/OC/config.plist; it is not an OpenCore EFI"
 }
 
-# edit_config PATH add|remove: touches only the RembrandtGPU entry in Kernel -> Add.
-edit_config() {
-    /usr/bin/python3 - "$1" "$2" <<'PY'
-import os, plistlib, sys
-path, op = sys.argv[1], sys.argv[2]
-BUNDLE = "RembrandtGPU.kext"
-ENTRY = {
-    "Arch": "x86_64",
-    "BundlePath": BUNDLE,
-    "Comment": "RembrandtGPU (Radeon 680M)",
-    "Enabled": True,
-    "ExecutablePath": "Contents/MacOS/RembrandtGPU",
-    "MaxKernel": "",
-    "MinKernel": "",
-    "PlistPath": "Contents/Info.plist",
+# config.plist helpers. Each uses plutil only; a missing key or index makes plutil
+# exit non-zero, which is how the loops below find the end of Kernel -> Add.
+add_count() {   # CONFIG -> number of entries in Kernel -> Add
+    i=0
+    while plutil -type "Kernel.Add.$i" "$1" >/dev/null 2>&1; do i=$((i+1)); done
+    echo "$i"
 }
-with open(path, "rb") as f:
-    cfg = plistlib.load(f)
-lst = cfg["Kernel"]["Add"]
-def hits(bundle):
-    return [i for i, e in enumerate(lst) if isinstance(e, dict) and e.get("BundlePath") == bundle]
-for i in reversed(hits(BUNDLE)):
-    del lst[i]
-if op == "add":
-    lilu = [i for i in hits("Lilu.kext") if lst[i].get("Enabled")]
-    if not lilu:
-        sys.exit("no enabled Lilu.kext in Kernel -> Add")
-    lst.insert(lilu[0] + 1, dict(ENTRY))
-tmp = path + ".radeonize"
-with open(tmp, "wb") as f:
-    plistlib.dump(cfg, f, sort_keys=False)
-os.replace(tmp, path)
-PY
+bundle_at() {   # CONFIG INDEX -> BundlePath of that entry, or empty
+    plutil -extract "Kernel.Add.$2.BundlePath" raw -o - "$1" 2>/dev/null || true
+}
+enabled_at() {  # CONFIG INDEX -> true or false, or empty
+    plutil -extract "Kernel.Add.$2.Enabled" raw -o - "$1" 2>/dev/null || true
+}
+
+# edit_config CONFIG add|remove: touches only the RembrandtGPU entry in Kernel -> Add.
+edit_config() {
+    cfg="$1"; op="$2"; tmp="$cfg.radeonize"
+    cp "$cfg" "$tmp"
+
+    # 1. Drop our entries, highest index first so the lower indices stay valid.
+    n="$(add_count "$tmp")"
+    i=$((n - 1))
+    while [ "$i" -ge 0 ]; do
+        if [ "$(bundle_at "$tmp" "$i")" = "RembrandtGPU.kext" ]; then
+            plutil -remove "Kernel.Add.$i" "$tmp"
+        fi
+        i=$((i - 1))
+    done
+
+    # 2. For add, place the entry right after the first enabled Lilu.kext.
+    if [ "$op" = add ]; then
+        n="$(add_count "$tmp")"
+        lilu=""
+        i=0
+        while [ "$i" -lt "$n" ]; do
+            if [ -z "$lilu" ] && [ "$(bundle_at "$tmp" "$i")" = "Lilu.kext" ] && [ "$(enabled_at "$tmp" "$i")" = true ]; then
+                lilu="$i"
+            fi
+            i=$((i + 1))
+        done
+        if [ -z "$lilu" ]; then
+            rm -f "$tmp"
+            echo "radeonize: no enabled Lilu.kext in Kernel -> Add" >&2
+            return 1
+        fi
+        plutil -insert "Kernel.Add.$((lilu + 1))" -xml \
+            '<dict><key>Arch</key><string>x86_64</string><key>BundlePath</key><string>RembrandtGPU.kext</string><key>Comment</key><string>RembrandtGPU (Radeon 680M)</string><key>Enabled</key><true/><key>ExecutablePath</key><string>Contents/MacOS/RembrandtGPU</string><key>MaxKernel</key><string></string><key>MinKernel</key><string></string><key>PlistPath</key><string>Contents/Info.plist</string></dict>' \
+            "$tmp"
+    fi
+
+    plutil -lint "$tmp" >/dev/null || { rm -f "$tmp"; echo "radeonize: edited config does not lint" >&2; return 1; }
+    mv "$tmp" "$cfg"
 }
 
 # restore_efi_files BACKUP OC: copy the saved config and kext back over the EFI.
@@ -104,7 +127,8 @@ efi_install() {
     mount_efi "$dev"
     check_efi
     oc="$MP/EFI/OC"
-    [ -d "$oc/Kexts/Lilu.kext" ] || die "Lilu.kext is not in EFI/OC/Kexts; install Lilu first"
+    plutil -type Kernel.Add "$oc/config.plist" >/dev/null 2>&1 \
+        || die "$dev: config.plist has no Kernel -> Add array"
 
     mkdir -p "$backup"
     echo "$dev" > "$backup/efi-device"
@@ -119,7 +143,14 @@ efi_install() {
 
     rm -rf "$oc/Kexts/RembrandtGPU.kext"
     ditto --norsrc --noextattr "$kext" "$oc/Kexts/RembrandtGPU.kext"
-    if ! edit_config "$oc/config.plist" add || ! plutil -lint "$oc/config.plist" >/dev/null; then
+
+    # Rule 15: check the copy is the staged binary, not just that a file exists.
+    if ! cmp -s "$kext/Contents/MacOS/RembrandtGPU" "$oc/Kexts/RembrandtGPU.kext/Contents/MacOS/RembrandtGPU"; then
+        restore_efi_files "$backup" "$oc"
+        die "the copied kext does not match the staged binary; the EFI has been put back as it was"
+    fi
+
+    if ! edit_config "$oc/config.plist" add; then
         restore_efi_files "$backup" "$oc"
         die "config.plist edit failed; the EFI has been put back as it was"
     fi
@@ -140,11 +171,20 @@ efi_restore() {
 
 # --- Framebuffer (aux kernel collection) -----------------------------------
 
+# had_aux BACKUP: a backup from before had-aux existed always had a collection.
+had_aux() {
+    [ "$(cat "$1/had-aux" 2>/dev/null || echo yes)" = yes ]
+}
+
 # fb_rollback BACKUP: put the live collection and /Library/Extensions back.
 fb_rollback() {
-    cp "$1/AuxiliaryKernelExtensions.kc" "$LIVE" || true
+    if had_aux "$1"; then
+        cp "$1/AuxiliaryKernelExtensions.kc" "$LIVE" || true
+    else
+        rm -f "$LIVE" || true
+    fi
     rm -rf "$FBEXT"
-    if [ "$(cat "$1/had-ext")" = yes ]; then
+    if [ "$(cat "$1/had-ext" 2>/dev/null || echo yes)" = yes ] && [ -d "$1/RBAMDFramebuffer.kext" ]; then
         cp -R "$1/RBAMDFramebuffer.kext" "$FBEXT" || true
         chown -R root:wheel "$FBEXT" || true
     fi
@@ -158,17 +198,22 @@ fb_fail() {
 }
 
 fb_install() {
-    src="$1"; backup="$2"; owner="$3"
+    src="$1"; backup="$2"; owner="$3"; uuid="$4"
     bin="$src/Contents/MacOS/RBAMDFramebuffer"
     [ -f "$bin" ] || die "no RBAMDFramebuffer binary in $src"
-    [ -f "$BOOT" ] && [ -f "$SYS" ] && [ -f "$LIVE" ] || die "kernel collections not found"
-    uuid="$(dwarfdump --uuid "$bin" | awk '{print $2}')"
-    [ -n "$uuid" ] || die "could not read a UUID from $bin"
+    [ -f "$BOOT" ] && [ -f "$SYS" ] || die "kernel collections not found"
+    echo "$uuid" | grep -qE '^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$' \
+        || die "not a UUID: $uuid"
     echo "installing RBAMDFramebuffer $uuid"
 
-    # Save the live collection and any kext already in /Library/Extensions.
+    # Save the live collection (if there is one) and any kext already in /Library/Extensions.
     mkdir -p "$backup"
-    cp "$LIVE" "$backup/AuxiliaryKernelExtensions.kc"
+    if [ -f "$LIVE" ]; then
+        cp "$LIVE" "$backup/AuxiliaryKernelExtensions.kc"
+        echo yes > "$backup/had-aux"
+    else
+        echo no > "$backup/had-aux"
+    fi
     if [ -d "$FBEXT" ]; then
         cp -R "$FBEXT" "$backup/RBAMDFramebuffer.kext"
         echo yes > "$backup/had-ext"
@@ -179,19 +224,23 @@ fb_install() {
     rm -rf "$FBEXT"
     cp -R "$src" "$FBEXT" || fb_fail "could not copy the kext into /Library/Extensions" "$backup"
     chown -R root:wheel "$FBEXT"
+    cmp -s "$bin" "$FBEXT/Contents/MacOS/RBAMDFramebuffer" \
+        || fb_fail "the copied framebuffer binary does not match the staged one" "$backup"
 
     # Dry run to a scratch path. kmutil exits 0 even when it refuses, so the
     # output file and its contents are the real check.
     rm -f "$SCRATCH"
     kmutil create -n aux -a x86_64 --allow-missing-kdk -B "$BOOT" -S "$SYS" -A "$SCRATCH" -r /Library/Extensions >/dev/null 2>&1 || true
     [ -s "$SCRATCH" ] || fb_fail "the dry run wrote nothing (kmutil refused)" "$backup"
-    kmutil inspect -B "$SCRATCH" --show-kext-uuids 2>/dev/null | grep -qi "$uuid" \
+    kmutil inspect -B "$SCRATCH" --show-kext-uuids 2>/dev/null | grep -qiF "$uuid" \
         || fb_fail "the dry-run collection does not carry $uuid" "$backup"
     echo "dry run carries $uuid"
 
-    # Real write, then verify the UUID inside the live collection.
+    # Real write, then verify the UUID inside the live collection. The directory
+    # is created if it is missing, so a Mac with no aux collection is not an error.
+    mkdir -p "$(dirname "$LIVE")"
     kmutil create -n aux -a x86_64 --allow-missing-kdk -B "$BOOT" -S "$SYS" -A "$LIVE" -r /Library/Extensions >/dev/null 2>&1 || true
-    kmutil inspect -B "$LIVE" --show-kext-uuids 2>/dev/null | grep -qi "$uuid" \
+    kmutil inspect -B "$LIVE" --show-kext-uuids 2>/dev/null | grep -qiF "$uuid" \
         || fb_fail "the live collection does not carry $uuid" "$backup"
 
     rm -f "$SCRATCH"
@@ -202,15 +251,20 @@ fb_install() {
 
 fb_restore() {
     backup="$1"; owner="$2"
-    [ -f "$backup/AuxiliaryKernelExtensions.kc" ] || die "no collection backup in $backup"
-    cp "$backup/AuxiliaryKernelExtensions.kc" "$LIVE"
+    if had_aux "$backup"; then
+        [ -f "$backup/AuxiliaryKernelExtensions.kc" ] || die "no collection backup in $backup"
+        cp "$backup/AuxiliaryKernelExtensions.kc" "$LIVE"
+    else
+        # There was no collection before the install, so there should be none now.
+        rm -f "$LIVE"
+    fi
     rm -rf "$FBEXT"
-    if [ "$(cat "$backup/had-ext")" = yes ]; then
+    if [ "$(cat "$backup/had-ext" 2>/dev/null || echo yes)" = yes ] && [ -d "$backup/RBAMDFramebuffer.kext" ]; then
         cp -R "$backup/RBAMDFramebuffer.kext" "$FBEXT"
         chown -R root:wheel "$FBEXT"
     fi
     sync
-    echo "restored $LIVE from $backup. Reboot to take effect."
+    echo "restored the framebuffer state from $backup. Reboot to take effect."
 }
 
 # --- dispatch ----------------------------------------------------------------
@@ -235,7 +289,7 @@ case "$cmd" in
         check_path "$2"; check_owner "$3"
         efi_restore "$@" ;;
     fb-install)
-        [ $# -eq 3 ] || die "usage: fb-install STAGE BACKUP OWNER"
+        [ $# -eq 4 ] || die "usage: fb-install KEXT BACKUP OWNER UUID"
         check_path "$1"; check_path "$2"; check_owner "$3"
         fb_install "$@" ;;
     fb-restore)
