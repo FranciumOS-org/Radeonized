@@ -67761,3 +67761,63 @@ from `SystemKernelExtensions.kc`, so the 2oz trap is clear. Development build
 **What this boot cannot say:** whether the ordering actually fixes the
 failure. That needs one armed boot on the new build, with
 `hwlibs_force_waits` and `hwlibs_force_ok` read before anything else.
+
+## 3FXB — the forced load is DEFERRED to userspace, so the wait has to be asynchronous and the gate is the two properties (boot 540)
+
+Boot 540, release build `72DCC675`, `armed 1`, `arm_why 0`, `sentinel 2`,
+`vbios_src 1`. Zero accelerator instances. **3fx's synchronous wait is dead,
+and the return code says exactly why:**
+
+```
+hwlibs_force_ret    = 3691020305 = 0xDC008011 = kOSKextReturnDeferred
+hwlibs_force_waits  = 2000      (the full bound - it never came up)
+hwlibs_force_ok     = 0
+hwlibs_patched      = 1         (later, by the normal path)
+dev_type_patched    = 1
+```
+
+`OSKextLoadKextWithIdentifier` does not load anything itself; it hands the
+request to userspace. The peer publishes `RBGPULoad` at ~740 ms into the boot,
+when there is no userspace to hand it to, so the request can only be serviced
+much later whatever we do. The 2000 ms were spent spinning in `IODelay` on a
+matching thread and bought nothing: `3fx: forced HWLibs load` is stamped
+2745 ms (the spin pushed the publish out by 2 s), the accelerator entered
+start() at 6887.9 ms and `Patching com.apple.kext.AMDRadeonX6800HWLibs` is
+stamped 6953.0 ms. **Margin −65.1 ms**, against −68.3 (539) and −67.8 (536).
+
+Three armed boots now agree to within 3 ms, so this is not luck and it is not
+noise. A release build loses by ~66 ms and a development build won by +2.5 to
++3.6 ms, a difference of ~70 ms whose cause is still **not identified** — the
+only remaining difference between the two binaries is the 44 544-byte baked
+VBIOS, which is not a credible mechanism, and no measurement has been taken
+that would discriminate (rule 17: I will not turn two numbers into a
+mechanism). What the three boots do establish is that the ordering must not
+depend on it.
+
+**The fix: hold the gate, not the thread.** `RBGPULoad` and `LoadHWServices`
+are what start HWServices, and HWServices is what starts the accelerator, so
+withholding that pair withholds the accelerator and nothing else —
+`ATY,bin_image` is already on the node by then. `rbgpu_hwlibs_gate_arm()`
+issues the load request, then returns; a `thread_call` re-arms every 25 ms and
+publishes the pair as soon as `rbgpu_hwlibs_patched()` comes up, or after
+`RB_HWLIBS_GATE_MS` = 20 000 ms, whichever is first. Nothing blocks, and in
+particular nothing blocks the thread IOKit needs.
+
+**The design is self-verifying, which 3fx's was not.** While `RBGPULoad` is
+unpublished, HWServices never starts, so IOKit never needs HWLibs, so a flag
+that comes up before the gate publishes can only be our own deferred request
+being serviced. In boot 540 `hwlibs_patched 1` could have come from either
+cause and the diag could not tell them apart; now it can.
+
+Three readings come out of it rather than one: `hwlibs_force_ret` (was the
+image even requested), `hwlibs_gate_ms` (how long the gate held — 0 means the
+flag was already up and the gate cost nothing) and `hwlibs_gate_ok` (1 patched,
+0 timed out, 2 the gate had no PCI device and published nothing). A timeout
+publishes anyway and says so in the log: an unordered boot is what we have
+today and is no worse, while a boot with no accelerator at all would be a
+regression. `thread_call_allocate` failing publishes immediately, for the same
+reason.
+
+Development build `D32C9825`, release `D97FCD54`. `kmutil libraries` reports 0
+symbols from `SystemKernelExtensions.kc` and `Info.plist` names
+IOGraphicsFamily 0 times. Untested on hardware.

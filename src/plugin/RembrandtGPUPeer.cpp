@@ -30,6 +30,9 @@ static uint32_t rbgpu_gen_migrate(void);
  * check: an option ROM at least 0x49 bytes long starting 0x55 0xAA. Enough
  * to refuse a truncated or mistyped plist value; the ATOM table pointer is
  * validated by the consumer, not here. */
+/* 3fxb: defined with the sentinel's thread_call machinery below. */
+static void rbgpu_hwlibs_gate_arm(IOService *pciDevice);
+
 static bool rbgpu_vbios_plausible(OSData *d) {
     if (!d || d->getLength() < 0x49) {
         return false;
@@ -772,14 +775,14 @@ bool RembrandtGPUPeer::start(IOService *provider) {
 #endif
     }
 
-    /* 3fx: ORDER THE HWLIBS/ACCELERATOR SEQUENCE INSTEAD OF WINNING IT ON
-     * TIMING.
+    /* 3fx/3fxb: ORDER THE HWLIBS/ACCELERATOR SEQUENCE INSTEAD OF WINNING IT
+     * ON TIMING.
      *
      * HWServices spawns two children: HWLibs, by IOKit matching, and the
      * accelerator, internally and synchronously inside its own start(). In
-     * boots 536 and 539 the accelerator entered start() ~68 ms BEFORE our
-     * HWLibs patch callback ran and died at createHWInterface with an
-     * unpatched deviceTypeTable - verified armed both times, state trace
+     * boots 536, 539 and 540 the accelerator entered start() 65-68 ms BEFORE
+     * our HWLibs patch callback ran and died at createHWInterface with an
+     * unpatched deviceTypeTable - verified armed every time, state trace
      * `createHWHandler 1 / createHWInterface 0 / configureDevice_entry 0`.
      *
      * Waiting inside the accelerator-start hook - 3fwc's proposal - would
@@ -787,46 +790,41 @@ bool RembrandtGPUPeer::start(IOService *provider) {
      * Interface, which HWServicesNavi itself is, so IOKit cannot match HWLibs
      * until HWServices::start RETURNS; the accelerator hook runs inside that
      * start, on the same thread (boot 539: thread 0:899 for both the failure
-     * and the childPublished that follows it). So the wait has to happen
-     * BEFORE HWServices starts at all, which is here.
+     * and the childPublished that follows it).
      *
-     * Loading the kext image is what our patches need; its IOService instance
-     * is created by HWServices later and is irrelevant to this. Loading it now
-     * submits HWServices' personalities too, but those match on LoadHWServices
-     * / RBGPULoad, which this function has not published yet, so nothing
-     * starts early as a side effect.
+     * 3fx's first attempt waited HERE, synchronously, and boot 540 killed it:
+     * OSKextLoadKextWithIdentifier returns 0xdc008011 kOSKextReturnDeferred,
+     * because the load is handed to userspace - and the peer starts at ~740 ms,
+     * when there is no userspace to hand it to. The 2000 ms were spent
+     * spinning in IODelay and HWLibs still landed at 6953 ms, 65 ms after the
+     * accelerator.
      *
-     * Rule 14: every path out says something, and the diag carries both the
-     * OSReturn and whether the patch flag actually came up. */
+     * So the request stays, because it is the only way to ask for the image
+     * before anything needs it, but the WAIT becomes asynchronous: HWServices
+     * is not started at all until the patch flag comes up, because the thing
+     * that starts it is the RBGPULoad / LoadHWServices pair published below.
+     * Holding those two properties back holds the accelerator back, and
+     * nothing else: ATY,bin_image is already on the node above.
+     *
+     * This is also self-verifying. While RBGPULoad is unpublished HWServices
+     * never starts, so IOKit never needs HWLibs, so a flag that comes up
+     * before we publish can only be OUR request being serviced (rule 14 - the
+     * two causes are no longer indistinguishable).
+     *
+     * Bounded, and the bound is published: after RB_HWLIBS_GATE_MS the
+     * properties go out regardless, which is exactly today's unordered boot
+     * and no worse, and the log says that is what happened. A boot must not
+     * hang because a flag never came up. */
     {
-        extern int rbgpu_hwlibs_patched(void);
         OSReturn kr = OSKextLoadKextWithIdentifier("com.apple.kext.AMDRadeonX6800HWLibs");
         rbgpu_diag_set_num("hwlibs_force_ret", (uint64_t)(uint32_t)kr);
-
-        /* The load is synchronous and Lilu's patcher callback fires inside it,
-         * so this poll should see the flag already set. It is bounded anyway:
-         * a flag that never comes up must not hold the boot, and the count is
-         * published so "0 waits" and "timed out" are different readings. */
-        uint32_t waits = 0;
-        while (!rbgpu_hwlibs_patched() && waits < 2000) {
-            IODelay(1000);   /* 1 ms, no sleep: this is a matching thread */
-            waits++;
-        }
-        rbgpu_diag_set_num("hwlibs_force_waits", waits);
-        rbgpu_diag_set_num("hwlibs_force_ok", rbgpu_hwlibs_patched() ? 1 : 0);
-        rbgpu_log("3fx: forced HWLibs load: OSReturn 0x%x, patched %d after "
-                  "%u ms of waiting (the diag line's own timestamp gives the "
-                  "absolute moment)",
-                  (unsigned)kr, rbgpu_hwlibs_patched(), waits);
-        if (!rbgpu_hwlibs_patched()) {
-            rbgpu_log("3fx: HWLibs is NOT patched and RBGPULoad is about to be "
-                      "published anyway - this boot is the unordered race "
-                      "again, and hwlibs_force_ret says why the load failed.");
-        }
+        rbgpu_log("3fxb: requested the HWLibs image: OSReturn 0x%x%s",
+                  (unsigned)kr,
+                  kr == kOSKextReturnDeferred
+                      ? " (kOSKextReturnDeferred - userspace will complete it)"
+                      : "");
+        rbgpu_hwlibs_gate_arm(pciDevice);
     }
-
-    pciDevice->setProperty("RBGPULoad", kOSBooleanTrue);
-    pciDevice->setProperty("LoadHWServices", kOSBooleanTrue);
 
     // 2ph: the DAL dry run's personality is gated on this property, which is
     // published only with -rbgpudal. Without it Apple's framebuffer kext is
@@ -2133,6 +2131,99 @@ static int g_rbStock      = -1;   // -1 not decided, 1 stock, 0 armed
 static int g_rbSafeLatch  = -1;   // 1 the latch was set when the peer looked
 static int g_rbGenPresent = -1;   // -1 not looked, 1 RB_GEN_KEY exists
 static thread_call_t g_rbSentinelCall = nullptr;
+
+/* 3fxb: the HWLibs gate. RBGPULoad / LoadHWServices are what start
+ * HWServices, which is what starts the accelerator, so withholding them until
+ * our HWLibs patches have applied is the one place the sequence can be
+ * ordered without blocking a thread that HWLibs needs. */
+#define RB_HWLIBS_GATE_MS        20000u   /* total budget before giving up */
+#define RB_HWLIBS_GATE_STEP_MS      25u   /* poll interval */
+
+extern int rbgpu_hwlibs_patched(void);    /* set on processHWLibs' last line */
+
+static thread_call_t g_rbHwlibsGateCall = nullptr;
+static IOService    *g_rbHwlibsGateDev  = nullptr;
+static uint32_t      g_rbHwlibsGateMs   = 0;
+static int           g_rbHwlibsGateDone  = 0;
+
+/* Publishes the pair, exactly once, and says which of the two reasons got us
+ * here. Both reasons publish: the gate orders the boot, it never cancels it. */
+static void rbgpu_hwlibs_gate_publish(const char *why, uint32_t ok) {
+    if (g_rbHwlibsGateDone) {
+        return;
+    }
+    g_rbHwlibsGateDone = 1;
+
+    IOService *dev = g_rbHwlibsGateDev;
+    if (!dev) {
+        /* Rule 14: a gate that cannot publish must not look like one that
+         * published and was ignored downstream. */
+        rbgpu_diag_set_num("hwlibs_gate_ok", 2);
+        rbgpu_log("3fxb: the gate has NO PCI device - RBGPULoad was never "
+                  "published and nothing downstream will start this boot");
+        return;
+    }
+
+    dev->setProperty("RBGPULoad", kOSBooleanTrue);
+    dev->setProperty("LoadHWServices", kOSBooleanTrue);
+
+    rbgpu_diag_set_num("hwlibs_gate_ms", g_rbHwlibsGateMs);
+    rbgpu_diag_set_num("hwlibs_gate_ok", ok);
+    rbgpu_log("3fxb: published RBGPULoad/LoadHWServices after %u ms because %s",
+              g_rbHwlibsGateMs, why);
+    if (!ok) {
+        rbgpu_log("3fxb: THE GATE TIMED OUT - HWLibs was not patched in %u ms, "
+                  "so this boot is the unordered race again and the "
+                  "accelerator may lose it. hwlibs_force_ret says whether the "
+                  "image was even requested.", RB_HWLIBS_GATE_MS);
+    }
+}
+
+static void rbgpu_hwlibs_gate_action(thread_call_param_t, thread_call_param_t) {
+    if (rbgpu_hwlibs_patched()) {
+        rbgpu_hwlibs_gate_publish("HWLibs is patched", 1);
+        return;
+    }
+    if (g_rbHwlibsGateMs >= RB_HWLIBS_GATE_MS) {
+        rbgpu_hwlibs_gate_publish("the gate's budget ran out", 0);
+        return;
+    }
+    g_rbHwlibsGateMs += RB_HWLIBS_GATE_STEP_MS;
+    uint64_t deadline = 0;
+    clock_interval_to_deadline(RB_HWLIBS_GATE_STEP_MS, kMillisecondScale, &deadline);
+    thread_call_enter_delayed(g_rbHwlibsGateCall, deadline);
+}
+
+static void rbgpu_hwlibs_gate_arm(IOService *pciDevice) {
+    g_rbHwlibsGateDev = pciDevice;
+
+    /* The flag may already be up on a machine where userspace serviced the
+     * request immediately, or where HWLibs was loaded for another reason.
+     * Publish on this thread then, so the common case costs no latency at
+     * all and `hwlibs_gate_ms` reads 0. */
+    if (rbgpu_hwlibs_patched()) {
+        rbgpu_hwlibs_gate_publish("HWLibs was already patched", 1);
+        return;
+    }
+
+    g_rbHwlibsGateCall = thread_call_allocate(rbgpu_hwlibs_gate_action, nullptr);
+    if (!g_rbHwlibsGateCall) {
+        /* No timer, so no gate. Publish immediately rather than never: an
+         * unordered boot is what we have today, a boot with no accelerator at
+         * all is a regression. */
+        rbgpu_diag_set_num("hwlibs_gate_alloc", 0);
+        rbgpu_hwlibs_gate_publish("thread_call_allocate failed, so there is no "
+                                  "gate to wait on", 0);
+        return;
+    }
+    rbgpu_diag_set_num("hwlibs_gate_alloc", 1);
+    rbgpu_log("3fxb: gate armed - RBGPULoad is withheld until HWLibs is "
+              "patched, or %u ms, whichever comes first", RB_HWLIBS_GATE_MS);
+
+    uint64_t deadline = 0;
+    clock_interval_to_deadline(RB_HWLIBS_GATE_STEP_MS, kMillisecondScale, &deadline);
+    thread_call_enter_delayed(g_rbHwlibsGateCall, deadline);
+}
 
 // 2xx: /options, cached, for the generation key and the sentinel.
 static IORegistryEntry *rbgpu_options(void) {
