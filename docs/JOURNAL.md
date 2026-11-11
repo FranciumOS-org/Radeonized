@@ -67821,3 +67821,68 @@ reason.
 Development build `D32C9825`, release `D97FCD54`. `kmutil libraries` reports 0
 symbols from `SystemKernelExtensions.kc` and `Info.plist` names
 IOGraphicsFamily 0 times. Untested on hardware.
+
+## 3FXC — the gate was waiting on what it prevented; the lever is LoadAccelerator (boot 541)
+
+Boot 541, release build `D97FCD54`, `armed 1`, `arm_why 0`, `sentinel 2`,
+`vbios_src 1`. Zero accelerator instances, and this time the gate is what
+failed:
+
+```
+hwlibs_force_ret   = 0xDC008011   (deferred, as in 540)
+hwlibs_gate_alloc  = 1
+hwlibs_gate_ms     = 20000
+hwlibs_gate_ok     = 0
+hwlibs_patched     — absent
+dev_type_patched   — absent
+```
+
+HWLibs was never loaded at all: no `Patching
+com.apple.kext.AMDRadeonX6800HWLibs` line, nothing in `kextstat`, and
+`AMDRadeonX6000_AMDRadeonHWServicesNavi` instances **0**. **3fxb's gate waited
+20 000 ms for something it was itself preventing.** HWLibs' only loader is
+IOKit matching on `HWServicesNavi`, whose provider property is the
+`RBGPULoad` / `LoadHWServices` pair the gate was withholding. The deferred
+userspace request (`kOSKextReturnDeferred`) never produced a load either, in
+20 s, so it is not an independent loader and it is removed.
+
+This is the third outcome I named before the boot, which is the only good
+thing about it: *"the deferred request is never serviced, so nothing loads
+HWLibs until HWServices starts, and the sequence is circular. That kills this
+whole approach."*
+
+**A second defect, and it generalises:** the pair *was* on the PCI node
+afterwards — `"RBGPULoad" = Yes`, `"LoadHWServices" = Yes` — and HWServices
+still never started. `setProperty` on a node whose matching has already
+settled triggers nothing. Any late publish needs `registerService()`.
+
+**The lever is `LoadAccelerator`, and it was already in the tree.** It matches
+our own accelerator personality (`Info.plist`, `RembrandtGPU Accelerator
+(0x1681)`, `IOClass AMDRadeonX6000_AMDNavi21GraphicsAccelerator`, matched on
+`LoadAccelerator` + `RBGPULoad`), which IOKit starts as a **second** instance,
+independent of the one HWServices spawns internally inside its own start().
+An accelerated boot has had two instances since 2cs, so the path is not new.
+What is new is that ours no longer races: nothing HWLibs needs is waiting on
+`LoadAccelerator`, so it can simply be withheld until
+`rbgpu_hwlibs_patched()` comes up. Apple's internal instance still enters
+start() 65-68 ms early and still dies at `createHWInterface`; that is left
+alone, and it detaches.
+
+`RBGPULoad` / `LoadHWServices` go out immediately again, exactly as before
+3fxb. The gate moved to the `LoadAccelerator` publish in 2cs's place, and it
+calls `registerService()` **only when it actually had to wait** — when the
+flag is already up, matching has not settled yet and 2cs's original behaviour
+is byte-for-byte correct, which `hwlibs_gate_ms 0` and `hwlibs_gate_regsvc 0`
+record.
+
+Readings, as before: `hwlibs_gate_ms`, `hwlibs_gate_ok` (1 patched / 0 timed
+out / 2 no PCI device) and now `hwlibs_gate_regsvc`. A timeout still publishes,
+because a boot with no accelerator would be worse than an unordered one.
+
+**What this still does not establish:** whether an accelerator instance of ours
+can start when Apple's internal one has already failed and detached. Both
+exist in every accelerated boot so far and nobody has had one without the
+other. That is the question the next boot asks.
+
+Development build `FBE03F69`, release `B216DB5E`. `kmutil libraries` reports 0
+from `SystemKernelExtensions.kc`, `Info.plist` names IOGraphicsFamily 0 times.
