@@ -1,17 +1,17 @@
 # Radeonized
 
 Work towards graphics acceleration for the AMD Radeon 680M (Rembrandt APU, PCI IDs
-`1002:1681` and `1002:164d`) on macOS, as an OpenCore-booted Intel-based Mac.
+`1002:1681` and `1002:164d`) on macOS, as an OpenCore-booted AMD-based hackintosh.
 
 ## Status
 
-- **Built-in panel:** the author's laptop (Ryzen 7 7735HS, macOS Tahoe 26.7) reaches an
+- **Built-in panel:** Laptop (Ryzen 7 7735HS, macOS Tahoe 26.7) reaches an
   accelerated desktop with the framebuffer kext and the Lilu plugin. This needs the
   firmware set to iGPU-only (Eco) mode. Results are recorded in `docs/JOURNAL.md`.
 - **External displays over USB-C DisplayPort:** not working yet. The blocker is recorded
-  in `docs/JOURNAL.md` and `docs/RULES.md`.
+  in `docs/JOURNAL.md` and `docs/RULES.md`. 75% there.
 - **Other macOS versions:** only Sequoia and Tahoe are claimed in `src/common/rb_osver.h`.
-  Anything else is unmeasured.
+  Anything else is unmeasured, Ventura and up are added, untested.
 
 Nothing here is supported by Apple. Installing the kexts changes your boot configuration.
 Keep a known-good OpenCore boot entry before you install anything.
@@ -42,7 +42,7 @@ make plugin         # build the Lilu plugin (needs Lilu)
 
 `make kext` runs the host tests first. Never load a kext whose host tests fail.
 
-## Installing
+## Installing manually
 
 Installing changes the EFI and the system kernel collection. Read `docs/RULES.md` first.
 
