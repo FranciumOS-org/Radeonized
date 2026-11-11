@@ -33,7 +33,10 @@ esac
 root="$(cd "$(dirname "$0")/.." && pwd)"
 editor="$root/tools/efi_config.py"
 usbeditor="$root/tools/xhci_intr0.py"
-kext="$root/build/out/RembrandtGPU.kext"
+# 3fw: RBGPU_KEXT picks which build to install. A release build lives in
+# build-release/out and carries no VBIOS of its own, so it must have had one
+# put in with tools/vbios_plist.py before it is installed.
+kext="${RBGPU_KEXT:-$root/build/out/RembrandtGPU.kext}"
 user="${SUDO_USER:-root}"
 
 # --- find and mount the EFI partition that holds OpenCore ---------------
@@ -104,13 +107,31 @@ status)
     ;;
 install)
     [ -d "$oc/Kexts/Lilu.kext" ] || { echo "no Lilu.kext in EFI/OC/Kexts; stopping" >&2; exit 1; }
-    echo "building as $user"
-    # GNU make 3.81 (macOS) compares whole seconds; recompile the plugin's
-    # own sources so a same-second edit can never ship a stale binary.
-    rm -f "$root"/build/plugin/kern_start.o "$root"/build/plugin/RembrandtGPUPeer.o
-    sudo -u "$user" make -C "$root" plugin
+    if [ -n "${RBGPU_KEXT:-}" ]; then
+        # 3fw: an explicitly named bundle is installed as it stands. Building
+        # here would rebuild the DEVELOPMENT plugin and then install this one,
+        # which is how a stale release gets shipped.
+        echo "installing $kext as it stands (RBGPU_KEXT is set; nothing rebuilt)"
+    else
+        echo "building as $user"
+        # GNU make 3.81 (macOS) compares whole seconds; recompile the plugin's
+        # own sources so a same-second edit can never ship a stale binary.
+        rm -f "$root"/build/plugin/kern_start.o "$root"/build/plugin/RembrandtGPUPeer.o
+        sudo -u "$user" make -C "$root" plugin
+    fi
     plutil -lint -s "$kext/Contents/Info.plist"
     [ -f "$kext/Contents/MacOS/RembrandtGPU" ] || { echo "no binary in $kext" >&2; exit 1; }
+    # 3fw: say which VBIOS this bundle will publish. A release build carries
+    # none of its own, and an install that silently has no VBIOS looks exactly
+    # like one that works until the next boot.
+    if plutil -extract 'IOKitPersonalities.RembrandtGPUPeer.ATY,bin_image' raw \
+            "$kext/Contents/Info.plist" >/dev/null 2>&1; then
+        echo "the bundle carries a VBIOS in its Info.plist"
+    else
+        echo "the bundle carries NO VBIOS in its Info.plist - fine for a build with one"
+        echo "compiled in, but a RELEASE=1 build needs:"
+        echo "  python3 tools/vbios_plist.py $kext firmware/VFCT.aml"
+    fi
     backup
     rm -rf "$oc/Kexts/RembrandtGPU.kext"
     ditto --norsrc --noextattr "$kext" "$oc/Kexts/RembrandtGPU.kext"
