@@ -1,16 +1,60 @@
-# RembrandtGPU
+# Radeonized
 
-Work towards a macOS driver for the AMD Radeon 680M (Rembrandt, `1002:1681`).
+Work towards graphics acceleration for the AMD Radeon 680M (Rembrandt APU, PCI IDs
+`1002:1681` and `1002:164d`) on macOS, as an OpenCore-booted Intel-based Mac.
 
-Today it contains one thing: **RembrandtProbe**, a read-only kext that reads the
-GPU's IP discovery table and the state of its security processor (PSP), power
-management firmware (SMU) and memory hub, without changing anything on the GPU.
+## Status
 
+- **Built-in panel:** the author's laptop (Ryzen 7 7735HS, macOS Tahoe 26.7) reaches an
+  accelerated desktop with the framebuffer kext and the Lilu plugin. This needs the
+  firmware set to iGPU-only (Eco) mode. Results are recorded in `docs/JOURNAL.md`.
+- **External displays over USB-C DisplayPort:** not working yet. The blocker is recorded
+  in `docs/JOURNAL.md` and `docs/RULES.md`.
+- **Other macOS versions:** only Sequoia and Tahoe are claimed in `src/common/rb_osver.h`.
+  Anything else is unmeasured.
+
+Nothing here is supported by Apple. Installing the kexts changes your boot configuration.
+Keep a known-good OpenCore boot entry before you install anything.
+
+## Layout
+
+- `src/kext/` — `RembrandtProbe`, a read-only probe of the GPU.
+- `src/fbkext/` — `RBAMDFramebuffer`, the framebuffer kext for the built-in panel.
+- `src/plugin/` — `RembrandtGPU`, the Lilu plugin that boots from the OpenCore EFI.
+- `src/common/` — shared C code used by the kexts, the plugin and the host tests.
+- `tools/` — build helpers, install scripts (`efi.sh`, `fbinstall.sh`) and probes.
+- `app/` — Radeonize, a macOS app that checks the Mac and installs the kexts. See `app/README.md`.
+- `docs/PLAN.md`, `docs/JOURNAL.md`, `docs/RULES.md` — the plan, the measured record, and the
+  engineering rules the code follows.
+
+## Building
+
+You need Xcode (or its Command Line Tools) and two sources that are not in this repository:
+
+- **MacKernelSDK** headers and libraries, placed at `third_party/MacKernelSDK`.
+- **Lilu**, placed at `third_party/Lilu`. Lilu is BSD-3-Clause.
+
+```sh
+make kext tools     # build the probe kext and the host tests
+make fbkext         # build the framebuffer kext
+make plugin         # build the Lilu plugin (needs Lilu)
 ```
-make kext tools        # builds build/out/RembrandtProbe.kext, runs the host tests
-sudo tools/load.sh     # loads it, prints the report (logs/<timestamp>/)
-sudo tools/unload.sh
+
+`make kext` runs the host tests first. Never load a kext whose host tests fail.
+
+## Installing
+
+Installing changes the EFI and the system kernel collection. Read `docs/RULES.md` first.
+
+```sh
+sudo tools/efi.sh install     # add the plugin to the OpenCore EFI
+sudo tools/fbinstall.sh       # rebuild the auxiliary kernel collection with the framebuffer
 ```
 
-See docs/PLAN.md for the plan and docs/RULES.md for the rules the code follows.
-Code is MIT; files in docs/linux-ref are from Linux (MIT, AMD).
+Reboot after each step. `tools/efi.sh restore` and the app's Restore button put back the
+configuration saved before a change.
+
+## License
+
+Code in this repository is MIT licensed. See `LICENSE`.
+Third-party code (Lilu, MacKernelSDK) keeps its own license.

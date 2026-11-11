@@ -1,4 +1,0 @@
-acidanthera/Lilu 1.7.3, commit 0515f40b7f2a096adc85e832a4c6104fbd07f936
-(the version loaded on this machine). Only what a plugin builds against,
-unmodified: Lilu/Headers (its hde64.h/capstone entries are symlinks into
-hde/ and capstone/include), Lilu/Library/plugin_start.cpp.
