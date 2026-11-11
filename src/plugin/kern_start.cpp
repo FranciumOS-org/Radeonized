@@ -21,6 +21,8 @@
 // 2pm: the generated dcn302 -> dcn312 register deny list (tools/re/dcn_denylist.py)
 #include "rb_dcn_deny.h"
 #include "rb_fwhdr.h"   /* 3fxe: slice the embedded AMD firmware containers */
+#include "rb_atombios.h" /* 3vb-c: is this buffer an ATOM VBIOS?            */
+#include "rb_vfct.h"     /* 3vb-c: find our image inside the ACPI VFCT     */
 
 #ifndef RB_HWID_MP1
 #define RB_HWID_MP1 1
@@ -7004,6 +7006,133 @@ static bool patchSdmaAutoloadCheck(KernelPatcher &patcher, size_t id) {
     return patchSdmaAutoloadCheckAt(fn_addr);
 }
 
+
+// 3vb-c: THE BOARD'S VBIOS WITHOUT A REBOOT.
+//
+// A release build ships no VBIOS, and until now the owner's own image had to
+// come out of OpenCore's SysReport - which costs a reboot on a DEBUG OpenCore.
+// 3vb went down amdgpu_get_bios()'s fallback chain looking for a register or a
+// physical address to read, and never asked whether macOS exposes the ACPI
+// table. It does, and `nm` on BootKernelExtensions.kc shows it DEFINED, not
+// imported (rule 1):
+//
+//     T __ZN23AppleACPIPlatformExpert16getACPITableDataEPKcj
+//
+// Disassembled in full (3vb-b): it is an OSDictionary::getObject by a
+// four-character key against a cache the expert built at init, with an
+// OSDynamicCast on the way out. So a miss is a NULL and nothing else - no
+// mapping, no register, no side effect - which is what makes this a probe
+// rather than an experiment.
+//
+// Two ownership facts decide the shape of the code below. The OSData belongs
+// to that dictionary: the cast is borrowed and unretained, so we copy the
+// bytes out and never touch the object (rule 42, the shape that panicked 2y1).
+// And the image inside it is found by rb_vfct.h, the same walk tools/vfct.py
+// does, whose hosttest proves it reproduces that independent parse byte for
+// byte off this machine's own table.
+//
+// Every way out publishes a code (rule 14): `acpivbios` 0 is the only success,
+// and "the symbol never solved", "the platform expert refused the key" and "a
+// table with no image for this device" are three different numbers.
+#define RB_ACPIVB_OK            0
+#define RB_ACPIVB_E_NO_SYM      1   /* getACPITableData never solved        */
+#define RB_ACPIVB_E_NO_PLATFORM 2   /* getPlatform() returned NULL          */
+#define RB_ACPIVB_E_NO_TABLE    3   /* the expert has no "VFCT" cached      */
+#define RB_ACPIVB_E_NOT_DATA    4   /* it gave something that is not OSData */
+#define RB_ACPIVB_E_EMPTY       5   /* OSData with no bytes                 */
+#define RB_ACPIVB_E_HUGE        6   /* bigger than we are willing to copy   */
+#define RB_ACPIVB_E_NO_BYTES    7   /* getBytesNoCopy returned NULL         */
+#define RB_ACPIVB_E_WALK        8   /* rb_vfct_find refused; see acpivb_vfct */
+#define RB_ACPIVB_E_ALLOC       9   /* OSData::withBytes failed             */
+
+#define RB_ACPIVB_MAX (512u * 1024u)
+
+using t_rbAcpiGetTable = OSObject *(*)(void *, const char *, uint32_t);
+static t_rbAcpiGetTable g_rbAcpiGetTable = nullptr;
+
+static void rbgpu_acpi_table_solve_3vb(KernelPatcher &patcher) {
+    if (g_rbAcpiGetTable) { return; }
+    auto a = patcher.solveSymbol(
+        KernelPatcher::KernelID,
+        "__ZN23AppleACPIPlatformExpert16getACPITableDataEPKcj");
+    patcher.clearError();
+    // rule 19: a NULL check is not a pointer check, and a refusal publishes
+    // the value it refused.
+    if (a < 0xffffff7f80000000ULL) {
+        rbgpu_diag_set_num("acpivb_sym", static_cast<uint64_t>(a));
+        rbgpu_log("3vb: getACPITableData solved as %llx - below the kext "
+                  "symbol floor, refusing to call it", static_cast<uint64_t>(a));
+        return;
+    }
+    g_rbAcpiGetTable = reinterpret_cast<t_rbAcpiGetTable>(a);
+    rbgpu_diag_set_num("acpivb_sym", static_cast<uint64_t>(a));
+    rbgpu_log("3vb: getACPITableData at %llx", static_cast<uint64_t>(a));
+}
+
+// Returns an OSData the CALLER owns (release it), or nullptr with *rc set.
+OSData *rbgpu_acpi_vbios_3vb(int *rc_out) {
+    int rc = RB_ACPIVB_OK;
+    OSData *result = nullptr;
+    struct rb_vfct_found f;
+    uint32_t vfct_rc = 0;
+
+    if (!g_rbAcpiGetTable) { rc = RB_ACPIVB_E_NO_SYM; goto done; }
+    {
+        IOPlatformExpert *pe = IOService::getPlatform();
+        if (!pe) { rc = RB_ACPIVB_E_NO_PLATFORM; goto done; }
+
+        OSObject *o = g_rbAcpiGetTable(pe, "VFCT", 0);
+        if (!o) { rc = RB_ACPIVB_E_NO_TABLE; goto done; }
+        OSData *tbl = OSDynamicCast(OSData, o);
+        if (!tbl) { rc = RB_ACPIVB_E_NOT_DATA; goto done; }
+
+        unsigned int len = tbl->getLength();
+        if (len == 0)                { rc = RB_ACPIVB_E_EMPTY; goto done; }
+        if (len > RB_ACPIVB_MAX)     { rc = RB_ACPIVB_E_HUGE;  goto done; }
+        auto bytes = static_cast<const uint8_t *>(tbl->getBytesNoCopy());
+        if (!bytes)                  { rc = RB_ACPIVB_E_NO_BYTES; goto done; }
+        rbgpu_diag_set_num("acpivb_tbl", len);
+
+        // 3id: this chip answers to either id, and a table carries only its
+        // own board's, so try each and report which one answered.
+        memset(&f, 0, sizeof(f));
+        int w = rb_vfct_find(bytes, len, 0x1002, 0x1681, &f);
+        uint32_t which = 0x1681;
+        if (w != RB_VFCT_OK) {
+            struct rb_vfct_found f2;
+            memset(&f2, 0, sizeof(f2));
+            int w2 = rb_vfct_find(bytes, len, 0x1002, 0x164d, &f2);
+            if (w2 == RB_VFCT_OK) { f = f2; w = w2; which = 0x164d; }
+        }
+        vfct_rc = static_cast<uint32_t>(w);
+        if (w != RB_VFCT_OK) { rc = RB_ACPIVB_E_WALK; goto done; }
+
+        rbgpu_diag_set_num("acpivb_dev",  which);
+        rbgpu_diag_set_num("acpivb_len",  f.len);
+        rbgpu_diag_set_num("acpivb_off",  f.off);
+        rbgpu_diag_set_num("acpivb_imgs", f.images);
+        rbgpu_diag_set_num("acpivb_hdr",  f.info.hdr_start);
+        rbgpu_diag_set_num("acpivb_sig",  f.info.sig_ok);
+
+        // The copy. After this nothing of the dictionary's is held.
+        result = OSData::withBytes(bytes + f.off, f.len);
+        if (!result) { rc = RB_ACPIVB_E_ALLOC; goto done; }
+    }
+
+done:
+    rbgpu_diag_set_num("acpivb_vfct", vfct_rc);
+    rbgpu_diag_set_num("acpivbios",   static_cast<uint64_t>(rc));
+    if (rc != RB_ACPIVB_OK) {
+        rbgpu_log("3vb: no VBIOS from ACPI, refusal %d (vfct %u)", rc, vfct_rc);
+    } else {
+        rbgpu_log("3vb: VBIOS from the ACPI VFCT table: %u bytes at table "
+                  "offset %u, %u images, header %x, sig %u",
+                  f.len, f.off, f.images, f.info.hdr_start, f.info.sig_ok);
+    }
+    if (rc_out) { *rc_out = rc; }
+    return result;
+}
+
 void RGPU::installKernelLogHooks(KernelPatcher &patcher) {
     static bool s_kernel_hooks_installed = false;
     if (s_kernel_hooks_installed || noLogCapture) {
@@ -10784,6 +10913,9 @@ void RGPU::init() {
     // guarded fallback; whichever runs first wins.
     lilu.onPatcherLoad([](void *, KernelPatcher &patcher) {
         rbgpu_mtlk_install(patcher);
+        // 3vb-c: solve getACPITableData here, because the peer needs it at
+        // ~740 ms and processKext does not fire until a matching kext loads.
+        rbgpu_acpi_table_solve_3vb(patcher);
     });
 
     lilu.onKextLoad(kextList, arrsize(kextList), [](void *user, KernelPatcher &patcher, size_t id, mach_vm_address_t address, size_t size) {
@@ -10797,6 +10929,7 @@ void RGPU::deinit() {
 void RGPU::processKext(KernelPatcher &patcher, size_t id, mach_vm_address_t address, size_t size) {
     installKernelLogHooks(patcher);
     rbgpu_mtlk_install(patcher);   // 2og, no-op unless -rbgpumtlkpatch
+    rbgpu_acpi_table_solve_3vb(patcher);   // 3vb-c, guarded; first one wins
 
     if (kextList[KextHWLibs].loadIndex == id) {
         g_kext_addr_hwlibs = address;

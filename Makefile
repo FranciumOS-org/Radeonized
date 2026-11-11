@@ -117,14 +117,14 @@ LINUX_REF := $(firstword $(wildcard third_party/linux-ref) $(wildcard docs/linux
 # tools/fetch_amd_fw.sh, never committed - see third_party/LICENSE.amdgpu.
 AMD_FW := third_party/amd-fw
 
-HOSTTEST_SRCS := tools/hosttest/hosttest.c tools/hosttest/drr_test.c tools/hosttest/smu13_test.c tools/hosttest/agdc_test.c tools/hosttest/otg_test.c tools/hosttest/hubp_test.c tools/hosttest/hpd_test.c tools/hosttest/pg_test.c tools/hosttest/dig_test.c tools/hosttest/enc_test.c tools/hosttest/digbe_test.c tools/hosttest/dpaltq_test.c tools/hosttest/aux_test.c tools/hosttest/dpcd_test.c tools/hosttest/dpalt_test.c tools/hosttest/dio_test.c tools/hosttest/dpcspipe_test.c tools/hosttest/strenc_test.c tools/hosttest/strprog_test.c tools/hosttest/phy_test.c tools/hosttest/phyfsm_test.c tools/hosttest/backlight_test.c tools/hosttest/defaults_test.c tools/hosttest/dmub_test.c tools/hosttest/osver_test.c tools/hosttest/retire_test.c tools/hosttest/gpuname_test.c tools/hosttest/dpdto_test.c tools/hosttest/dptx_test.c tools/hosttest/otgprog_test.c tools/hosttest/fwhdr_test.c
+HOSTTEST_SRCS := tools/hosttest/hosttest.c tools/hosttest/drr_test.c tools/hosttest/smu13_test.c tools/hosttest/agdc_test.c tools/hosttest/otg_test.c tools/hosttest/hubp_test.c tools/hosttest/hpd_test.c tools/hosttest/pg_test.c tools/hosttest/dig_test.c tools/hosttest/enc_test.c tools/hosttest/digbe_test.c tools/hosttest/dpaltq_test.c tools/hosttest/aux_test.c tools/hosttest/dpcd_test.c tools/hosttest/dpalt_test.c tools/hosttest/dio_test.c tools/hosttest/dpcspipe_test.c tools/hosttest/strenc_test.c tools/hosttest/strprog_test.c tools/hosttest/phy_test.c tools/hosttest/phyfsm_test.c tools/hosttest/backlight_test.c tools/hosttest/defaults_test.c tools/hosttest/dmub_test.c tools/hosttest/osver_test.c tools/hosttest/retire_test.c tools/hosttest/gpuname_test.c tools/hosttest/dpdto_test.c tools/hosttest/dptx_test.c tools/hosttest/otgprog_test.c tools/hosttest/fwhdr_test.c tools/hosttest/atombios_test.c tools/hosttest/vfct_test.c
 
 hosttest: $(COMMON_SRCS) $(COMMON_HDRS) $(HOSTTEST_SRCS) $(BUILD_DIR)/kext/rb_smu13.o tools/hosttest/agdc_lookup_test.cpp src/plugin/rbgpu_agdc_lookup.hpp tools/hosttest/otg_kernel_test.cpp tools/hosttest/otg_kernel_shim.hpp src/plugin/rbgpu_agdc_otg.cpp
 hosttest: tools/hosttest/fb_vbl_test.cpp tools/hosttest/fb_vbl_shim.hpp src/fbkext/RBAMDFramebufferVBL.cpp
 	@mkdir -p $(OUT)
 	@test -f $(LINUX_REF)/smu13_driver_if_yellow_carp.h || \
 	    { echo "missing third_party/linux-ref: run 'sh tools/fetch_linux_ref.sh'" >&2; exit 1; }
-	@$(CC) $(HOST_CFLAGS) -I$(LINUX_REF) -Isrc/plugin -DRB_FWHDR_DIR='"$(AMD_FW)"' $(HOSTTEST_SRCS) $(COMMON_SRCS) -o $(OUT)/hosttest
+	@$(CC) $(HOST_CFLAGS) -I$(LINUX_REF) -Isrc/plugin -DRB_FWHDR_DIR='"$(AMD_FW)"' -DRB_ATOMBIOS_ROM='"firmware/680m-vbios.rom"' -DRB_VFCT_AML='"firmware/VFCT.aml"' $(HOSTTEST_SRCS) $(COMMON_SRCS) -o $(OUT)/hosttest
 	@$(OUT)/hosttest $(wildcard tests/data/*.bin)
 	@$(CXX) $(filter-out -std=gnu11,$(HOST_CFLAGS)) -std=c++17 -Isrc/plugin tools/hosttest/agdc_lookup_test.cpp -o $(OUT)/agdc_lookup_test
 	@$(OUT)/agdc_lookup_test

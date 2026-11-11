@@ -760,6 +760,45 @@ bool RembrandtGPUPeer::start(IOService *provider) {
             rbgpu_log("Peer: the bundle's ATY,bin_image is not an option ROM "
                       "(%u bytes); ignoring it", vbios->getLength());
         }
+        /* 3vb-c: before falling back to a baked image, ask the machine for its
+         * own. AppleACPIPlatformExpert::getACPITableData("VFCT", 0) is a
+         * dictionary lookup whose miss is a NULL, so this costs nothing when
+         * the firmware does not publish the table, and when it does the
+         * per-machine install step and its reboot both disappear. The OSData
+         * comes back owned by US (the probe copies the dictionary's bytes),
+         * so it is released here. Priority is deliberate: an image the
+         * installer put in the bundle still WINS over this one, because that
+         * is the override a user reaches for when the firmware's copy is
+         * wrong. */
+        bool acpi_took = false;
+        {
+            extern OSData *rbgpu_acpi_vbios_3vb(int *rc_out);
+            int arc = -1;
+            OSData *acpi = rbgpu_acpi_vbios_3vb(&arc);
+            if (acpi) {
+                if (rbgpu_vbios_plausible(acpi)) {
+                    pciDevice->setProperty("ATY,bin_image", acpi);
+                    rbgpu_log("Peer: ATY,bin_image from the ACPI VFCT table, "
+                              "%u bytes", acpi->getLength());
+                    rbgpu_diag_set_num("vbios_src", 3);
+                    acpi->release();
+                    acpi_took = true;
+                }
+                /* It walked and parsed but our own plausibility check says no.
+                 * That is a DIFFERENT finding from "no table" and gets its own
+                 * number rather than falling silently through (rule 14). */
+                else {
+                    rbgpu_log("Peer: the ACPI VFCT image (%u bytes) failed the "
+                              "plausibility check; ignoring it",
+                              acpi->getLength());
+                    rbgpu_diag_set_num("acpivb_implausible", acpi->getLength());
+                    acpi->release();
+                }
+            }
+        }
+        /* If the machine's own image was published, nothing below runs - and
+         * in particular no baked development ROM is substituted for it. */
+        if (!acpi_took) {
 #if RB_VBIOS_BAKED
         auto baked = OSData::withBytes(vbios_data, vbios_data_size);
         if (baked) {
@@ -773,10 +812,12 @@ bool RembrandtGPUPeer::start(IOService *provider) {
         /* 2eh: absence is not a result. Say it, so a boot with no VBIOS is
          * never mistaken for one where the image was rejected downstream. */
         rbgpu_log("Peer: NO ATY,bin_image published - this build bakes none "
-                  "in and the bundle carries none. Run the installer's VBIOS "
-                  "step, or `sudo tools/efi.sh vbios`.");
+                  "in, the bundle carries none, and the ACPI VFCT route "
+                  "refused (see `acpivbios` for which way). Run the "
+                  "installer's VBIOS step, or `sudo tools/efi.sh vbios`.");
         rbgpu_diag_set_num("vbios_src", 0);
 #endif
+        }
     }
 
     /* 3fxc: RBGPULoad and LoadHWServices go out immediately again.

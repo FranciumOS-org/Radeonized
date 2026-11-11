@@ -68354,3 +68354,67 @@ asks both questions with each other as the control — a NULL from one and an
 ATOM image from the other is a result either way, and 2jm's all-ones read of
 an unbacked physical page in boot 547 is the precedent that the fallback's map
 does not fault.
+
+## 3VB-C — the ACPI VBIOS route, built. 20 break-it guards, 17 live, 3 INERT and named.
+
+`src/common/rb_atombios.h` (Linux's `check_atom_bios()` plus the legacy
+option-ROM header fields, 7 refusals), `src/common/rb_vfct.h` (the VFCT walk,
+same as `tools/vfct.py` and `amdgpu_acpi_vfct_bios()`, 11 refusals), and the
+kext path. Nothing is written to a caller on a refusal, except that
+`RB_VFCT_E_NOT_ATOM` and `E_NO_MATCH` deliberately carry their diagnostics,
+because a refusal that cannot say what it refused is what rule 19 is about.
+
+**The kext side, and the two ownership facts that shaped it.**
+`getACPITableData` is solved from **`onPatcherLoad`**, not `processKext`: the
+peer needs it at ~740 ms and `processKext` does not fire until a matching kext
+loads. `processKext` calls the same guarded solver as a fallback, first one
+wins. The address is refused below `0xffffff7f80000000` **and the refused
+value is published** (rule 19). The `OSData` belongs to the expert's own
+dictionary — borrowed, unretained — so the probe **copies the bytes** and
+never holds the object (rule 42, the shape that panicked 2y1). Both device ids
+are tried (3id) and `acpivb_dev` says which answered. Priority in the peer:
+bundle image, then ACPI (`vbios_src` **3**), then a baked dev ROM, then
+nothing — the bundle still wins, because that is the override for a firmware
+copy that is wrong. The 2eh "no VBIOS" line now also says the ACPI route
+refused and points at `acpivbios`.
+
+**The positive control is the real table, cross-checked against an
+independent implementation.** The hosttest requires `firmware/VFCT.aml` to
+yield `1002:1681` and those bytes to be **`memcmp`-identical** to
+`firmware/680m-vbios.rom`, which `tools/vfct.py` produced by a separate parse.
+A synthetic table cannot check whether the OFFSETS are right; this can. Also
+pinned: an **all-`0xff` page** — what boot 547 measured from an unbacked
+physical read — must refuse `E_NOT_ROM`.
+
+**THE SWEEP FOUND MORE THAN IT CONFIRMED. Three guards are inert, and two
+breaks hit the `-Werror` trap (the ninth and tenth times).**
+
+1. **A real coverage gap: the MOTA compare had NO negative case.** Shortening
+   it to its first byte **fired nothing**, because every negative case in the
+   file starts with `'A'`. Fixed with a `"MOXX"` case, which now fails when
+   the compare is shortened.
+2. **The wrap-safe form in `rb_atombios.h` carries no information.** `hdr` is
+   built from two bytes, so `hdr + 8` cannot wrap a uint32 and the additive
+   form passes everything. My own test *claimed* to cover the wrap and was
+   therefore passing for the wrong reason — renamed to say what it actually
+   checks. The hdr + 8 **bound** is load-bearing (breaking it to hdr + 4
+   fails). The same shape in `rb_vfct.h` **is** load-bearing, because there
+   the length is a dword — and that break does fail the suite.
+3. **The signature bounds test is dead code, subsumed by Linux's own floor.**
+   Breaking it to `if (1)` fires nothing: `E_SHORT` rejects under 0x49 and the
+   signature ends at 0x3a, so passing the floor already guarantees the room.
+   Kept, because the floor is Linux's constant and not ours to rely on, and
+   recorded in the file as not-a-guard rather than given a test that would
+   pass for the wrong reason.
+
+Two breaks left a variable unused and killed the build instead of failing a
+test — `-Werror` for the ninth and tenth time — and had to be rewritten to
+compile before they said anything.
+
+Hosttest 0 failures. Build clean: no undefined symbols of ours (3fxf's guard),
+0 from `SystemKernelExtensions.kc`, 0 `IOGraphicsFamily`. Dev **B15E6078**,
+release **9C5F9544**. **Not booted.** What the boot decides is one thing:
+whether `"VFCT"` is a key in that cache. `acpivbios 0` with `vbios_src 3` and
+the per-machine VBIOS step and its reboot are gone; `acpivbios 3` and
+`publishACPITables` does not cache it, which sends the line to 3vb's
+`0x000C_0000` fallback.

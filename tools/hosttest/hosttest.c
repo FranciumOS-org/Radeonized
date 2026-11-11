@@ -38,6 +38,8 @@ int dpdto_tests(const struct rb_disc *real);
 int dptx_tests(void);
 int otgprog_tests(void);
 int fwhdr_tests(void);
+int atombios_tests(void);
+int vfct_tests(void);
 int dpaltq_tests(void);
 int aux_tests(void);
 int dpcd_tests(void);
@@ -885,6 +887,8 @@ int main(int argc, char **argv)
     failures += dptx_tests();
     failures += otgprog_tests();
     failures += fwhdr_tests();
+    failures += atombios_tests();
+    failures += vfct_tests();
     failures += dpaltq_tests();
     failures += aux_tests();
     failures += dpcd_tests();
