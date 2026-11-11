@@ -67536,3 +67536,87 @@ sets a `vbios_src` diag key — 1 bundle, 2 baked, 0 neither — so one boot
 settles it, and it is the same boot the two-id `IOPCIMatch` still needs. Until
 that boot, the release artifact is a thing that compiles and whose bytes have
 been counted, not a thing known to work.
+
+## 3FWC — the accelerator races HWLibs and wins by 3 ms; the firmware images are ballast that happens to win it (boots 536-538)
+
+3fw's firmware-less release plugin came up **unaccelerated three boots in a
+row**. Located from the plugin's own log and Apple's driver state trace in
+boot 536:
+
+```
+6517001126  2cn: accelerator start entered
+6517543883  2cn: accelerator start returned 0
+6584810535  HWLibs loaded
+6585227787  HWLibs: patched deviceTypeTable at index 66 -> 0x1681
+
+accelStart_entry 1  initLinkToPeer 1  createHWHandler 1
+createHWInterface 0  configureDevice_entry 0 ... u64AllAccelStart 0xc5
+```
+
+`createHWInterface` is where TTL init runs and it needs that `deviceTypeTable`
+patch. **The patch landed 68 ms after the accelerator had already given up.**
+Everything else in the boot was correct: `arm_why 0`, `sentinel_cleared 1`,
+the framebuffer owning the panel, and **`vbios_src 1`** — so 3fw's
+Info.plist VBIOS route works in an armed boot as well as a stock one.
+
+**The margin was never ours.** Three archived captures in `logs/` record both
+events, and HWLibs lands just *before* the accelerator every time:
+
+| capture | HWLibs | accel start | margin |
+|---|---|---|---|
+| 20261019-001216 | 5.4417 s | 5.4453 s | **+3.6 ms** |
+| 20261014-172925 | 9.6013 s | 9.6039 s | **+2.6 ms** |
+| 20261014-200821 | 9.8413 s | 9.8438 s | **+2.5 ms** |
+| boot 536 | 6.5848 s | 6.5170 s | **−67.8 ms** |
+
+Dropping the firmware arrays shrinks the plugin from **1818032 to 455088
+bytes** and moves the margin by ~70 ms the wrong way. *Why* a 1.36 MB
+`__const` section that nothing in that window touches moves it by 70 ms is
+**not established** — the mechanism is the shift, not an explanation of it.
+
+**Instrument defect, in the check written to settle this.** My first pass
+extracted timestamps with `tr -dc 0-9` over the matched line, which swallowed
+the digits in `X6000` and `2cn` and reported the accelerator starting at
+90-99 **seconds** in the good boots. That made it look as though the
+accelerator normally starts tens of seconds after HWLibs, i.e. that the
+release build had moved it by 80 s rather than 70 ms, and that there was a
+wide margin rather than a 3 ms one. Rule 26: a search is an instrument, and
+an unanchored one again.
+
+**It cannot be ordered by withholding properties.** `plutil` on
+`/System/Library/Extensions/AMDRadeonX6000HWServices.kext` shows HWLibs is
+**not** in its `OSBundleLibraries`; HWLibs' own personality has
+`IOProviderClass = AMDRadeonX6000_AMDRadeonHWServicesInterface`, which
+HWServices publishes at start. So HWServices spawns **two asynchronous
+children** — HWLibs by IOKit matching, the accelerator internally — and the
+order between them is Apple's. Deferring `RBGPULoad` or `LoadHWServices`
+delays HWServices, the **parent of both**, and moves them together.
+`LoadAccelerator`, which our own accelerator personality matches on, has
+never been published at all, so that personality is not the one that starts
+and gating it changes nothing.
+
+**Decision (the user's): keep the images in the release build.** `RELEASE=1`
+is now 1772464 bytes against the development build's 1818032, the whole
+difference being the 44544-byte VBIOS, so release timing is the timing that
+has been booting for weeks. `NOFW=1` drops them for when the race is ordered.
+The user's reason is the right one and is recorded as the standard: *timing is
+not something to guess — someone's laptop decides to be slower or faster and
+the whole thing breaks.*
+
+**What is NOT fixed, and is now the open defect:** the race itself. Three
+milliseconds inside Apple's stack is not a shipping condition. Keeping 1.3 MB
+of bytes that nothing reads, because they happen to win it, is a workaround.
+The fix is to order it explicitly — the obvious lever is the `2cn`
+accelerator-start hook, which could wait, bounded, until our HWLibs patches
+have actually applied; the risk is sleeping on an IOKit matching thread, and
+matching runs on a thread pool so another thread should run HWLibs' start,
+which is an assumption worth exactly one boot. Untested, and no boot spent on
+it.
+
+**Also unresolved, and published rather than guessed (rule 14):** AMD's
+`LICENSE.amdgpu` could not be retrieved — GitLab renders the file view
+client-side, kernel.org's cgit returned 403 and 404, a GitHub mirror 404, and
+the Chromium and Android mirrors served nothing. It permits redistribution in
+binary form; these arrays carry each image with its 0x100-byte container
+header stripped, which is a modification, and the exact clause decides it.
+**A binary carrying them must not be published until that is settled.**
