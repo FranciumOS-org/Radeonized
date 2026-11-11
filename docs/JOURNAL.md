@@ -67429,3 +67429,110 @@ from the MTL-only helper as an IOSurface - and the Metal cave is ON this boot,
 so they would be a case its table does not cover, not an unpatched path.
 Untested; the discriminator is whether disarming the Metal cave changes them
 at all, which is the same inert-dial check `2 -> 27` just paid for.
+
+## 3FW — a release build that carries nobody else's bytes, and two things the publication commit broke (nothing booted)
+
+Another session asked which licence covers `firmware/680m-vbios.rom` and the
+`yellow_carp` blobs before building a public release. The premise needed
+correcting in both directions.
+
+**The repository publishes neither.** `.gitignore` line 4 is `firmware/`, and
+`git ls-files firmware/` is empty: the ROM and the `.bin` files have never been
+committed.
+
+**But the firmware is in the tree as source.** `src/plugin/fw_yellow_carp.cpp`
+(7.0 MB) and `src/plugin/fw_yellow_carp_rlc.cpp` (956 KB) are tracked, and are
+linux-firmware's `amdgpu/yellow_carp_*.bin` payloads transcribed into C arrays
+with the 0x100-byte header stripped, which the file's own comment states. And
+the VBIOS, while never committed, goes into every built binary: `Makefile:434`
+generates `vbios_data.h` and `RembrandtGPUPeer.cpp` publishes it as
+`ATY,bin_image`. So a *source* release carried the firmware and a *binary*
+release carried both. The README claimed MIT over the whole tree and named
+only Lilu and MacKernelSDK.
+
+Two licence problems, not one. AMD's `LICENSE.amdgpu` does permit binary
+redistribution — that is what linux-firmware is for — but the usual wording is
+"without modification", and header-stripping is a modification. The VBIOS has
+no redistribution grant at all: it is a dump of one board's firmware.
+
+### What was built
+
+`RELEASE=1`, into its own `build-release/` tree so a release can never be
+handed an object compiled against the development ROM:
+
+- `RB_FW_YC=0` drops the two firmware translation units and compiles out the
+  `_IpiSetFwEntry` substitution that reads them. Nothing in the shipping
+  configuration consumes it anyway: the PSP hardware path dry-runs and aborts
+  before any hardware write without `-rbgpupsphw` (`kern_start.cpp:1062`), and
+  the five RLC sub-images are behind `-rbgpurlcsub`.
+- `RB_VBIOS_BAKED=0` drops `vbios_data.h`. The peer now reads `ATY,bin_image`
+  from **its own personality** first and forwards that to the PCI device, so
+  the image arrives from the installed bundle. `tools/vbios_plist.py` puts a
+  machine's own image there, out of its own ACPI VFCT table.
+
+**Measured, with the development build as the control** — the point being that
+an absent needle only means something if the same needle is present somewhere:
+
+```
+build/out            1818032 bytes   vbios PRESENT   firmware PRESENT
+build-release/out     455088 bytes   vbios absent    firmware absent
+```
+
+The needle is 24 bytes from offset 128 of the ROM (the `REMBRANDT` and
+`PCI_EXPRESS` strings) and the first 16 bytes of `yellow_carp_ce`'s signed
+image. The image `tools/vbios_plist.py` extracts from `firmware/VFCT.aml` is
+sha256 `27ed5802…` — byte-identical to the ROM the development build compiles
+in and to `vbios_header.py`'s recorded digest, so a tester's own dump
+reproduces exactly the image every measurement in this journal was taken with.
+
+There is no live route to the table. macOS publishes no ACPI tables in the IO
+registry on this platform: `ioreg -lw0 | grep -c 'ACPI Tables'` is **0**, and
+no four-letter table property exists anywhere in the registry. OpenCore's
+SysReport is the only way, which costs one reboot between turning it on and
+reading the dump.
+
+`app/Sources/Radeonize/Core/VFCT.swift` does the same parse in Swift, because
+the app may use nothing outside the base system and `python3` is a Command
+Line Tools shim. Checked against the real table: the same 44544 bytes as
+`tools/vfct.py`, the plist round trip returns what went in, and an empty, a
+truncated and a non-VFCT table are each refused. Every walk over the table is
+bounded by its declared length, never by a terminator. `radeonize-helper.sh`
+gains `sysreport on|off` and `vfct-dump`; the UI that sequences them is not
+written.
+
+`efi_install` now `cmp`s `Contents/Info.plist` as well as the binary. The
+VBIOS travels in that plist now, so matching the binary alone would let a
+short write leave the driver with no VBIOS, and nothing would say so until the
+next boot.
+
+### Two things `d8fc2b7` broke, found by trying to build a clean tree
+
+Both made `make` fail for everyone, and neither was a licence question:
+
+- `docs/linux-ref/` is gone, and `tools/hosttest/smu13_test.c` includes one
+  header out of it unmodified. Only `smu13_driver_if_yellow_carp.h` is needed
+  to build. `tools/fetch_linux_ref.sh` fetches it into `third_party/` pinned
+  to linux v6.6 and verified by digest — which also keeps the GPL-2.0 header
+  out of this repository. The v6.6 copy is byte-identical to the one the tests
+  were written against; v6.1's differs by 12 bytes.
+- `tests/data/rembrandt-680m-tufa15.bin` is gone, and two checks fail without
+  it by design (`dpdto_test.c`'s own comment: a check that silently skips is
+  not a check). Restored rather than weakened: a 10 KB IP discovery table read
+  off the device, no signed firmware and no code in it.
+
+Also `tools/efi.sh vbios` asked `vfct.py` for `1002:1681` only, so a `164d`
+board would have failed on a table that holds its image perfectly well. It now
+tries both ids and prints the table's contents if neither is there.
+
+`CLAUDE.md` had also stopped existing in this checkout — the publication
+rewrite carried it out of every commit, and the working copy went with it.
+Recovered from `9836d82`, the pre-rewrite commit that holds this session's
+`wdt=-1` and 3rec-b corrections, and left untracked.
+
+### Not verified
+
+**That the kernel reads the property.** The peer logs which source it used and
+sets a `vbios_src` diag key — 1 bundle, 2 baked, 0 neither — so one boot
+settles it, and it is the same boot the two-id `IOPCIMatch` still needs. Until
+that boot, the release artifact is a thing that compiles and whose bytes have
+been counted, not a thing known to work.
