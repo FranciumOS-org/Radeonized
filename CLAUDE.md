@@ -105,6 +105,12 @@ means hybrid).
   over it. Never hand out a `build/` plugin: it contains the board's VBIOS
   and 1.3 MB of AMD firmware (3fw).
 - **Always check the UUID moved** (`dwarfdump --uuid build/out/...`).
+- **A DANGLING `extern` OF OURS LINKS CLEAN AND PANICS (3fxf).** `-Xlinker
+  -kext` defers every undefined symbol, and **`kmutil libraries -p` reports
+  nothing** — 3fxe deleted `yc_rlc_img`, left 2jm's `extern` behind, and the
+  wild GOT slot page-faulted 19.4 s into every accelerated boot. `make
+  plugin` now refuses the link when `nm -u` shows `yc_|rbgpu|_rb_|Rembrandt|
+  RBAMD|RBGPU`.
 - For `src/fbkext`, check the UUID **inside the collection**, not in
   `/Library/Extensions` — different facts, three boots went to the gap:
   `kmutil inspect -B /Library/KernelCollections/AuxiliaryKernelExtensions.kc
