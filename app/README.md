@@ -46,3 +46,21 @@ the standard macOS administrator prompt. The helper is the only root code path. 
 This build compiles and the helper's EFI config edit was checked on a sample plist. The
 install and restore paths have **not** been run on a real EFI or kernel collection. Test them
 on a machine you can recover, with a known-good OpenCore boot entry available.
+
+## Requirements on a tester's Mac
+
+The installed app needs only what ships with macOS. It does not need Xcode or the
+Command Line Tools: the UUID is read in Swift (`MachOUUID.swift`), and the config edit
+uses `plutil`. Building the app from source still needs the Command Line Tools.
+
+## Security notes
+
+- The helper runs as root from inside the app bundle, through the standard
+  administrator prompt. Anyone who can write to the bundle can run code as root.
+  That is acceptable for a beta; ship it signed before wider distribution.
+- Release downloads are checked against the `.sha256` published with them. That
+  protects against corruption and tampering in transit, not against a compromised
+  release.
+- Install and restore change the EFI and the system kernel collection. The UUID of the
+  framebuffer is checked inside the collection after the write, and the copied kexts
+  are compared byte-for-byte with what was staged.
