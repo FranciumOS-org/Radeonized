@@ -5553,6 +5553,16 @@ static bool hooked_accel_start_2cn(void *accel, void *provider) {
                   "accelerator detaches (survive mode)");
         return false;
     }
+    if (ret) {
+        /* 3fwd: the boot sentinel's success signal. The accelerator attaching
+         * is what this boot exists to do, so the latch clears here - about 7 s
+         * in - instead of waiting out the 60 s timer. After this a deliberate
+         * reboot costs nothing, which is what made five boots unreadable on
+         * 2026-11-11. The timer stays as the backstop for a boot that never
+         * accelerates on purpose. */
+        extern void rbgpu_sentinel_accelerator_ok(void);
+        rbgpu_sentinel_accelerator_ok();
+    }
     return ret;
 }
 

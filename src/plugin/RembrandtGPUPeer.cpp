@@ -2375,7 +2375,38 @@ bool rbgpu_nvram_armed(const char *var, uint32_t *why) {
 // of rapid reboots, and then a bad boot is the user's problem again.
 static const uint32_t kRbSentinelMs = 60000;
 
+/* 3fwd: the latch is cleared on a SUCCESS SIGNAL as well as on the timer.
+ *
+ * The timer alone cannot tell "the user rebooted on purpose" from "the machine
+ * died", so every reboot inside 60 s spent the NEXT boot stock. On
+ * 2026-11-11 five boots were read and three were stock ones nobody had asked
+ * for; two of those were then counted as evidence that a build was broken.
+ * A tester would hit exactly that and report an unaccelerated desktop.
+ *
+ * So the accelerator attaching clears it immediately - about 7 s into a good
+ * boot rather than 60 - and after that a deliberate reboot costs nothing. The
+ * timer STAYS as the backstop, because a boot that never accelerates on
+ * purpose (`rbgpu-arm=0`, `-rbgpustock`, a recovery boot) would otherwise
+ * never clear the latch and would make every following boot stock: the exact
+ * trap, moved rather than removed. Whichever fires first wins; the other is a
+ * no-op, and `sentinel_cleared_by` says which it was.
+ */
+static uint32_t g_rbSentinelCleared = 0;
+
+static void rbgpu_sentinel_clear_now(const char *why, uint32_t by);
+
+void rbgpu_sentinel_accelerator_ok(void) {
+    rbgpu_sentinel_clear_now("the accelerator attached", 2);
+}
+
 static void rbgpu_sentinel_clear(thread_call_param_t, thread_call_param_t) {
+    rbgpu_sentinel_clear_now("the 60000 ms timer expired", 1);
+}
+
+static void rbgpu_sentinel_clear_now(const char *why, uint32_t by) {
+    if (g_rbSentinelCleared) {
+        return;   /* whichever fired first already did it */
+    }
     IORegistryEntry *options = g_rbgpuOptions;
     if (!options) {
         options = IORegistryEntry::fromPath("/options", gIODTPlane);
@@ -2403,8 +2434,16 @@ static void rbgpu_sentinel_clear(thread_call_param_t, thread_call_param_t) {
         }
     }
     rbgpu_diag_set_num("sentinel_cleared", ok ? 1 : 0);
-    rbgpu_log("2xw: sentinel cleared after %u ms: %s", kRbSentinelMs,
-              ok ? "this boot counts as survived" :
+    if (ok) {
+        /* Only a VERIFIED clear is attributed. A failed read-back leaves the
+         * key at 0 so the other path still tries (2eh: say which, or the two
+         * mechanisms are indistinguishable in the record). */
+        g_rbSentinelCleared = 1;
+        rbgpu_diag_set_num("sentinel_cleared_by", by);
+    }
+    rbgpu_log("2xw/3fwd: sentinel cleared because %s: %s", why,
+              ok ? "this boot counts as survived, and rebooting now costs "
+                   "nothing" :
                    "the read-back FAILED, so the next boot may come up stock");
 }
 
