@@ -67246,3 +67246,63 @@ that would be needed to decline selectively instead of entirely.
 our own. **The marker work is not needed** — Lilu already had the detection
 and we had opted out of it. The plan did its job by being cheap enough to run
 before any of that was written.
+
+## 3rec-b: the Recovery hang is our IOService, not Lilu's run mode
+
+3rec declared `LiluAPI::AllowNormal` alone and the user's next Recovery boot
+still failed. The photograph of that boot carries the decisive line:
+
+    RembrandtGPU: 2xw: sentinel cleared after 60000 ms: this boot counts as survived
+
+`RembrandtGPUPeer::start` ran with `AllowNormal` in force, so the declaration
+is not what was loading us. Confirmed free, no boot: the EFI holds
+`04C138CE` (`sudo ./tools/efi.sh status`), which is the 3rec build, so the
+photographed boot ran it.
+
+**Why the declaration could never have worked.** Lilu's run mode gates Lilu's
+own callbacks - the patcher and the kext hooks - and nothing else. The
+plugin's `Info.plist` publishes `IOKitPersonalities` whose first entry matches
+`IOProviderClass = IOResources`, `IOResourceMatch = IOKit`. That resource
+exists in every boot there is, so IOKit starts the service whatever Lilu
+decided about the environment. 3rec is still the correct declaration and
+stays; it was simply aimed at a lever that was not holding the door.
+
+The rest of the photograph says Recovery is alive and only the display is
+missing: launchd spawns `softwareupdated`, `distnoted`,
+`MobileSoftwareUpdate.CleanupPreparePathService`, AirPort comes up, and the
+verbose console is never taken over. That matches a boot where no framebuffer
+claims the panel.
+
+**The framebuffer is eliminated as the cause by the user's own two trips.**
+`rbgpu-arm=0` did NOT fix Recovery, and rule 38 says the framebuffer declines
+the panel when the accelerator is disarmed - so the panel was already free in
+that boot and it still hung. `-rbgpuoff` DID fix it, and `-rbgpuoff` returns
+false from the top of `RembrandtGPUPeer::start`. The fix therefore belongs on
+that exact line.
+
+**`rbgpu_recovery_boot()`**, in `RembrandtGPUPeer.cpp`, called from `start`
+immediately after the `-rbgpuoff` check. Two independent signals, OR'd, each
+with its normal-boot control measured on this machine rather than assumed:
+
+1. `/chosen` carries one of `boot-ramdmg-extents`, `container-dmg`,
+   `root-dmg`, `auth-root-dmg`. These are the four names read out of the
+   EFI's own `Lilu.kext` binary with `strings`, so we test the same
+   discriminator Lilu 1.7.3 tests. CONTROL, measured this boot:
+   `ioreg -p IODeviceTree -n chosen -rl` shows NONE of the four. An installer
+   or recovery root IS a disk image, which is why the property exists.
+2. `/chosen`'s `boot-file` names a recovery or installer path. CONTROL,
+   measured this boot: `boot\System\Library\KernelCollections\BootKernelExtensions.kc`.
+   The two needles - `com.apple.recovery.boot` and `macOS Install Data` - are
+   the directory components of the two prelinkedkernel paths the same Lilu
+   binary carries.
+
+Bounded by the blob length, never by a NUL. Cached. Publishes
+`RBGPURecovery` through `rbgpu_diag_set_num("recovery", ...)` with the signal
+number, 0 meaning normal, so a stock boot can be told from a stock boot that
+happened for the wrong reason (rule 14). Fails SAFE towards "not recovery": an
+unreadable `/chosen` answers normal, because a desktop that silently refuses
+to accelerate is the failure this project cannot debug from inside.
+
+Not yet verified on hardware. The negative control is already in hand - this
+desktop boot reads signal 0 on both tests - and the positive is the next
+Recovery boot.
