@@ -1,18 +1,22 @@
-# Radeonized
+<p align="center">
+  <img src="assets/brand/radeonized-icon.png" alt="Radeonized" width="200">
+</p>
 
-Graphics acceleration for the AMD Radeon 680M / 660M / 610M (Rembrandt APU, PCI
-IDs `1002:1681` and `1002:164d`) on macOS, as an OpenCore-booted AMD-based
-hackintosh. These are the integrated GPUs in Ryzen 6000 and 7x35 laptops.
-Apple never shipped a driver for them, so macOS falls back to an unaccelerated
-framebuffer: no Metal, no hardware video, a sluggish desktop and no brightness
-control.
+<p align="center">
+  <b>Graphics for the AMD Radeon 680M (Rembrandt) on macOS.</b><br>
+  A kernel extension, a Lilu plugin and a framebuffer for Rembrandt APUs, booted through OpenCore.
+</p>
 
-Radeonized teaches Apple's existing `AMDRadeonX6000` stack to drive the chip,
-through a Lilu plugin and a framebuffer kext.
+<p align="center">
+  <img alt="macOS Sequoia and Tahoe" src="https://img.shields.io/badge/macOS-Sequoia%20%7C%20Tahoe-0B0D12?logo=apple&logoColor=white">
+  <img alt="Rembrandt 1002:1681" src="https://img.shields.io/badge/GPU-Radeon%20680M%20(1002%3A1681)-E0242B?logo=amd&logoColor=white">
+  <img alt="OpenCore" src="https://img.shields.io/badge/boot-OpenCore-7C5CFF">
+  <img alt="License MIT" src="https://img.shields.io/badge/license-MIT-blue">
+</p>
 
-Nothing here is supported by Apple. Installing the kexts changes your boot
-configuration. Keep a known-good OpenCore boot entry before you install
-anything.
+<p align="center"><b>English</b></p>
+
+---
 
 ## What works
 
