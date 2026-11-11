@@ -20,6 +20,7 @@
 #include "rb_smu13.h"
 // 2pm: the generated dcn302 -> dcn312 register deny list (tools/re/dcn_denylist.py)
 #include "rb_dcn_deny.h"
+#include "rb_fwhdr.h"   /* 3fxe: slice the embedded AMD firmware containers */
 
 #ifndef RB_HWID_MP1
 #define RB_HWID_MP1 1
@@ -2847,7 +2848,7 @@ static uint8_t hooked_IpiSetFwEntry(void *instance, void *fw_entry) {
         // exact yellow_carp counterparts for (boot-31 symbol map). The swap is
         // observable in dry-run logs but only consumed if -rbgpupsphw is set.
         // d[2..3] = data_ptr, d[4] = size. Images are headerless (see
-        // fw_yellow_carp.cpp): data_ptr -> image bytes, size -> image size.
+        // fw_blobs.S): data_ptr -> image bytes, size -> image size.
         // 2jp: the five RLC sub-images 2aj never supplied. Apple's
         // _gc_10_3_get_fw_constants registers rlc_srlist_cntl/gpm/srm and
         // rlc_lx6_iram/dram as separate firmware entries (switch indices
@@ -2873,63 +2874,81 @@ static uint8_t hooked_IpiSetFwEntry(void *instance, void *fw_entry) {
         // unknown. -rbgpurlcsub gates all five so a bad outcome is one
         // boot-arg away from reverted.
 #if RB_FW_YC
-        /* 3fw: the yellow_carp images are a build-time option. A release
-         * build omits src/plugin/fw_yellow_carp*.cpp, so this swap compiles
-         * out with them; the PSP hardware path it feeds is a dry run unless
-         * -rbgpupsphw, so nothing in the shipping configuration reads it. */
-        extern const uint8_t yc_rlc_srlist_cntl_img[];
-        extern const uint8_t yc_rlc_srlist_gpm_img[];
-        extern const uint8_t yc_rlc_srlist_srm_img[];
-        extern const uint8_t yc_rlc_iram_img[];
-        extern const uint8_t yc_rlc_dram_img[];
-        extern const uint32_t yc_rlc_srlist_cntl_img_size;
-        extern const uint32_t yc_rlc_srlist_gpm_img_size;
-        extern const uint32_t yc_rlc_srlist_srm_img_size;
-        extern const uint32_t yc_rlc_iram_img_size;
-        extern const uint32_t yc_rlc_dram_img_size;
+        /* 3fxe: the yellow_carp containers, embedded WHOLE by fw_blobs.S and
+         * sliced here from each file's own header (rb_fwhdr.h), which is what
+         * Linux does. Until now the plugin carried transcribed payloads with
+         * the sizes hardcoded as hex right here; the hosttest pins the SHA-256
+         * of every slice against those bytes, so this produces exactly what
+         * shipped. The sizes are no longer typed by anyone.
+         *
+         * A release build still carries them - boot 542 measured this swap
+         * running twelve times, so they are functionally required, not
+         * ballast. NOFW=1 compiles the whole block out. */
+        extern const uint8_t  yc_ce_file[],   yc_pfp_file[],  yc_me_file[];
+        extern const uint8_t  yc_mec_file[],  yc_rlc_file[],  yc_sdma_file[];
+        extern const uint8_t  yc_toc_file[];
+        extern const uint32_t yc_ce_file_len,   yc_pfp_file_len,  yc_me_file_len;
+        extern const uint32_t yc_mec_file_len,  yc_rlc_file_len,  yc_sdma_file_len;
+        extern const uint32_t yc_toc_file_len;
 
-        extern const uint8_t yc_ce_img[];
-        extern const uint8_t yc_pfp_img[];
-        extern const uint8_t yc_me_img[];
-        extern const uint8_t yc_mec_img[];
-        extern const uint8_t yc_rlc_img[];
-        extern const uint8_t yc_sdma_img[];
-        extern const uint8_t yc_toc_img[];
-        const uint8_t *yc_img = nullptr;
-        uint32_t yc_size = 0;
+        const uint8_t *yc_file = nullptr;
+        uint32_t yc_file_len   = 0;
+        int yc_sub             = -1;   /* an RLC sub-image, if this is one */
+
         switch (d[0]) {
-            case 1:  yc_img = yc_ce_img;   yc_size = 0x40380; break; // CE
-            case 2:  yc_img = yc_pfp_img;  yc_size = 0x40400; break; // PFP
-            case 3:  yc_img = yc_me_img;   yc_size = 0x40400; break; // ME
-            case 6:  yc_img = yc_mec_img;  yc_size = 0x41680; break; // MEC
-            case 9:  yc_img = yc_rlc_img;  yc_size = 0x06200; break; // RLC
-            case 14: yc_img = yc_sdma_img; yc_size = 0x08400; break; // SDMA0
-            case 36: yc_img = yc_toc_img;  yc_size = 0x00600; break; // PSP TOC
+            case 1:  yc_file = yc_ce_file;   yc_file_len = yc_ce_file_len;   break; // CE
+            case 2:  yc_file = yc_pfp_file;  yc_file_len = yc_pfp_file_len;  break; // PFP
+            case 3:  yc_file = yc_me_file;   yc_file_len = yc_me_file_len;   break; // ME
+            case 6:  yc_file = yc_mec_file;  yc_file_len = yc_mec_file_len;  break; // MEC
+            case 9:  yc_file = yc_rlc_file;  yc_file_len = yc_rlc_file_len;  break; // RLC
+            case 14: yc_file = yc_sdma_file; yc_file_len = yc_sdma_file_len; break; // SDMA0
+            case 36: yc_file = yc_toc_file;  yc_file_len = yc_toc_file_len;  break; // PSP TOC
             default: break;
         }
-        // 2jp: the RLC sub-images, opt-in.
-        if (!yc_img && rbgpu_2jp_enabled()) {
+
+        // 2jp: the RLC sub-images, opt-in. All five live inside the one
+        // container, so the file is the same and only the slice differs.
+        if (!yc_file && rbgpu_2jp_enabled()) {
             switch (d[0]) {
-                case 26: yc_img = yc_rlc_srlist_cntl_img;
-                         yc_size = yc_rlc_srlist_cntl_img_size; break;
-                case 27: yc_img = yc_rlc_srlist_gpm_img;
-                         yc_size = yc_rlc_srlist_gpm_img_size;  break;
-                case 28: yc_img = yc_rlc_srlist_srm_img;
-                         yc_size = yc_rlc_srlist_srm_img_size;  break;
-                case 29: yc_img = yc_rlc_iram_img;
-                         yc_size = yc_rlc_iram_img_size;        break;
-                case 30: yc_img = yc_rlc_dram_img;
-                         yc_size = yc_rlc_dram_img_size;        break;
+                case 26: yc_sub = RB_FWHDR_RLC_SRLIST_CNTL; break;
+                case 27: yc_sub = RB_FWHDR_RLC_SRLIST_GPM;  break;
+                case 28: yc_sub = RB_FWHDR_RLC_SRLIST_SRM;  break;
+                case 29: yc_sub = RB_FWHDR_RLC_LX6_IRAM;    break;
+                case 30: yc_sub = RB_FWHDR_RLC_LX6_DRAM;    break;
                 default: break;
             }
-            if (yc_img) { rbgpu_diag_inc("yc_rlc_swapped"); }
+            if (yc_sub >= 0) {
+                yc_file     = yc_rlc_file;
+                yc_file_len = yc_rlc_file_len;
+            }
         }
-        if (yc_img) {
-            d[2] = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(yc_img));
-            d[3] = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(yc_img) >> 32);
-            d[4] = yc_size;
-            rbgpu_log("_IpiSetFwEntry YC-SWAP id=%u -> img=%p size=0x%x", d[0], yc_img, yc_size);
-            rbgpu_diag_inc("yc_swapped");
+
+        if (yc_file) {
+            uint32_t yc_off = 0, yc_size = 0;
+            int rc = (yc_sub >= 0)
+                   ? rb_fwhdr_rlc_sub(yc_file, yc_file_len, yc_sub, &yc_off, &yc_size)
+                   : rb_fwhdr_payload(yc_file, yc_file_len, &yc_off, &yc_size);
+
+            if (rc != RB_FWHDR_OK) {
+                /* Rule 14: a refused slice must not look like an id we do not
+                 * handle. Apple's own image stays in place and the code says
+                 * which container and which reason. */
+                rbgpu_log("_IpiSetFwEntry YC-SWAP id=%u REFUSED %d (file=%p "
+                          "len=0x%x sub=%d) - Apple's image left in place",
+                          d[0], rc, yc_file, yc_file_len, yc_sub);
+                rbgpu_diag_set_num("yc_refusal", (uint64_t)rc);
+                rbgpu_diag_inc("yc_refused");
+            } else {
+                const uint8_t *yc_img = yc_file + yc_off;
+                d[2] = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(yc_img));
+                d[3] = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(yc_img) >> 32);
+                d[4] = yc_size;
+                rbgpu_log("_IpiSetFwEntry YC-SWAP id=%u -> img=%p size=0x%x "
+                          "(sliced at 0x%x of a 0x%x-byte container, sub=%d)",
+                          d[0], yc_img, yc_size, yc_off, yc_file_len, yc_sub);
+                rbgpu_diag_inc("yc_swapped");
+                if (yc_sub >= 0) { rbgpu_diag_inc("yc_rlc_swapped"); }
+            }
         }
 #endif /* RB_FW_YC */
         // 2al: skip Navi21 TAP_DELAYS (ids 31-35: GLOBAL, SE0-SE3). Boot 35

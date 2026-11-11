@@ -4,3 +4,4 @@ logs/
 firmware/
 third_party/
 build-release/
+third_party/amd-fw/

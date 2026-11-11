@@ -224,8 +224,11 @@ anything else:
   they came from.
 - The **VBIOS** belongs to the board vendor. A released build carries none;
   it uses the image already present in the machine it is installed on.
-- The **AMD firmware images** from linux-firmware are transcribed into
-  `src/plugin/fw_yellow_carp*.cpp` and are compiled into the plugin. They keep
+- The **AMD firmware images** from linux-firmware are embedded **whole and
+  byte-exact** by `src/plugin/fw_blobs.S` and sliced at runtime by
+  `src/common/rb_fwhdr.h`, so every byte the binary carries is a verbatim copy
+  of an upstream file. They are fetched by `sh tools/fetch_amd_fw.sh`, verified
+  by digest, and are **not** in this repository. They keep
   AMD's own license, reproduced verbatim in
   [`third_party/LICENSE.amdgpu`](third_party/LICENSE.amdgpu) as that license
   requires, with the summary and the notices in
@@ -237,7 +240,9 @@ anything else:
   materials — which is what those two files are. It sets **no condition about
   distributing the files unmodified**; an earlier version of this section said
   otherwise and was wrong. Nothing here disassembles the microcode: the images
-  are moved as opaque bytes.
+  are moved as opaque bytes, and `LICENSE.amdgpu` is copied into the built
+  bundle's `Contents/Resources/` so it travels with the binary rather than only
+  with this repository.
   `NOFW=1` builds without them, but **that build is not expected to
   accelerate**: boot 542 measured `yc_swapped 12`, so the images are consumed
   twelve times on an accelerated boot and are functionally required.

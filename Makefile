@@ -113,14 +113,18 @@ all: kext tools
 # third_party/. A checkout from before the split still has docs/linux-ref.
 LINUX_REF := $(firstword $(wildcard third_party/linux-ref) $(wildcard docs/linux-ref) third_party/linux-ref)
 
-HOSTTEST_SRCS := tools/hosttest/hosttest.c tools/hosttest/drr_test.c tools/hosttest/smu13_test.c tools/hosttest/agdc_test.c tools/hosttest/otg_test.c tools/hosttest/hubp_test.c tools/hosttest/hpd_test.c tools/hosttest/pg_test.c tools/hosttest/dig_test.c tools/hosttest/enc_test.c tools/hosttest/digbe_test.c tools/hosttest/dpaltq_test.c tools/hosttest/aux_test.c tools/hosttest/dpcd_test.c tools/hosttest/dpalt_test.c tools/hosttest/dio_test.c tools/hosttest/dpcspipe_test.c tools/hosttest/strenc_test.c tools/hosttest/strprog_test.c tools/hosttest/phy_test.c tools/hosttest/phyfsm_test.c tools/hosttest/backlight_test.c tools/hosttest/defaults_test.c tools/hosttest/dmub_test.c tools/hosttest/osver_test.c tools/hosttest/retire_test.c tools/hosttest/gpuname_test.c tools/hosttest/dpdto_test.c tools/hosttest/dptx_test.c tools/hosttest/otgprog_test.c
+# 3fxe: the AMD firmware containers the plugin embeds whole. Fetched by
+# tools/fetch_amd_fw.sh, never committed - see third_party/LICENSE.amdgpu.
+AMD_FW := third_party/amd-fw
+
+HOSTTEST_SRCS := tools/hosttest/hosttest.c tools/hosttest/drr_test.c tools/hosttest/smu13_test.c tools/hosttest/agdc_test.c tools/hosttest/otg_test.c tools/hosttest/hubp_test.c tools/hosttest/hpd_test.c tools/hosttest/pg_test.c tools/hosttest/dig_test.c tools/hosttest/enc_test.c tools/hosttest/digbe_test.c tools/hosttest/dpaltq_test.c tools/hosttest/aux_test.c tools/hosttest/dpcd_test.c tools/hosttest/dpalt_test.c tools/hosttest/dio_test.c tools/hosttest/dpcspipe_test.c tools/hosttest/strenc_test.c tools/hosttest/strprog_test.c tools/hosttest/phy_test.c tools/hosttest/phyfsm_test.c tools/hosttest/backlight_test.c tools/hosttest/defaults_test.c tools/hosttest/dmub_test.c tools/hosttest/osver_test.c tools/hosttest/retire_test.c tools/hosttest/gpuname_test.c tools/hosttest/dpdto_test.c tools/hosttest/dptx_test.c tools/hosttest/otgprog_test.c tools/hosttest/fwhdr_test.c
 
 hosttest: $(COMMON_SRCS) $(COMMON_HDRS) $(HOSTTEST_SRCS) $(BUILD_DIR)/kext/rb_smu13.o tools/hosttest/agdc_lookup_test.cpp src/plugin/rbgpu_agdc_lookup.hpp tools/hosttest/otg_kernel_test.cpp tools/hosttest/otg_kernel_shim.hpp src/plugin/rbgpu_agdc_otg.cpp
 hosttest: tools/hosttest/fb_vbl_test.cpp tools/hosttest/fb_vbl_shim.hpp src/fbkext/RBAMDFramebufferVBL.cpp
 	@mkdir -p $(OUT)
 	@test -f $(LINUX_REF)/smu13_driver_if_yellow_carp.h || \
 	    { echo "missing third_party/linux-ref: run 'sh tools/fetch_linux_ref.sh'" >&2; exit 1; }
-	@$(CC) $(HOST_CFLAGS) -I$(LINUX_REF) -Isrc/plugin $(HOSTTEST_SRCS) $(COMMON_SRCS) -o $(OUT)/hosttest
+	@$(CC) $(HOST_CFLAGS) -I$(LINUX_REF) -Isrc/plugin -DRB_FWHDR_DIR='"$(AMD_FW)"' $(HOSTTEST_SRCS) $(COMMON_SRCS) -o $(OUT)/hosttest
 	@$(OUT)/hosttest $(wildcard tests/data/*.bin)
 	@$(CXX) $(filter-out -std=gnu11,$(HOST_CFLAGS)) -std=c++17 -Isrc/plugin tools/hosttest/agdc_lookup_test.cpp -o $(OUT)/agdc_lookup_test
 	@$(OUT)/agdc_lookup_test
@@ -448,20 +452,26 @@ PLUGIN_VER  := 1.0.0
 # matching on AMDRadeonX6000_AMDRadeonHWServicesInterface) and the accelerator
 # (internally) as two asynchronous children, and our HWLibs deviceTypeTable
 # patch has to land before the accelerator reaches createHWInterface. Three
-# archived good boots win that by 2.5 / 2.6 / 3.6 ms; three consecutive boots
-# of the firmware-less build lost it by 67.8 ms and came up unaccelerated.
-# Nothing in the shipping configuration READS these bytes - the PSP hardware
-# path dry-runs without -rbgpupsphw - so they are ballast, and the race is the
-# real defect. Until that race is ordered rather than won, the ballast stays:
-# a tester's disk or CPU deciding the boot is not a shipping condition.
+# 3fxc ORDERED THE RACE, so the images are no longer holding it together: boot
+# 542 withheld LoadAccelerator until our HWLibs patches applied and came up
+# accelerated with the gate held 6225 ms. They are still FUNCTIONALLY required
+# though - boot 542 measured `yc_swapped 12` - so NOFW=1 is not a shipping
+# configuration and is not expected to accelerate.
 #
-# NOFW=1 drops them anyway, which is what to build once the ordering is fixed.
+# 3fxe: they go in as the WHOLE upstream .bin files, embedded with .incbin by
+# src/plugin/fw_blobs.S and sliced at runtime by src/common/rb_fwhdr.h. The
+# previous form - 8 MB of hex text in src/plugin/fw_yellow_carp*.cpp, now
+# deleted, carrying
+# each payload with its container header stripped - is gone: AMD's licence
+# grants distribution of "copies, in binary form only" and grants no right to
+# excerpt, so a verbatim file copy needs no interpretation. The files are
+# fetched by tools/fetch_amd_fw.sh and are NOT in this repository.
 NOFW ?= 0
 ifeq ($(NOFW),1)
 PLUGIN_FW_OBJS :=
 PLUGIN_FW_DEFS := -DRB_FW_YC=0
 else
-PLUGIN_FW_OBJS := $(BUILD_DIR)/plugin/fw_yellow_carp.o $(BUILD_DIR)/plugin/fw_yellow_carp_rlc.o
+PLUGIN_FW_OBJS := $(BUILD_DIR)/plugin/fw_blobs.o
 PLUGIN_FW_DEFS := -DRB_FW_YC=1
 endif
 ifeq ($(RELEASE),1)
@@ -485,6 +495,22 @@ $(BUILD_DIR)/plugin/%.o: $(PLUGIN_SRC)/%.cpp
 	@mkdir -p $(dir $@)
 	@echo "  CXX  plugin/$*.cpp"
 	@$(CXX) $(PLUGIN_CXXFLAGS) -Werror -c $< -o $@
+
+# 3fxe: the firmware blobs. .incbin looks on the assembler include path, which
+# is why the directory is passed with -I rather than pasted into the source.
+# An absent file is named here rather than reported as a cryptic assembler
+# error, with the one command that fixes it.
+AMD_FW_BINS := $(addprefix $(AMD_FW)/yellow_carp_,ce.bin pfp.bin me.bin mec.bin rlc.bin sdma.bin toc.bin)
+
+$(BUILD_DIR)/plugin/fw_blobs.o: $(PLUGIN_SRC)/fw_blobs.S $(AMD_FW_BINS)
+	@mkdir -p $(dir $@)
+	@for f in $(AMD_FW_BINS); do \
+	    if [ ! -f "$$f" ]; then \
+	        echo "missing $$f: run 'sh tools/fetch_amd_fw.sh'" >&2; exit 1; \
+	    fi; \
+	done
+	@echo "  ASM  plugin/fw_blobs.S (7 AMD containers, whole)"
+	@$(CC) $(ARCH) $(MINOS) -isysroot $(SDK) -x assembler-with-cpp $(PLUGIN_FW_DEFS) -I$(AMD_FW) -c $< -o $@
 
 # The VBIOS (B0) goes in as a generated header; firmware/ and build/ are not committed.
 $(VBIOS_HDR): $(VBIOS_ROM) tools/vbios_header.py
@@ -554,6 +580,15 @@ plugin: hosttest osrange $(PLUGIN_OBJS) $(PLUGIN_SRC)/Info.plist
 	@! grep -n '\$$(' $(PLUGIN_BUNDLE)/Contents/Info.plist
 	@$(CXX) $(ARCH) $(MINOS) -isysroot $(SDK) -nostdlib -Xlinker -kext \
 	    -L$(MKSDK)/Library/x86_64 $(PLUGIN_OBJS) -lkmod -o $(PLUGIN_BIN)
+ifneq ($(NOFW),1)
+	@# 3fxe: AMD's licence requires its notices to be reproduced in the
+	@# materials provided WITH the microcode. A README in the repository does
+	@# not travel with a release zip, so the licence goes inside the bundle,
+	@# where it survives repackaging by anyone downstream.
+	@mkdir -p $(PLUGIN_BUNDLE)/Contents/Resources
+	@cp third_party/LICENSE.amdgpu $(PLUGIN_BUNDLE)/Contents/Resources/LICENSE.amdgpu
+	@test -s $(PLUGIN_BUNDLE)/Contents/Resources/LICENSE.amdgpu
+endif
 	@codesign --force --sign - $(PLUGIN_BUNDLE) 2>/dev/null || true
 	@echo "  KEXT $(PLUGIN_BUNDLE)"
 

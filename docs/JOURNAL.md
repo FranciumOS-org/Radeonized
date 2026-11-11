@@ -68016,3 +68016,99 @@ site could take an offset, which would make every distributed byte a verbatim
 file copy. The five RLC sub-images would become offsets into `yellow_carp_rlc.bin`
 rather than separate arrays, which is arguably cleaner than what is there now.
 Not done, because the licence does not require it.
+
+## 3FXE — the firmware goes in WHOLE, sliced at runtime, and the hex arrays are deleted
+
+A reader who knows this material better than I do read 3fxd's six questions
+and came back with three things worth acting on. All three are done.
+
+**1. The excerpt question, removed rather than argued.** Their reading: the
+defined term is "this microcode", not "this file", so a verbatim excerpt is a
+partial reproduction rather than a modification — but there is no excerpt
+grant, "all rights reserved" means a narrow construction, and a strict reading
+makes the licensed thing the file as AMD published it. Their fix is the obvious
+one and it is what Linux does: embed each `.bin` whole and byte-exact, slice at
+runtime from the container header.
+
+`src/plugin/fw_blobs.S` includes all seven `yellow_carp_*.bin` with `.incbin`,
+4096-aligned, and `src/common/rb_fwhdr.h` slices them. **Verified on the built
+binary:** all 7 whole files appear verbatim in the release Mach-O
+(`build-release`, 1 760 912 bytes). `.incbin` does not concatenate adjacent
+string literals, so the directory goes in as an assembler `-I` rather than
+pasted into the source — one build error's worth of learning.
+
+**The sizes are no longer typed by anyone.** The use site used to carry
+`0x40380`, `0x40400`, `0x41680`, `0x06200`, `0x08400`, `0x00600` as literals
+beside each id; they now come from `ucode_size_bytes` in the file that carries
+the image. The RLC sub-images come from the v2.2 header's own offset/size pairs.
+
+**2. Hex text in the repository, deleted.** `src/plugin/fw_yellow_carp.cpp`
+(6 987 225 bytes) and `fw_yellow_carp_rlc.cpp` (956 518 bytes) are gone, with
+`tools/fw_extract_rlc.py` that generated them. Their point: committed hex text
+is a distribution of its own, arguably still "binary form" because it is not
+source, but cleaner not to make the argument. `tools/fetch_amd_fw.sh` fetches
+the seven files by digest into `third_party/amd-fw/` (gitignored), on the model
+of `fetch_linux_ref.sh`.
+
+**3. Where the notice lives.** Their point is the one I had wrong in 3fxd: the
+condition is that the notices travel *with the Software*, and a README in the
+repository does not reach somebody who downloads only a release archive. The
+plugin's build now copies `LICENSE.amdgpu` into the bundle's
+`Contents/Resources/`, gated on `NOFW` so a build without the microcode does
+not claim it. Checked both ways: the release bundle has it, `NOFW=1` has zero
+`LICENSE*` files.
+
+Also from them, recorded and not acted on: analysing Apple's binaries is
+outside this licence entirely (it is scoped to "this Software", the microcode),
+parsing the container header is not reverse engineering because the format is
+declared in Linux's `amdgpu_ucode.h`, the line not to cross is disassembling
+the microcode itself even to debug a load failure, and the export paragraph
+adds nothing the law does not already impose for already-public binary firmware
+but is an agreement rather than a notice. Compiling blobs into a larger binary
+is squarely a distribution of copies — `CONFIG_EXTRA_FIRMWARE` does it and
+FreeBSD ships these same images as kernel modules.
+
+### The control, and why it survives the deletion
+
+**Every slice reproduces the deleted arrays byte for byte.** Before anything
+was removed, a script parsed all twelve arrays out of the two `.cpp` files and
+compared them to header-derived slices of the local `.bin` files: **11 of 11
+matched**, the twelfth (`sdma`) having no local file. Then the same comparison
+was run against the files **fetched fresh from upstream**: **12 of 12 matched**,
+`sdma` included, and the six files that existed locally were byte-identical to
+upstream's current ones. So upstream `main` today is what shipped, and the
+pins are stable.
+
+The arrays are now gone, so the control is their **SHA-256**, pinned in
+`tools/hosttest/fwhdr_test.c` — twelve payload digests plus seven whole-file
+digests, the latter the same numbers `fetch_amd_fw.sh` checks, verified at two
+points. A parser change, a wrong field offset, or an upstream file that is not
+the one this driver was validated against now fails in the hosttest rather than
+on hardware. An absent file is a **FAILURE, not a skip** (rule 26). The test
+carries its own SHA-256 so it depends on nothing but libc.
+
+`rb_fwhdr.h` refuses with **codes, never bools** — eleven of them, and a
+refusal leaves the caller's outputs untouched, which the test checks by
+seeding them with `0x5a5a`/`0xa5a5` and reading them back. `v2.2` and ip
+`10.3` are preconditions on the sub-image reader rather than details, because
+those fields do not exist before v2.1 and reading them anyway would return
+neighbouring words. The sub-images are checked not to overlap the main
+payload, which the deleted extractor never did.
+
+**Three break-it checks, each caught by a failing test** (rule 48): a wrong
+expected size, a flipped digest nibble, and `UCODE_ARRAY_OFFSET` moved from
+`0x18` to `0x1c` — the last failing all seven files with `refused 6`
+(E_OVERRUN), which is the right code for reading `crc32` as an offset. One
+process note: `git checkout` could not undo that third break because the file
+is new and untracked, and the restore looked successful while nine failures
+were still live. Caught by re-running the count, not by the command.
+
+**The swap itself now publishes a refusal.** If a slice is rejected the code
+logs the container, length and reason, sets `yc_refusal` and counts
+`yc_refused`, and leaves Apple's image in place — previously an unparseable
+container and an id we do not handle would have looked identical (rule 14).
+
+Development build `0F85A443`, release `CBEDD914`. `make clean` does not touch
+`build-release/`, which is its own `BUILD_DIR`, so a stale `fw_blobs.o` kept a
+deployment-target warning alive through two rebuilds; `make clean RELEASE=1`
+is the other half. 45 pre-existing warnings, unchanged. **Not booted.**
