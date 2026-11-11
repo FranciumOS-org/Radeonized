@@ -68194,3 +68194,69 @@ cannot act on. Not chased: 2jm is a dormant read-only probe, this chip loads
 by PSP autoload (`RLC_CNTL` 1, running) rather than RLC backdoor autoload, and
 nothing in the accelerated path reads that buffer. If it is ever re-opened the
 fix is an all-ones term beside `nz`, not more of `nz`.
+
+## 3VB (2026-11-11) — getting the VBIOS with no reboot: two candidates dead from source, one live
+
+The release build ships no VBIOS (3fw, and 3fxf's README states why: the
+display-object table is board wiring, not chip data). Today the owner's copy
+comes out of OpenCore's `SysReport`, which costs **one reboot on a DEBUG
+OpenCore**. The installer app wants that step gone. `amdgpu_get_bios()` tries
+seven sources in order, so the question is which of them a userspace or
+read-only-kext path on this machine could use. **Static only, no boots.**
+
+**First, the two that macOS does not offer at all.** `ioreg` on this machine:
+`AppleACPIPlatformExpert` publishes **no `ACPI Tables` property**, and the
+string `VFCT` appears **0 times in all of `ioreg -l -w0`** — so neither ATRM
+(an ACPI method call) nor VFCT is reachable from userspace. That is a measured
+negative, not an assumption, and it is what makes the reboot necessary today.
+
+**`ROM_INDEX`/`ROM_DATA` IS DEAD, AND THE SOURCE SAYS SO IN ONE LINE.**
+`amdgpu_soc15_read_bios_from_rom()` opens with
+
+    /* APU vbios image is part of sbios image */
+    if (adev->flags & AMD_IS_APU)
+        return false;
+
+Rembrandt is an APU. So the register path this handoff proposed as a candidate
+**cannot** be the source on this part, by the same file that would implement
+it. Eliminated with zero boots, and the comment also explains every other
+entry in the list: on an APU there is no separate ROM to read, only the system
+BIOS's own copy.
+
+**`igp_read_bios_from_vram` is rule-blocked AND probably false here.** It maps
+**BAR0 offset 0, 256 KB**. Two independent reasons not to pursue it: this
+project's probe rules say **never map BAR0's first 16 MB**, and our own
+measurement is that **the GOP framebuffer is BAR0 offset 0** — so if a copy
+was ever placed there the display has since been scanning out of it. Linux's
+own comment conditions the copy on *"if a discrete card is present"*, which in
+Eco mode is the configuration we are not in. Not a candidate.
+
+**THE LIVE CANDIDATE IS THE LEGACY SHADOW, AND IT IS WHAT `amdgpu_read_bios`
+ACTUALLY READS ON AN APU.** `amdgpu_read_bios()` calls `pci_map_rom()` on
+`PCI_ROM_RESOURCE`, and for the boot display device x86's
+`pci_fixup_video()` (`arch/x86/pci/fixup.c:312`) **overwrites that resource**:
+
+    res->start = 0xC0000;
+    res->end   = res->start + 0x20000 - 1;
+    res->flags = IORESOURCE_MEM | IORESOURCE_ROM_SHADOW | IORESOURCE_PCI_FIXED;
+
+So "Fetched VBIOS from ROM BAR" on an APU means **physical `0x000C_0000`, 128
+KB, the shadowed system video BIOS** — not a BAR at all.
+`amdgpu_read_platform_bios()` reads the same `pdev->rom`/`romlen` pair.
+
+**And the image we already have is exactly the shape that region holds**, which
+is free corroboration rather than another guess. `firmware/680m-vbios.rom`,
+taken from VFCT: **44544 bytes = 0xae00**, `55 aa` at 0, byte 2 = **87**, and
+`AMD_VBIOS_LENGTH(p) = p[2] << 9` = **44544 exactly**; header pointer at
+0x48/0x49 = `0x0190` with **`ATOM`** at `0x0194`; `AMD_VBIOS_SIGNATURE`
+`" 761295520"` at **0x30**, where `amdgpu_read_bios_from_rom` looks for it.
+A well-formed legacy option ROM, 128 KB window, 44544 bytes used.
+
+**Still a candidate, not a mechanism** (rule 17, rule 39): nothing here has
+read `0xC0000` on this machine, and macOS has no userspace route to physical
+memory, so the app cannot do this alone — it needs our kext. The confirmation
+is cheap and fits the probe rules as written: **one read-only 128 KB map of
+`0x000C_0000`**, which is neither BAR0 nor the carve-out, with
+`check_atom_bios()` as the verdict and the VFCT image already in hand as the
+byte-for-byte control in the same sample. If it matches, the per-machine VBIOS
+step becomes a property the peer publishes itself and the reboot disappears.
