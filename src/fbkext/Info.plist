@@ -43,7 +43,7 @@
 			<!-- Narrowed to this chip so the personality cannot claim the
 			     display on any other machine that loads this kext. -->
 			<key>IOPCIMatch</key>
-			<string>0x16811002</string>
+			<string>0x16811002 0x164d1002</string>
 		</dict>
 	</dict>
 	<key>OSBundleLibraries</key>

@@ -44,7 +44,7 @@
             <key>IOMatchCategory</key>
             <string>ATIFramebuffer</string>
             <key>IOPCIMatch</key>
-            <string>0x16811002</string>
+            <string>0x16811002 0x164d1002</string>
             <key>IOProbeScore</key>
             <integer>65000</integer>
             <key>IOProviderClass</key>
@@ -59,7 +59,7 @@
             <key>IOMatchCategory</key>
             <string>AMDRadeonX6000HWServices</string>
             <key>IOPCIMatch</key>
-            <string>0x16811002</string>
+            <string>0x16811002 0x164d1002</string>
             <key>IOPropertyMatch</key>
             <dict>
                 <key>LoadHWServices</key>
@@ -85,7 +85,7 @@
             <key>IOMatchCategory</key>
             <string>RBDisplayController</string>
             <key>IOPCIMatch</key>
-            <string>0x16811002</string>
+            <string>0x16811002 0x164d1002</string>
             <key>IOPropertyMatch</key>
             <dict>
                 <key>LoadDisplayController</key>
@@ -111,7 +111,7 @@
             <key>IOMatchCategory</key>
             <string>RBDisplayWrangler</string>
             <key>IOPCIMatch</key>
-            <string>0x16811002</string>
+            <string>0x16811002 0x164d1002</string>
             <key>IOPropertyMatch</key>
             <dict>
                 <key>LoadDisplayWrangler</key>
@@ -140,7 +140,7 @@
             <key>IOMatchCategory</key>
             <string>IOFramebuffer</string>
             <key>IOPCIMatch</key>
-            <string>0x16811002</string>
+            <string>0x16811002 0x164d1002</string>
             <key>IOProbeScore</key>
             <integer>30000</integer>
             <key>IOPropertyMatch</key>
@@ -162,7 +162,7 @@
             <key>IOMatchCategory</key>
             <string>IOAccelerator</string>
             <key>IOPCIMatch</key>
-            <string>0x16811002</string>
+            <string>0x16811002 0x164d1002</string>
             <key>IOPropertyMatch</key>
             <dict>
                 <key>LoadAccelerator</key>
