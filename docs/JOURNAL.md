@@ -68260,3 +68260,39 @@ is cheap and fits the probe rules as written: **one read-only 128 KB map of
 `check_atom_bios()` as the verdict and the VFCT image already in hand as the
 byte-for-byte control in the same sample. If it matches, the per-machine VBIOS
 step becomes a property the peer publishes itself and the reboot disappears.
+
+## 3BR CONFIRMED — boot 547, the renamed plugin and the rebuilt framebuffer
+
+Two new artifacts in one boot, both read back (rule 15): plugin
+**3BB04CBF** from the EFI, framebuffer **2527A89E** from the aux collection —
+the first boot of a framebuffer built from current main, since the machine had
+been running **B50C7750** since boot 528 and that gap was found while
+packaging, not by a symptom.
+
+`armed` 1, `arm_why` 0, `hwlibs_gate_ok` 1 / `regsvc` 1 / `ms` **6475** (the
+gate's third boot: 542, 546, 547), `yc_swapped` **12**, `yc_rlc_swapped` 5, no
+refusals, **`vbios_src` 1** so the injected VFCT image was accepted from the
+bundle rather than falling through, `AMD Radeon 680M` / Metal 3,
+`RBAMDFramebuffer` holding the panel with `RBFBModelSrc "derived"`.
+
+**The rename's own verification failed as an instrument, and the failure is
+uniform rather than about the rename.** `log show --last 5m --predicate
+'process == "kernel"'` returns **11268 lines** and **zero** containing
+`Radeonized:` — but also zero containing `RembrandtGPU:`, `Peer:`, `hwlibs` or
+`sentinel cleared`, while Apple's own `AMDRadeon` appears 3 times. So none of
+this plugin's `IOLog` output reaches logd on this boot at all, which is rule
+36's level/predicate/window and consistent with plugin init landing at ~740 ms,
+long before logd. A first pass also counted `1` for the old prefix and that was
+the `log` process's **own argument list** echoing the predicate string — rule
+26 again, the search matching its own command line. What stands is static:
+`strings` on the exact binary this boot loaded has **1** `Radeonized: %s` and
+**0** `RembrandtGPU: %s`.
+
+Scope held: identifiers, classes, `-rbgpu*` boot-args and `rbgpu-*` NVRAM keys
+unchanged, so `ioreg -rl -c RembrandtGPUPeer` and this machine's existing EFI
+entry and NVRAM all still work. The plugin's `CFBundleName` needed a literal
+because `$(PRODUCT_NAME)` is simultaneously the `IOClass`, the
+`IOMatchCategory` and the personality key.
+
+Release archive `Radeonized-3br.zip`, sha256 `d25b9903…`, both binaries
+**`cmp`-identical** to the ones boot 547 ran.
