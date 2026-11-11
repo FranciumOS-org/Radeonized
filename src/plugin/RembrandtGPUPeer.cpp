@@ -548,9 +548,126 @@ static bool rbgpuConsumeArmingOneShot() {
     return true;
 }
 
+// 3rec-b: is this boot the installer or recoveryOS?
+//
+// 3rec declared `LiluAPI::AllowNormal` and that was the WRONG LEVER, measured
+// in the Recovery boot the user photographed: the plugin logged
+// "2xw: sentinel cleared after 60000 ms" there, so `RembrandtGPUPeer::start`
+// ran with AllowNormal in force. Lilu's run mode gates Lilu's own callbacks -
+// the patcher, the kext hooks - and nothing else. Our IOKitPersonalities
+// match `IOResources`/`IOKit`, which exists in every boot there is, so IOKit
+// starts this service whatever Lilu decided. The declaration is still right
+// and stays; it was simply never the thing that was loading us.
+//
+// So ask the question ourselves, at `start`, where IOKit is up and no vnode
+// work is needed (rule 27 is about init, but the cheapest test is also the
+// one that needs no filesystem).
+//
+// Two independent signals, OR'd, each with its normal-boot control MEASURED
+// on this machine today rather than assumed:
+//
+//   1. `/chosen` carries one of `boot-ramdmg-extents`, `container-dmg`,
+//      `root-dmg`, `auth-root-dmg`. These are the four names Lilu 1.7.3's own
+//      binary carries for this decision (read out of the EFI's Lilu with
+//      `strings`), so we are using the same discriminator Lilu does.
+//      CONTROL: on this normal boot, `ioreg -p IODeviceTree -n chosen -rl`
+//      shows NONE of the four. An installer or recovery root IS a disk image,
+//      which is why the property exists at all.
+//
+//   2. `/chosen`'s `boot-file` names a recovery or installer path. CONTROL:
+//      this normal boot reads
+//      `boot\System\Library\KernelCollections\BootKernelExtensions.kc`.
+//      Lilu's binary carries `/com.apple.recovery.boot/prelinkedkernel` and
+//      `/macOS Install Data/Locked Files/Boot Files/prelinkedkernel` as the
+//      corresponding paths, which is where the two needles come from.
+//
+// Rule 14: every path out publishes a code, so a boot that comes up stock can
+// be told from one that came up stock for the wrong reason. `RBGPURecovery`
+// is 0 normal, or the signal number that fired.
+//
+// Failing SAFE here means answering "not recovery": an unreadable `/chosen`
+// is the normal-boot answer, because a desktop that silently refuses to
+// accelerate is the failure this project cannot debug from inside.
+static uint32_t g_rbRecovery = 0;
+
+static bool rbgpu_recovery_boot(void) {
+    static int cached = -1;
+    if (cached >= 0) {
+        return cached == 1;
+    }
+
+    IORegistryEntry *chosen = IORegistryEntry::fromPath("/chosen", gIODTPlane);
+    if (!chosen) {
+        cached = 0;
+        g_rbRecovery = 0;
+        return false;
+    }
+
+    static const char *kDmgKeys[] = {
+        "boot-ramdmg-extents", "container-dmg", "root-dmg", "auth-root-dmg"
+    };
+    for (size_t i = 0; i < arrsize(kDmgKeys); i++) {
+        if (chosen->getProperty(kDmgKeys[i]) != nullptr) {
+            g_rbRecovery = 1;
+            rbgpu_log("3rec-b: /chosen carries `%s`: installer or recovery "
+                      "boot; the plugin stands down", kDmgKeys[i]);
+            break;
+        }
+    }
+
+    if (g_rbRecovery == 0) {
+        OSData *bf = OSDynamicCast(OSData, chosen->getProperty("boot-file"));
+        if (bf != nullptr) {
+            unsigned int len = bf->getLength();
+            const char *p = static_cast<const char *>(bf->getBytesNoCopy());
+            // The property is a NUL-terminated path in a sized blob; bound
+            // every read by the blob, never by the NUL (rule 14 at the tool
+            // boundary - a missing terminator must not walk off the end).
+            if (p != nullptr && len > 0 && len < 1024) {
+                static const char *kNeedles[] = {
+                    "com.apple.recovery.boot", "macOS Install Data"
+                };
+                for (size_t n = 0; n < arrsize(kNeedles); n++) {
+                    size_t nl = strlen(kNeedles[n]);
+                    if (nl > len) {
+                        continue;
+                    }
+                    for (unsigned int off = 0; off + nl <= len; off++) {
+                        if (memcmp(p + off, kNeedles[n], nl) == 0) {
+                            g_rbRecovery = 2;
+                            rbgpu_log("3rec-b: /chosen boot-file names `%s`: "
+                                      "installer or recovery boot; the plugin "
+                                      "stands down", kNeedles[n]);
+                            break;
+                        }
+                    }
+                    if (g_rbRecovery != 0) {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    chosen->release();
+    cached = g_rbRecovery != 0 ? 1 : 0;
+    return cached == 1;
+}
+
 bool RembrandtGPUPeer::start(IOService *provider) {
     if (checkKernelArgument("-rbgpuoff")) {
         rbgpu_log("Peer: disabled by -rbgpuoff; aborting start");
+        return false;
+    }
+
+    // 3rec-b: Recovery and the installer come up stock. `rbgpu-arm=0` did NOT
+    // fix the hang and `-rbgpuoff` DID, which puts it in this plugin before
+    // any feature gate, and `-rbgpuoff` returns false from exactly here - so
+    // this is the one line that reproduces the measured good boot.
+    if (rbgpu_recovery_boot()) {
+        rbgpu_diag_set_num("recovery", g_rbRecovery);
+        rbgpu_log("Peer: installer/recovery boot (signal %u); aborting start "
+                  "so the environment comes up stock", g_rbRecovery);
         return false;
     }
 
