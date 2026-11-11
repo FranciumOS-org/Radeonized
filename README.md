@@ -45,7 +45,7 @@ firmware set to iGPU-only (Eco) mode. Everything is recorded in
   feeding the port is held in reset, which nothing on the driver side
   releases. AMD's own Linux driver has no PHY bringup for this generation; the
   display firmware owns it, and the one firmware command that targets that
-  state returns no reply. Recorded in full in `docs/EXTERNAL-DISPLAY.md`. On
+  state returns no reply. Recorded in full in `docs/JOURNAL.md`. On
   laptops where HDMI is wired to the discrete GPU, HDMI and panel brightness
   are also mutually exclusive.
 - **WebGL with antialiasing.** `getContext('webgl')` defaults to
@@ -146,12 +146,10 @@ Recovery always boots stock, so it stays available as a way back.
 - `src/common/` — shared C code used by the kexts, the plugin and the host tests.
 - `tools/` — build helpers, install scripts (`efi.sh`, `fbinstall.sh`) and probes.
 - `app/` — Radeonize, a macOS app that checks the Mac and installs the kexts.
-- `docs/PLAN.md`, `docs/JOURNAL.md`, `docs/EXTERNAL-DISPLAY.md`, `docs/RULES.md` —
-  the plan, the measured record, the open goal, and the engineering rules the
-  code follows.
+- `docs/PLAN.md`, `docs/JOURNAL.md`, `docs/RULES.md` — the plan, the measured
+  record, and the engineering rules the code follows.
 
-Every register offset cites the Linux header it came from; `docs/linux-ref/`
-holds those files unmodified.
+Every register offset in the code cites the Linux header it was taken from.
 
 ## License
 
