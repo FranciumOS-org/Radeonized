@@ -123,10 +123,26 @@ make plugin RELEASE=1         # the same plugin, carrying nobody else's bytes
 
 `RELEASE=1` is what a published binary is built with, and it builds into
 `build-release/` so it can never pick up an object file from a development
-build. It leaves out two things that are not this project's to hand on: the
-AMD firmware images the experimental PSP path can substitute, which nothing
-in the shipping configuration reads, and the board's VBIOS. Everything else
-is identical.
+build. The one thing it leaves out is the board's VBIOS, which is not this
+project's to hand on; it picks up the machine's own instead, as the next
+section describes. Everything else is identical.
+
+`NOFW=1` additionally leaves out the AMD firmware images that the
+experimental PSP path can substitute. Nothing in the shipping configuration
+reads them — the path that would is a dry run without `-rbgpupsphw` — but
+**do not ship a build made with it yet**:
+
+> **Open defect: the accelerator races HWLibs, and the margin is ~3 ms.**
+> HWServices starts two children asynchronously — HWLibs, by IOKit matching,
+> and the accelerator, internally — and the accelerator's `createHWInterface`
+> needs a patch this plugin applies to HWLibs once it is loaded. Three
+> archived good boots win that race by 2.5, 2.6 and 3.6 ms. Dropping the
+> firmware images shrinks the plugin from 1818032 bytes to 455088 and moves
+> the margin to **−67.8 ms**: three consecutive boots came up unaccelerated,
+> with the patch landing 68 ms after the accelerator had given up. The
+> firmware bytes are therefore ballast that happens to win a race, and the
+> race is the real defect. It should be ordered explicitly rather than won on
+> timing, because a faster or slower disk decides it.
 
 ## The VBIOS
 
@@ -208,6 +224,12 @@ anything else:
   they came from.
 - The **VBIOS** belongs to the board vendor. A released build carries none;
   it uses the image already present in the machine it is installed on.
-- The **AMD firmware images** from linux-firmware are not in this repository
-  and are not in a release build. A development build can compile them in for
-  the experimental PSP work, and they keep AMD's own license.
+- The **AMD firmware images** from linux-firmware are transcribed into
+  `src/plugin/fw_yellow_carp*.cpp` and are compiled into the plugin. They keep
+  AMD's own license (`LICENSE.amdgpu` in linux-firmware), and **whether that
+  license covers this use is not settled**: it permits redistribution in
+  binary form, and these arrays hold each image with its 0x100-byte container
+  header stripped, which is a modification. Settle that before publishing a
+  binary. `NOFW=1` builds without them and nothing in the shipping
+  configuration reads them — but see the open race in the next section, which
+  is why a release is not built that way yet.

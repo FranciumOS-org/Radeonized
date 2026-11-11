@@ -441,12 +441,33 @@ fbkext: hosttest $(FBKEXT_OBJS) $(FBKEXT_SRC)/Info.plist
 LILU        := $(PROJ_ROOT)/third_party/Lilu/Lilu
 PLUGIN_SRC  := $(PROJ_ROOT)/src/plugin
 PLUGIN_VER  := 1.0.0
-ifeq ($(RELEASE),1)
+# 3fwc: the yellow_carp images stay in the RELEASE build.
+#
+# Taking them out shrank the plugin from 1818032 bytes to 455088 and moved a
+# race inside Apple's own stack by ~70 ms: HWServices spawns HWLibs (by IOKit
+# matching on AMDRadeonX6000_AMDRadeonHWServicesInterface) and the accelerator
+# (internally) as two asynchronous children, and our HWLibs deviceTypeTable
+# patch has to land before the accelerator reaches createHWInterface. Three
+# archived good boots win that by 2.5 / 2.6 / 3.6 ms; three consecutive boots
+# of the firmware-less build lost it by 67.8 ms and came up unaccelerated.
+# Nothing in the shipping configuration READS these bytes - the PSP hardware
+# path dry-runs without -rbgpupsphw - so they are ballast, and the race is the
+# real defect. Until that race is ordered rather than won, the ballast stays:
+# a tester's disk or CPU deciding the boot is not a shipping condition.
+#
+# NOFW=1 drops them anyway, which is what to build once the ordering is fixed.
+NOFW ?= 0
+ifeq ($(NOFW),1)
 PLUGIN_FW_OBJS :=
-PLUGIN_FW_DEFS := -DRB_FW_YC=0 -DRB_VBIOS_BAKED=0
+PLUGIN_FW_DEFS := -DRB_FW_YC=0
 else
 PLUGIN_FW_OBJS := $(BUILD_DIR)/plugin/fw_yellow_carp.o $(BUILD_DIR)/plugin/fw_yellow_carp_rlc.o
-PLUGIN_FW_DEFS := -DRB_FW_YC=1 -DRB_VBIOS_BAKED=1
+PLUGIN_FW_DEFS := -DRB_FW_YC=1
+endif
+ifeq ($(RELEASE),1)
+PLUGIN_FW_DEFS += -DRB_VBIOS_BAKED=0
+else
+PLUGIN_FW_DEFS += -DRB_VBIOS_BAKED=1
 endif
 PLUGIN_DEFS := -DPRODUCT_NAME=RembrandtGPU -DMODULE_VERSION=$(PLUGIN_VER) -DPLUGIN_VERSION='"$(PLUGIN_VER)"' $(PLUGIN_FW_DEFS)
 PLUGIN_OBJS := $(BUILD_DIR)/plugin/kern_start.o $(BUILD_DIR)/plugin/RembrandtGPUPeer.o \
