@@ -885,9 +885,14 @@ anything the kext cannot reach:
 **The right boot-args are none of ours.** `src/common/rb_defaults.h` is the list
 and the hosttest checks it — **read that file, not a copy of it.**
 `sudo tools/efi.sh defaults` removes the redundant ones in one edit, keeps every
-disarm and everything not ours (**`wdt=-1` above all** — Apple's arg, needed by
-the default-on `-rbgpuforceenable`, and without it a frozen boot panics at 120 s
-with no SSH window).
+disarm and everything not ours (**`wdt=-1` above all** — Apple's arg, and the
+one that makes a WEDGE MEASURABLE: 2hj read `IOWatchdog::start` and bit 0 takes
+the "disabled by boot-arg" path, so a frozen machine stays up and SSH stays
+usable instead of panicking at 120 s. It is a DIAGNOSIS arg, not a dependency —
+no default-on feature needs it, an earlier version of this line claimed
+`-rbgpuforceenable` did and no evidence was ever offered — and recovery does
+not need it either: a boot that panics reboots, which is exactly what leaves
+the sentinel latch set and brings the next one up stock.).
 
 **RECOVERY AND THE INSTALLER BOOT STOCK (3rec-b). CONFIRMED ON HARDWARE.**
 Recovery hung with the progress bar filling forever — localised by the user in
