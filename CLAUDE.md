@@ -130,6 +130,13 @@ means hybrid).
   It stages, builds the aux collection to a scratch path, refuses unless that
   collection carries the built UUID, backs up the live one, writes it, and
   verifies the UUID inside the live collection.
+- **Taking the framebuffer OUT is `sudo tools/fbuninstall.sh`** — the mirror,
+  with the same traps: it keeps a copy under `logs/fb-backups/<time>/`, backs
+  up the live collection, and because the check is **absence**, it first shows
+  the dry run is a real collection (other kexts still in it) before a missing
+  bundle id means anything. Verify by **diffing the collection against its
+  backup**, not by counting lines — `kmutil inspect`'s output has header rows
+  and `grep -c .` counted 11 -> 9 for one removal.
 - **`kmutil install --update-all` cannot work here** — it rebuilds the boot and
   system collections and dies on a missing KDK/kernel variant before reaching
   the auxiliary one. Build only the aux collection, and
