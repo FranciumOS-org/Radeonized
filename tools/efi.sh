@@ -128,8 +128,10 @@ install)
             "$kext/Contents/Info.plist" >/dev/null 2>&1; then
         echo "the bundle carries a VBIOS in its Info.plist"
     else
-        echo "the bundle carries NO VBIOS in its Info.plist - fine for a build with one"
-        echo "compiled in, but a RELEASE=1 build needs:"
+        echo "the bundle carries NO VBIOS in its Info.plist - since 3vb-e that is"
+        echo "the normal case: the peer reads the board's image out of the machine's"
+        echo "own ACPI VFCT table in-kernel. Read vbios_src (3 = ACPI) and acpivbios"
+        echo "(0 = OK) after the boot; an override still goes in with:"
         echo "  python3 tools/vbios_plist.py $kext firmware/VFCT.aml"
     fi
     backup
