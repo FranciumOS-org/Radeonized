@@ -23,6 +23,7 @@
 #include "rb_fwhdr.h"   /* 3fxe: slice the embedded AMD firmware containers */
 #include "rb_atombios.h" /* 3vb-c: is this buffer an ATOM VBIOS?            */
 #include "rb_vfct.h"     /* 3vb-c: find our image inside the ACPI VFCT     */
+#include "rb_osver.h"    /* 3vb-e: RB_OSD_KEXTOFF gates the 0x150 offset   */
 
 #ifndef RB_HWID_MP1
 #define RB_HWID_MP1 1
@@ -7044,6 +7045,13 @@ static bool patchSdmaAutoloadCheck(KernelPatcher &patcher, size_t id) {
 #define RB_ACPIVB_E_NO_BYTES    7   /* getBytesNoCopy returned NULL         */
 #define RB_ACPIVB_E_WALK        8   /* rb_vfct_find refused; see acpivb_vfct */
 #define RB_ACPIVB_E_ALLOC       9   /* OSData::withBytes failed             */
+#define RB_ACPIVB_E_NO_DICT    10   /* the cache slot is not a kernel pointer */
+#define RB_ACPIVB_E_NOT_DICT   11   /* ...or is not an OSDictionary          */
+
+/* 3vb-b: the table cache inside AppleACPIPlatformExpert, read off the
+ * disassembly of getACPITableData - `cmpq $0x0, 0x150(%rbx)` then
+ * `movq 0x150(%rbx), %rdi`. Per-OS, hence the RB_OSD_KEXTOFF gate. */
+#define RB_ACPIVB_CACHE_OFF   0x150
 
 #define RB_ACPIVB_MAX (512u * 1024u)
 
@@ -7105,12 +7113,70 @@ OSData *rbgpu_acpi_vbios_3vb(int *rc_out) {
     struct rb_vfct_found f;
     uint32_t vfct_rc = 0;
 
-    if (!g_rbAcpiGetTable) { rc = RB_ACPIVB_E_NO_SYM; goto done; }
     {
         IOPlatformExpert *pe = IOService::getPlatform();
         if (!pe) { rc = RB_ACPIVB_E_NO_PLATFORM; goto done; }
 
-        OSObject *o = g_rbAcpiGetTable(pe, "VFCT", 0);
+        OSObject *o = nullptr;
+        if (g_rbAcpiGetTable) {
+            o = g_rbAcpiGetTable(pe, "VFCT", 0);
+            rbgpu_diag_set_num("acpivb_how", 1);
+        } else {
+            /* 3vb-e, boot 551: `acpivb_kinfo ffffffff` - Lilu cannot reach
+             * AppleACPIPlatform at all. It only tracks kexts it was asked to
+             * watch at LOAD time, and that kext loads long before this plugin;
+             * its filesystem fallback cannot help either, because
+             * /System/Library/Extensions/AppleACPIPlatform.kext has only
+             * Info.plist, PlugIns, _CodeSignature and version.plist - no
+             * Contents/MacOS at all, since the binary lives in the kernel
+             * collection. Checked, rather than assumed: `ls` on that bundle.
+             *
+             * So do what 3vb-b's disassembly says the function does, instead
+             * of calling the function. It is:
+             *
+             *     this->[0x150]->vtable[0x208](this->[0x150], "%4.4s" % sig)
+             *
+             * an OSDictionary::getObject by a four-character key - and
+             * OSDictionary::getObject IS exported KPI. That replaces two
+             * per-OS addresses (a vtable and a function) with ONE per-OS
+             * byte offset, and the offset is self-checking in a way an
+             * address is not: OSDynamicCast asks the object's own metaclass
+             * whether it really is an OSDictionary, so a wrong 0x150 is
+             * refused by the runtime rather than trusted.
+             *
+             * Gated on RB_OSD_KEXTOFF, which is exactly what that flag is for
+             * (rule 41: a constant is only a constant on the OS it was
+             * measured on), and every refusal publishes the value it refused
+             * (rule 19). */
+            const int major = getKernelVersion();
+            if (!rb_os_derived(major, RB_OSD_KEXTOFF)) {
+                rbgpu_diag_set_num("acpivb_how", 0);
+                rbgpu_diag_set_num("acpivb_osmajor", static_cast<uint64_t>(major));
+                rc = RB_ACPIVB_E_NO_SYM; goto done;
+            }
+            auto slot = reinterpret_cast<uintptr_t>(pe) + RB_ACPIVB_CACHE_OFF;
+            auto raw  = *reinterpret_cast<uintptr_t *>(slot);
+            rbgpu_diag_set_num("acpivb_cache", static_cast<uint64_t>(raw));
+            /* rule 19: a NULL check is not a pointer check. */
+            if (raw < 0xffffff8000000000ULL || (raw & 7u) != 0) {
+                rbgpu_diag_set_num("acpivb_how", 2);
+                rc = RB_ACPIVB_E_NO_DICT; goto done;
+            }
+            OSDictionary *cache = OSDynamicCast(
+                OSDictionary, reinterpret_cast<OSObject *>(raw));
+            if (!cache) {
+                rbgpu_diag_set_num("acpivb_how", 3);
+                rc = RB_ACPIVB_E_NOT_DICT; goto done;
+            }
+            unsigned int n = cache->getCount();
+            rbgpu_diag_set_num("acpivb_keys", n);
+            if (n == 0 || n > 4096u) {
+                rbgpu_diag_set_num("acpivb_how", 4);
+                rc = RB_ACPIVB_E_NOT_DICT; goto done;
+            }
+            rbgpu_diag_set_num("acpivb_how", 5);
+            o = cache->getObject("VFCT");
+        }
         if (!o) { rc = RB_ACPIVB_E_NO_TABLE; goto done; }
         OSData *tbl = OSDynamicCast(OSData, o);
         if (!tbl) { rc = RB_ACPIVB_E_NOT_DATA; goto done; }
