@@ -7052,9 +7052,38 @@ static t_rbAcpiGetTable g_rbAcpiGetTable = nullptr;
 
 static void rbgpu_acpi_table_solve_3vb(KernelPatcher &patcher) {
     if (g_rbAcpiGetTable) { return; }
+
+    /* 3vb-d, boot 549: `acpivbios 1`, `acpivb_sym 0`. The first draft solved
+     * against `KernelPatcher::KernelID`, which is the KERNEL image - and
+     * `getACPITableData` is in AppleACPIPlatform.kext, a different Mach-O
+     * inside BootKernelExtensions.kc. `nm` on the COLLECTION showed the symbol
+     * and I read that as "the kernel has it"; `tools/re/kc_extract.py` had
+     * already told me which kext it came from, in the same session. Rule 1
+     * says never route a name unless `nm -m` shows it defined THERE, and
+     * "there" is the kext, not the collection.
+     *
+     * AppleACPIPlatform is loaded long before this plugin, so onKextLoad will
+     * never fire for it; `loadKinfo` is how Lilu reaches an already-loaded
+     * kext. `fsonly` false so it takes the in-memory kinfo rather than looking
+     * for a binary that does not exist on disk in a KC-based boot. The paths
+     * array is only the filesystem fallback. */
+    static const char *acpiPaths[] = {
+        "/System/Library/Extensions/AppleACPIPlatform.kext/Contents/MacOS/AppleACPIPlatform"
+    };
+    size_t kid = patcher.loadKinfo("com.apple.driver.AppleACPIPlatform",
+                                   acpiPaths, 1, false, false, false);
+    if (patcher.getError() != KernelPatcher::Error::NoError) {
+        rbgpu_diag_set_num("acpivb_kinfo", 0xffffffffULL);
+        rbgpu_log("3vb: AppleACPIPlatform kinfo did not load (err %d)",
+                  static_cast<int>(patcher.getError()));
+        patcher.clearError();
+        return;
+    }
+    patcher.clearError();
+    rbgpu_diag_set_num("acpivb_kinfo", static_cast<uint64_t>(kid));
+
     auto a = patcher.solveSymbol(
-        KernelPatcher::KernelID,
-        "__ZN23AppleACPIPlatformExpert16getACPITableDataEPKcj");
+        kid, "__ZN23AppleACPIPlatformExpert16getACPITableDataEPKcj");
     patcher.clearError();
     // rule 19: a NULL check is not a pointer check, and a refusal publishes
     // the value it refused.

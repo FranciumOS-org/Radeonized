@@ -68418,3 +68418,41 @@ whether `"VFCT"` is a key in that cache. `acpivbios 0` with `vbios_src 3` and
 the per-machine VBIOS step and its reboot are gone; `acpivbios 3` and
 `publishACPITables` does not cache it, which sends the line to 3vb's
 `0x000C_0000` fallback.
+
+## 3VB-D / BOOT 549 — the symbol was solved against the wrong IMAGE, and the safety net held
+
+`acpivbios` **1** = `E_NO_SYM`, `acpivb_sym` **0**. `solveSymbol` returned
+nothing, so nothing downstream of it ran and `acpivb_vfct` 0 is a publish
+default rather than a reading (rule 14 — the probe says which, which is why
+this took one reading rather than a bisect).
+
+**Cause: `KernelPatcher::KernelID` is the KERNEL image, and
+`getACPITableData` is in AppleACPIPlatform.kext** — a separate Mach-O inside
+BootKernelExtensions.kc. `nm` on the **collection** showed the symbol and I
+read that as the kernel having it, in the same session in which
+`tools/re/kc_extract.py --list` had already printed
+`com.apple.driver.AppleACPIPlatform` as the owning kext and I extracted it by
+that name to disassemble the function. **Rule 1 says never route a name unless
+`nm -m` shows it defined THERE, and "there" is the kext, not the collection** —
+the rule was satisfied for the disassembly and then dropped for the solve.
+
+**Fix: `patcher.loadKinfo("com.apple.driver.AppleACPIPlatform", ..., fsonly
+false)` and solve against that id.** AppleACPIPlatform loads long before this
+plugin, so `onKextLoad` can never fire for it and `loadKinfo` is Lilu's way to
+reach an already-loaded kext; `fsonly` false takes the in-memory kinfo rather
+than looking for a binary that does not exist on disk in a KC boot. The paths
+array is the filesystem fallback only. New diag `acpivb_kinfo` — the loaded id,
+or `ffffffff` when the kinfo itself refused, so "no kinfo" and "kinfo but no
+symbol" are different readings. (`KernelPatcher::INVALID` is private; the error
+state is the check.)
+
+**The boot was otherwise a clean one and that is the design working:** boot
+549, `armed` 1, `arm_why` 0, plugin B15E6078, framebuffer 2527A89E,
+`AMD Radeon 680M` / Metal 3 — because the peer's priority put the baked dev ROM
+after the ACPI route, so `vbios_src` **2** and the desktop came up accelerated
+with the new path refusing cleanly underneath it. A release bundle with the
+VBIOS injected would have read `vbios_src` 1 and never entered the probe at
+all (rule 34: the arm is part of the experiment), which is why the dev build
+was the one installed.
+
+Dev **F9791B82**. Hosttest 0 failures, no undefined symbols of ours. Not booted.
