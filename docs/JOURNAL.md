@@ -68838,3 +68838,54 @@ reboot with the driver armed, from the `-rbgpuoff` desktop.
 
 **Release impact if cold boot is the variable: every user's first boot is a
 cold boot.** v0.1.0 is published and the installer is live.
+
+## 3rgr-b / 2026-11-12 — IT IS NOT A WEDGE, IT IS A STALL, AND COLD BOOT WAS NOT THE VARIABLE
+
+A photograph of the screen during a failure (boot at 12:43:53, `-v` armed)
+settles several things the log store could not, and falsifies two of 3rgr's
+readings.
+
+**The kernel is ALIVE.** The screen's last lines are AirPort_RTW89's own AWDL
+timing report: *"1000 windows of 16384 us, mean 951 us late, worst 144929 us;
+the run took 29475563 us against 29491200 expected"* and *"8 window(s)
+missed"*. That run covers **29.4 seconds**, while that boot's log store stops
+at **+10.2 s**. So the kernel keeps executing and printing to the console for
+at least 30 s after `logd` stops recording. 3rgr called this a hard wedge; it
+is a **system-wide stall** in which the graphics stack never comes up, the
+display never leaves verbose console, and userspace logging dies. The AWDL
+numbers are the only quantitative measure of the stall anyone has: something
+holds the machine off its schedule for **up to 145 ms** at a time.
+
+**Our plugin is running during it.** The screen carries our own
+`Radeonized: *** NVRAM SUMMARY FULL: 4 keys did not fit in 512 bytes and were
+DROPPED` line, which only the periodic diag publisher emits. 3rgr inferred
+from `rbgpu-safe` reading 0 that `start()` never reached its third statement.
+That inference is **WITHDRAWN**: the peer was running. A plausible reading of
+the same 0 is that the accelerator did attach, late and unseen (after `logd`
+died), and 3rgr's own 15 s grace timer then fired and cleared the latch while
+the machine was stalled but alive — the fix behaving exactly as written, on a
+boot nobody would call survived. If that is right the grace period is not a
+survival test either, and what the latch needs is a signal that the DESKTOP
+came up, not that an IOService attached.
+
+**Eliminated, each by a boot:** cold vs warm (the 11:13 stall was a warm
+restart); `-v` (stalls happened before it was added); the four AirPort_RTW89
+debug args `-rtw89awdl -rtw89awdlmac -broadtekdbg -s0ixdbg` (removed for boot
+559, which was fine, but first-60-s log volume went UP, 548 845 lines against
+558's 527 729, and rtw89 lines are 435 of them — the console storm on the
+screen is ordinary macOS debug logging, not that driver); the HWLibs gate's
+timing (`hwlibs_gate_ms` 5900 OK, 10875 OK, 5975 OK — both ends of a 2x
+spread boot fine); and NullMoth's four kexts being new (all three archived
+auxiliary collections, 16:56, 22:24 and 22:29 on 2026-11-11, already carry
+them, and boots 555/556 loaded them).
+
+**Armed boots now stand at 4 good, 4 stalled**, with no configuration
+difference between the two sets. Good: 555, 556, 558, 559. Stalled: 10:25,
+10:29, 11:13, 12:43. Stall onset by log-store end: +5.7 s, +5.3 s, +5.5 s,
++10.2 s.
+
+**The next instrument is not another boot of the same kind.** Either
+breadcrumbs through `start()` and the gate so a `-v` photograph names the
+statement, or an SSH session into the stalled machine — Wi-Fi is demonstrably
+up during the stall, since the driver is scanning and tracking AWDL peers
+throughout.
