@@ -2175,6 +2175,51 @@ static IOService    *g_rbHwlibsGateDev  = nullptr;
 static uint32_t      g_rbHwlibsGateMs   = 0;
 static int           g_rbHwlibsGateDone  = 0;
 
+/* 3rgr-c (2026-11-12): the gate has to survive a boot that does not.
+ *
+ * Four armed boots have stalled with the log store stopping between 5.3 s and
+ * 10.2 s, and the gate's own window - `hwlibs_gate_ms` measured 5700, 5900,
+ * 5975 and 10875 across good boots - lies inside that span. That is a
+ * coincidence of windows and nothing more: the gate withholds OUR accelerator
+ * personality only, not HWServices (the 3fxc comment above, and boot 541),
+ * so no mechanism connects it to a system-wide stall. It is named here
+ * because it cannot currently be RULED OUT either, and that is the defect
+ * being fixed: `rbgpu-diag-prev` is capped near 520 bytes and the three
+ * hwlibs_gate keys are past the cap, so a stalled boot leaves no record of
+ * whether the gate ever closed. The question "was the gate still polling when
+ * the machine stopped?" has been unanswerable for four boots.
+ *
+ * So the gate marks the synchronous trail, which is written on the calling
+ * thread and flushed immediately and therefore survives a wedge (2eo-2fg).
+ * Seven marks at most, against a 192-byte trail that currently holds
+ * fourteen, so the cap is not at risk:
+ *
+ *   600  armed, LoadAccelerator withheld
+ *   601  still polling, once per 5 s (at most four)
+ *   602  published because HWLibs was patched
+ *   603  published because the 20 s budget ran out
+ *   604  could not publish - no PCI device (rule 14's third case)
+ *
+ * A stalled boot whose trail ends at 600 or 601 puts the gate open at the
+ * moment the machine stopped; one that reaches 602 and stalls anyway
+ * eliminates the gate, which is the more likely outcome and is worth the same
+ * one boot. Either way the next stall answers it instead of adding a fifth
+ * unreadable data point. Off with -rbgpunogates, like every other gate. */
+#define RB_HWLIBS_GATE_MARK_MS   5000u    /* trail mark every 5 s of polling */
+
+static uint32_t g_rbHwlibsGateMarked = 0; /* ms at the last 601 mark */
+
+static void rbgpu_hwlibs_gate_mark(uint32_t stage, const char *what) {
+    static int nogate = -1;
+    if (nogate < 0) {
+        nogate = rbgpu_arg("-rbgpunogates") ? 1 : 0;
+    }
+    if (nogate) {
+        return;
+    }
+    rbgpu_gate_nvram(stage, what);
+}
+
 /* Publishes LoadAccelerator, exactly once, and says which of the two reasons
  * got us here. Both reasons publish: the gate orders the boot, it never
  * cancels it - a boot with no accelerator at all would be worse than an
@@ -2190,6 +2235,7 @@ static void rbgpu_hwlibs_gate_publish(const char *why, uint32_t ok) {
         /* Rule 14: a gate that cannot publish must not look like one that
          * published and was ignored downstream. */
         rbgpu_diag_set_num("hwlibs_gate_ok", 2);
+        rbgpu_hwlibs_gate_mark(604, "hwlibs gate: no PCI device, nothing published");
         rbgpu_log("3fxc: the gate has NO PCI device - LoadAccelerator was "
                   "never published and no accelerator will start this boot");
         return;
@@ -2210,6 +2256,15 @@ static void rbgpu_hwlibs_gate_publish(const char *why, uint32_t ok) {
     rbgpu_diag_set_num("hwlibs_gate_ms", g_rbHwlibsGateMs);
     rbgpu_diag_set_num("hwlibs_gate_ok", ok);
     rbgpu_diag_set_num("hwlibs_gate_regsvc", reg);
+    /* 3rgr-c: the trail's last word on the gate. The ms is in the text, so
+     * the next boot reads both how it closed and when, without the diag
+     * table the cap truncates. */
+    {
+        static char gm[64];
+        snprintf(gm, sizeof(gm), "hwlibs gate closed ok=%u ms=%u regsvc=%u",
+                 ok, g_rbHwlibsGateMs, reg);
+        rbgpu_hwlibs_gate_mark(ok ? 602 : 603, gm);
+    }
     rbgpu_log("3fxc: published LoadAccelerator after %u ms because %s "
               "(registerService %u)", g_rbHwlibsGateMs, why, reg);
     if (!ok) {
@@ -2229,6 +2284,15 @@ static void rbgpu_hwlibs_gate_action(thread_call_param_t, thread_call_param_t) {
         return;
     }
     g_rbHwlibsGateMs += RB_HWLIBS_GATE_STEP_MS;
+    /* 3rgr-c: one mark per 5 s, so a trail ending here says the gate was
+     * still open when the machine stopped, and says roughly when. */
+    if (g_rbHwlibsGateMs - g_rbHwlibsGateMarked >= RB_HWLIBS_GATE_MARK_MS) {
+        g_rbHwlibsGateMarked = g_rbHwlibsGateMs;
+        static char pm[64];
+        snprintf(pm, sizeof(pm), "hwlibs gate still polling at %u ms",
+                 g_rbHwlibsGateMs);
+        rbgpu_hwlibs_gate_mark(601, pm);
+    }
     uint64_t deadline = 0;
     clock_interval_to_deadline(RB_HWLIBS_GATE_STEP_MS, kMillisecondScale, &deadline);
     thread_call_enter_delayed(g_rbHwlibsGateCall, deadline);
@@ -2256,6 +2320,7 @@ static void rbgpu_hwlibs_gate_arm(IOService *pciDevice) {
         return;
     }
     rbgpu_diag_set_num("hwlibs_gate_alloc", 1);
+    rbgpu_hwlibs_gate_mark(600, "hwlibs gate armed, LoadAccelerator withheld");
     rbgpu_log("3fxc: gate armed - LoadAccelerator is withheld until HWLibs is "
               "patched, or %u ms, whichever comes first", RB_HWLIBS_GATE_MS);
 

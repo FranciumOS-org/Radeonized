@@ -68889,3 +68889,80 @@ breadcrumbs through `start()` and the gate so a `-v` photograph names the
 statement, or an SSH session into the stalled machine — Wi-Fi is demonstrably
 up during the stall, since the driver is scanning and tracking AWDL peers
 throughout.
+
+## 3rgr-c (2026-11-12) — the gate is a clock, and a stalled boot could not say whether it closed
+
+The user's observation is what moved this. Across three restarts they reported
+that on every boot which came up accelerated, the phone hotspot associated
+*exactly* when the GPU accelerated, and on the stalled boot the hotspot never
+associated at all. They then asked the question the line had not asked:
+"i dont understand why our driver is even TIME based, ESPECIALLY a GPU one",
+naming Cobalt64, NullMoth's RTX driver and nullarc as drivers that are not.
+
+The answer is that those projects *are* the driver, so ordering falls out of
+IOKit matching: a provider attaches, a driver starts, and nothing has to guess
+when another party reached a state. This plugin is a patcher racing Apple's
+code, and no event exists for "HWLibs has been patched", so the code invented
+a clock. Three clocks sit in the boot path. `RembrandtGPUPeer.cpp`'s HWLibs
+gate polls a flag every 25 ms against a 20 000 ms budget; the same file's
+`/options` lookup retries ten times at 100 ms; `RBAMDFramebuffer.cpp` retries
+the same lookup five times at 100 ms. The rest — the 60 s sentinel, 3rgr's
+15 s attach grace, the beat, progwatch, the ax delays — are policy and
+instrumentation, run on `thread_call`s off the hot path, and are not suspects.
+`aty_tries 14` in this boot's diag shows the retry loops are not theoretical.
+
+A mechanism was drafted and then withdrawn in the same session. The draft was
+that Apple's accelerator blocks in `start()` waiting on `LoadAccelerator`, on
+a bounded IOKit config thread, so everything behind it queues — which would
+explain the hotspot associating at the instant of acceleration, the display
+never arriving, `logd` dying while the kernel stayed alive, and the
+intermittency. It does not survive reading the code it is about:
+`RembrandtGPUPeer.cpp:2163` records that the gate withholds *our own*
+accelerator personality precisely so that it does not delay HWServices, and
+that 3fxb withheld `RBGPULoad` instead and boot 541 showed that waits on
+something the gate itself prevents. So no mechanism connects the gate to a
+system-wide stall, and what remains is only that two windows coincide:
+`hwlibs_gate_ms` measured 5700, 5900, 5975 and 10875 across good boots, and
+the four stalled boots stop logging between 5.3 s and 10.2 s. Rule 17 — a
+counter that moves in a non-interleaved comparison has not been shown to move
+because of the change — and this is weaker than that, being two windows and no
+counter.
+
+The finding worth keeping is not about the gate but about the instrument. The
+gate cannot be ruled out either, because a stalled boot leaves no record of it
+at all: `rbgpu-diag-prev` is capped near 520 bytes and the three
+`hwlibs_gate_*` keys fall past the cap. Read on this machine,
+`rbgpu-diag-prev` carries `armed`, `tick_armed` and `ax0_gate` and nothing
+else. So for four stalled boots the question "was the gate still polling when
+the machine stopped?" has been unanswerable, and a fifth stall would have
+added nothing. That is rule 14 at the tool boundary: the absence of the gate
+keys from the previous boot's record looks exactly like a gate that never
+armed.
+
+The fix is to put the gate on the synchronous trail that 2eo-2fg built for
+exactly this, `rbgpu_gate_nvram()`, which writes `rbgpu-gate` on the calling
+thread and flushes immediately and therefore survives a wedge. Five stages:
+600 armed with `LoadAccelerator` withheld, 601 still polling (once per 5 s, so
+at most four marks), 602 published because HWLibs was patched, 603 published
+because the budget ran out, 604 could not publish because there is no PCI
+device. At most seven marks against a 192-byte trail that currently holds
+fourteen stages, so the cap is not at risk, and the closing mark carries
+`ok`, `ms` and `regsvc` in its text so the next boot reads how the gate closed
+and when without needing the truncated diag table. `rbgpu_hwlibs_gate_mark()`
+honours `-rbgpunogates` like every other gate, so 2fo's switch still takes the
+whole trail out.
+
+What the next stall buys, either way. A trail ending at 600 or 601 puts the
+gate open at the moment the machine stopped, which makes the coincidence of
+windows into something testable. A trail reaching 602 with the boot stalling
+anyway eliminates the gate outright, which is the more likely outcome and
+costs the same single boot. The instrument is a suspect as always (rule 16):
+these are flash writes from a `thread_call`, but the same mechanism already
+writes dozens of marks per armed boot from `IOService::start`, and seven more
+from a timer is a smaller load than the path that has been running since 2eq.
+
+Built `make plugin RELEASE=1`, UUID 034F2F3D-AC88-3C5A-A7E8-6D2801B107D6.
+Verified: no dangling externs under 3fxf's `nm -u` rule, zero
+`IOGraphicsFamily` in the plugin's `Info.plist`, zero libraries resolving from
+`SystemKernelExtensions.kc` (the 2oz trap), and no baked VBIOS in the release
+bundle. Not yet installed; nothing about the stall's cause is claimed.
