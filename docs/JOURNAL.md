@@ -68583,3 +68583,54 @@ plugin binary is `cmp`-identical to `build-release/out`'s, whose UUID is the
 one `kextstat` listed on boot 554, and its framebuffer is `2527A89E`, the one
 inside the live auxiliary collection. README-INSTALL.md no longer carries the
 "has not booted" paragraph, because it has.
+
+## 3VB-E / RELEASED. THE REPOSITORY IS PUBLIC AND v3vb CARRIES THE BOOT-554
+## BINARIES
+
+`https://github.com/FranciumOS-org/Radeonized` is **public** as of
+2026-11-11, and release **v3vb** ("the VBIOS step is gone") carries
+`Radeonized-3vb.zip`, 407122 bytes, sha256
+`e2e1b28fd67b5ff5144e82dfe179cbeb4495b83ed7b8d12dda080b4e7bed8482`. The
+anonymous download was fetched back with `curl` and is **byte-identical** to
+the archive whose plugin binary `cmp`-matches the one `kextstat` listed on
+boot 554 — the chain from "what booted" to "what a stranger downloads" is
+closed by comparison rather than by assumption.
+
+**Pre-publish audit, since making a repository public cannot be undone.** No
+credentials, tokens or private keys in any tracked file (pattern scan for
+`sk-`, `gh[pous]_`, `AKIA`, PEM private-key headers, Slack `xox*`); the user's
+email address appears nowhere in the tree; **zero** absolute `/Users/ehsan`
+paths; `firmware/`, `docs/linux-ref/` and `third_party/` are all untracked, so
+no AMD microcode, no board VBIOS and no vendored Linux headers went out; the
+Cloudflare worker config holds only `reports.example.com` placeholders. 307
+tracked files. `docs/JOURNAL.md`, 68 585 lines, is public with everything in
+it, which was said before the flip rather than after.
+
+**The installer's old VBIOS flow is deleted.** `app/Sources/Radeonize/Core/
+VFCT.swift` (184 lines) and the helper's `sysreport on|off` / `vfct-dump`
+verbs implemented the two-reboot route this milestone makes unnecessary.
+Nothing outside `VFCT.swift` called them, so no install path changed and
+`swift build` is clean. In their place `DiagnosticsReport` now collects the
+driver's verdict out of the **IO registry** — `armed`/`arm_why` first, then
+`vbios_src`, `acpivbios`, `acpivb_*`, `hwlibs_gate_*`, `yc_swapped` — because
+that is where the peer publishes and rule 31 says the kernel log never carries
+it. A user-facing report that could not say which VBIOS route ran would have
+been the same defect as a kext that returns silently.
+
+**LICENSE gains a third-party section**, naming AMD's microcode (binary
+redistribution only), a board's own VBIOS, the Linux reference headers and
+Lilu as outside MIT. The MIT text and the holder line are untouched.
+
+**RULE 26, PAID FOR AGAIN, IN THE PRE-PUBLISH AUDIT ITSELF.** `ls LICENSE*
+COPYING* 2>/dev/null || echo "NO LICENCE FILE"` printed **NO LICENCE FILE**
+while `LICENSE` existed and was tracked. zsh aborts the whole command when
+*any* glob fails to match, and `COPYING*` matched nothing, so `LICENSE*` was
+never listed — `2>/dev/null` then hid the glob error and the `||` branch ran.
+I wrote a new LICENSE over the existing one on the strength of that reading.
+No damage (the original was the same MIT text; `git diff --cached` showed the
+only substantive change was the holder line, which was reverted), but the
+shape is exactly the rule: **a search returning nothing proves nothing until
+it is checked against a known-present case**, and the new entry for the list
+is **a zsh glob that fails aborts its command, so one bad pattern silences
+every other pattern in the same `ls`**. `git status`'s `M LICENSE` is what
+caught it — the instrument that was not the suspect.
