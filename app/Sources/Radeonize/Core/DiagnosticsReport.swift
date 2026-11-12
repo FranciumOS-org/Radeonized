@@ -28,6 +28,18 @@ enum DiagnosticsReport {
         let nvram = Shell.run("/usr/sbin/nvram", ["-p"]).stdout
         section("Boot args and rbgpu NVRAM keys", filter(nvram, ["boot-args", "rbgpu"]))
 
+        // The driver's own verdict. These live in the IO registry, not in the
+        // kernel log: the peer publishes them with setProperty and refreshes
+        // them periodically, so a key that has not moved yet is not a key that
+        // did not move. vbios_src 3 / acpivbios 0 is the VBIOS coming out of
+        // this machine's ACPI VFCT table, which is what replaced the old
+        // SysReport flow; armed 1 / arm_why 0 says the boot was armed at all,
+        // and nothing else here means anything if it was not.
+        let peer = Shell.run("/usr/sbin/ioreg", ["-rl", "-c", "RembrandtGPUPeer"]).stdout
+        section("Driver diagnostics (RembrandtGPUPeer)", filter(
+            peer.replacingOccurrences(of: ",", with: "\n"),
+            ["armed", "arm_why", "vbios_src", "acpivb", "hwlibs_gate", "yc_swapped", "yc_refused"]))
+
         let log = Shell.run("/usr/bin/log", [
             "show", "--last", "15m", "--style", "compact",
             "--predicate", "eventMessage CONTAINS \"RembrandtGPU\" OR eventMessage CONTAINS \"RBAMD\" OR eventMessage CONTAINS \"Lilu\"",

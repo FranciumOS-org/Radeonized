@@ -32,34 +32,29 @@ the standard macOS administrator prompt. The helper is the only root code path. 
 - verifies (the EFI config lints; the UUID of the framebuffer is inside the live collection),
 - rolls back if verification fails.
 
-## The VBIOS step (not wired into the UI yet)
+## The VBIOS step is gone
 
-A released `RembrandtGPU.kext` carries no video BIOS. The image belongs to the board
-vendor, so the installer has to use the one already on the machine it is installing on.
-There is no ROM to read on an APU, and macOS publishes no ACPI tables in the IO registry
-on this platform, so the only route is OpenCore's own SysReport, which dumps the tables
-to the EFI partition on the next boot. That costs one extra reboot.
+A released `RembrandtGPU.kext` carries no video BIOS: the image belongs to the board
+vendor, so the driver uses the one already on the machine it runs on. Since 3vb-e it
+**reads that image itself, in the kernel, at boot** - out of the machine's own ACPI
+`VFCT` table, via `AppleACPIPlatformExpert`'s table cache. The installer does nothing
+for it: no SysReport, no dumped `.aml`, no `Info.plist` injection and no extra reboot.
+`Core/VFCT.swift` and the `sysreport` / `vfct-dump` helper verbs implemented that old
+route and have been deleted.
 
-`Core/VFCT.swift` and two new helper verbs do the work; what is missing is the UI that
-sequences them. The order is:
+Confirmed on boots 552, 553 and 554 of the reference machine, the last of those with a
+release build that had no baked image to fall back on. After a first boot, the
+diagnostics report carries the verdict:
 
-1. `radeonize-helper.sh sysreport on DEVICE BACKUP OWNER`, then ask for a reboot.
-2. After that boot, `radeonize-helper.sh vfct-dump DEVICE DEST OWNER` copies the dumped
-   table off the EFI.
-3. `VFCT.image(fromTable:named:)` takes the Rembrandt image out of it, and
-   `VFCT.inject(_:intoKextAt:)` writes it into the staged kext's `Info.plist` and reads
-   it back to confirm.
-4. `radeonize-helper.sh sysreport off DEVICE BACKUP OWNER`.
-5. Install as usual, and reboot.
+- `vbios_src` - 3 means the image came from ACPI, 1 means a manually injected override,
+  absent means none was published at all.
+- `acpivbios` - 0 means the ACPI route succeeded; any other value is its refusal code.
+- `acpivb_how` - 0 means this macOS version is not one the route is measured on, so it
+  declined on purpose rather than dereferencing a guess.
 
-`VFCT.readImage(fromKextAt:)` says whether a staged or installed kext already carries an
-image, so steps 1 to 4 can be skipped when it does — which is also how to tell a
-development build, which has one compiled in, from a release build.
-
-The parser was checked against the real table from a TUF A15: it returns the same 44544
-bytes as `tools/vfct.py`, sha256 `27ed5802…`, round-trips through the plist, and refuses
-an empty, a truncated and a non-VFCT input. What has **not** been checked is that the
-kernel reads the property — that needs a boot.
+If a board ever turns up whose firmware publishes no usable `VFCT`, the manual override
+still exists outside the app: `tools/vbios_plist.py <kext> VFCT.aml` in the source tree,
+documented in the release's `README-INSTALL.md`.
 
 ## Before you ship
 

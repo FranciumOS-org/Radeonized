@@ -19,3 +19,29 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+---
+
+THIRD-PARTY MATERIAL, WHICH THIS LICENCE DOES NOT COVER
+
+AMD microcode images. A built RembrandtGPU.kext embeds AMD GPU firmware
+images, fetched by tools/fetch_amd_fw.sh and NOT present in this repository.
+They are licensed by AMD under their own terms, reproduced as that licence
+requires in the release archive's LICENSE.amdgpu and inside the built bundle
+at Contents/Resources/LICENSE.amdgpu. AMD's licence permits redistribution in
+binary form only; it grants no right to excerpt or modify them.
+
+Board video BIOS images. A machine's own VBIOS belongs to its board vendor.
+None is in this repository (firmware/ is not tracked), and release builds carry
+none: the driver reads the image out of the machine's own ACPI VFCT table at
+boot.
+
+Linux kernel reference headers. Files under docs/linux-ref/ are unmodified
+copies of Linux sources under their own licences (GPL-2.0 WITH Linux-syscall-
+note / MIT as marked in each file), fetched by tools/fetch_linux_ref.sh and NOT
+tracked here. docs/UPSTREAM.md records the commit each one came from. This
+project follows their register definitions and documented sequences; the code
+in src/ is its own.
+
+Lilu. Built against Lilu (third_party/, not tracked), which is distributed
+under its own terms by its authors.
