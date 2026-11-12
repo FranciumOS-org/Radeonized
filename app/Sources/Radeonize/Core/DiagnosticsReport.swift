@@ -3,7 +3,7 @@ import Foundation
 /// Builds a diagnostics report on this Mac. Nothing is collected or sent until the
 /// user asks for it, and the user sees (and can edit) the exact text before it goes.
 enum DiagnosticsReport {
-    static let endpoint = URL(string: "https://reports.example.com/report")!
+    static let endpoint = URL(string: "https://reports.jetpixel.space/report")!
 
     static func build() async -> String {
         await Task.detached(priority: .userInitiated) { collect() }.value

@@ -6,7 +6,7 @@ compatibility_date = "2026-01-01"
 # always behind the Access application for that hostname.
 workers_dev = false
 routes = [
-  { pattern = "reports.example.com", custom_domain = true }
+  { pattern = "reports.jetpixel.space", custom_domain = true }
 ]
 
 # Create the bucket once: npx wrangler r2 bucket create radeonize-reports

@@ -58,12 +58,18 @@ documented in the release's `README-INSTALL.md`.
 
 ## Before you ship
 
-- Replace the placeholder `endpoint` in `Sources/Radeonize/Core/DiagnosticsReport.swift`
-  with your deployed Worker URL.
+- Reports go to `https://reports.jetpixel.space/report`, set in
+  `Sources/Radeonize/Core/DiagnosticsReport.swift` and matched by the custom-domain route in
+  `worker/wrangler.toml`. The private viewer is `https://reports.jetpixel.space/admin`.
 - Deploy `worker/` (`npx wrangler r2 bucket create radeonize-reports`, then `npx wrangler deploy`).
-  Put `/admin*` behind Cloudflare Access.
-- Publish a release on the Radeonized repo with a `.zip` (containing `RembrandtGPU.kext` and
-  `RBAMDFramebuffer.kext`) and a `.sha256` file.
+  **`/admin*` must be behind Cloudflare Access before the domain resolves** - the worker serves
+  that path with no authentication of its own, so until Access is in front of it anyone who
+  guesses the URL can read every submitted report. Only `/report` is meant to be public.
+- Until the worker is deployed at that hostname, uploading a report fails; the report itself is
+  still shown in the app and can be pasted into an issue by hand.
+- The kexts are released from the repository root, not from here: `Radeonized-<tag>.zip`
+  containing `RembrandtGPU.kext`, `RBAMDFramebuffer.kext`, `README-INSTALL.md`,
+  `LICENSE.amdgpu` and `tools/`, with the sha256 in the release notes.
 
 ## Not tested on hardware yet
 
