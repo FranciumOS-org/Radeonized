@@ -68966,3 +68966,69 @@ Verified: no dangling externs under 3fxf's `nm -u` rule, zero
 `IOGraphicsFamily` in the plugin's `Info.plist`, zero libraries resolving from
 `SystemKernelExtensions.kc` (the 2oz trap), and no baked VBIOS in the release
 bundle. Not yet installed; nothing about the stall's cause is claimed.
+
+## 3rgr-d (2026-11-12) — there is no such time, and the gate was never waiting on one
+
+The user proposed replacing the gate's poll with a fixed wait: "is there a
+time we know that the AppleX6000 is 100% either ready or timeout? we can set
+our driver to wait that much... 5s? 10s?" The answer is no, on this machine's
+own numbers, and the asking exposed something better.
+
+No constant exists. `hwlibs_gate_ms` has read 5700, 5900, 5975 and 10875
+across four good boots on one machine with one OS and one configuration — a
+spread of nearly 2x. A constant picked at 10 s is short on the 10875 boot; one
+picked at 12 s taxes the other three by six seconds each. Four readings that
+do not agree are not a constant (rule 18), and all four come from boots that
+succeeded, so the distribution of the stalled boots is not merely unmeasured,
+it is unmeasurable until 3rgr-c's trail lands.
+
+A fixed wait is also strictly worse than what is there. The gate already
+means "until ready, up to 20 000 ms"; a flat 10 s is that same wait with the
+early exit deleted. Every boot would pay the maximum and still carry no
+guarantee, because the budget's expiry has never been evidence that Apple's
+side is ready — `hwlibs_gate_ok 0` is explicitly the gate giving up, and the
+code says so.
+
+The useful part of the question is the premise behind it. The gate is not a
+guess at a duration and never was: `g_rb_hwlibs_patched` is set on the last
+line of `processHWLibs` (`kern_start.cpp:11603`), which is an edge at a known
+instant, and the 25 ms poll is only how the gate observed that edge. So the
+poll becomes a kick. `rbgpu_hwlibs_gate_kick()` cancels the pending delayed
+poll and enters the same `thread_call` immediately; `processHWLibs` calls it
+on the line after it sets the flag.
+
+Worth stating plainly because it is easy to oversell: this buys at most one
+poll interval, 25 ms. It does not shorten the 5700 ms. That time is HWLibs
+genuinely not being loaded and patched yet, not the gate failing to notice,
+and nothing on our side of the mailbox makes Apple's kext load sooner. The
+change is correctness — the only true poll in the boot path becomes
+edge-triggered — and it is not a stall fix. Nothing here addresses 3rgr-b.
+
+It also corrects the framing 3rgr-c opened with. Asked "why is this driver
+time-based", the honest answer is that mostly it is not. The gate is an event
+wait with a backstop. The two remaining true guesses are the `/options` retry
+loops, bounded at 1 s in `RembrandtGPUPeer.cpp:509` and 500 ms in
+`RBAMDFramebuffer.cpp:238`, and this boot's `aty_tries 14` shows they do spin.
+The sentinel's 60 s and 3rgr's 15 s attach grace are policy, deliberately
+chosen, off the hot path.
+
+The poll is left in as the backstop rather than replaced, so the failure modes
+are bounded by what has already been measured: if the kick never arrives —
+`processHWLibs` not reached, the call not yet allocated, Lilu's patcher
+context declining the enqueue — the gate closes exactly as it does today. The
+kick is safe before the gate arms (nop, no call allocated), after it closes
+(`g_rbHwlibsGateDone` discards it), and on a double fire, because
+`rbgpu_hwlibs_gate_publish` has published-once as its first guard. The cancel
+before the enter is 2fy's footgun handled explicitly: re-entering a call
+already queued with a deadline is the shape that recorded "re-arming a
+thread_call from inside its own handler does not fire", and a cancel that
+loses the race against the poll firing is harmless because both paths end in
+the same guarded publish. `hwlibs_gate_kick` is published so the next boot
+says whether the edge was taken rather than leaving it inferred (rule 14).
+
+Built with 3rgr-c in the same bundle, `make plugin RELEASE=1`, UUID
+6588DD99-F240-38F0-B339-3424C437BA68, superseding 3rgr-c's 034F2F3D, which was
+never installed. Verified: no dangling externs (3fxf), zero `IOGraphicsFamily`
+in the plugin's `Info.plist`, zero libraries from `SystemKernelExtensions.kc`
+(2oz), no baked VBIOS in the release bundle, hosttest clean with no `error:`
+lines (rule 48's `-Werror` trap).

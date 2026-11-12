@@ -2298,6 +2298,51 @@ static void rbgpu_hwlibs_gate_action(thread_call_param_t, thread_call_param_t) {
     thread_call_enter_delayed(g_rbHwlibsGateCall, deadline);
 }
 
+/* 3rgr-d (2026-11-12): the edge, not the level.
+ *
+ * The user asked whether there is a time at which Apple's stack is "100%
+ * ready or timed out" that we could simply wait out. There is not, and this
+ * machine's own numbers say so: `hwlibs_gate_ms` has read 5700, 5900, 5975
+ * and 10875 across four good boots, a spread of nearly 2x, so any constant
+ * chosen from them is either short on the 10875 boot or a tax on the other
+ * three. A fixed wait is also strictly the current gate MINUS its early exit,
+ * because the gate already means "until ready, up to 20 s".
+ *
+ * The better answer was already in the tree. `g_rb_hwlibs_patched` is set on
+ * the last line of processHWLibs, which is an EDGE at a known instant; the
+ * 25 ms poll is only how the gate observed it. So processHWLibs calls this
+ * instead, and the gate fires on the edge.
+ *
+ * What this is worth, stated honestly: at most one poll interval, 25 ms. It
+ * does NOT shorten the 5700 ms, because that time is HWLibs genuinely not
+ * being loaded and patched yet, not the gate failing to notice. The gate has
+ * never been a guess at a duration - it is an event wait with a backstop, and
+ * that is the answer to "why is this driver time-based": mostly it is not.
+ * The real guesses are the two /options retry loops, bounded at 1 s and 500
+ * ms. This change is correctness, not a stall fix, and nothing here claims to
+ * address 3rgr-b's stall.
+ *
+ * The poll is DELIBERATELY left in place as the backstop. If this kick never
+ * arrives - processHWLibs not reached, the call not yet allocated, Lilu's
+ * patcher context declining to enqueue - the gate closes exactly as it does
+ * today, so the worst case is the behaviour we already measured. Safe to call
+ * at any time and any number of times: before the gate is armed it is a nop,
+ * after it has closed rbgpu_hwlibs_gate_publish's own guard discards it, and
+ * a double fire publishes once. */
+void rbgpu_hwlibs_gate_kick(void) {
+    if (g_rbHwlibsGateDone || !g_rbHwlibsGateCall) {
+        return;
+    }
+    rbgpu_diag_set_num("hwlibs_gate_kick", 1);
+    /* Cancel the pending delayed poll first: re-entering a call that is
+     * already queued with a deadline is the footgun 2fy recorded, and the
+     * cancel makes the enqueue unambiguous. A cancel that loses the race
+     * against the poll firing is harmless - both paths end in the same
+     * guarded publish. */
+    thread_call_cancel(g_rbHwlibsGateCall);
+    thread_call_enter(g_rbHwlibsGateCall);
+}
+
 static void rbgpu_hwlibs_gate_arm(IOService *pciDevice) {
     g_rbHwlibsGateDev = pciDevice;
 

@@ -27,6 +27,11 @@ void rbgpu_nvram_note(const char *var, const char *text);
 // used to need one; `rbgpu_sentinel_begin` must run BEFORE anything is armed
 // and returns true on a recovery boot.
 bool rbgpu_arg(const char *tok);
+
+// 3rgr-d: processHWLibs calls this on its last line so the HWLibs gate fires
+// on the edge rather than noticing it on its next 25 ms poll. Safe before the
+// gate is armed and after it has closed; the poll remains as the backstop.
+void rbgpu_hwlibs_gate_kick(void);
 bool rbgpu_stock(void);
 /* 2xz: 1 if the measured Apple-object offsets in this tree were measured on
  * the OS this boot is running, or -rbgpuosforce says to use them anyway.

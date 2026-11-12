@@ -11602,6 +11602,10 @@ void RGPU::processHWLibs(KernelPatcher &patcher, size_t id, mach_vm_address_t ad
      * before it publishes RBGPULoad. */
     g_rb_hwlibs_patched = 1;
     rbgpu_diag_set_num("hwlibs_patched", 1);
+    /* 3rgr-d: tell the gate on the edge instead of letting it poll for the
+     * level. Worth at most one 25 ms poll interval; the gate's own poll stays
+     * as the backstop, so a kick that never lands costs nothing. */
+    rbgpu_hwlibs_gate_kick();
     rbgpu_log("3fx: HWLibs patched - the accelerator may now be started");
 }
 
