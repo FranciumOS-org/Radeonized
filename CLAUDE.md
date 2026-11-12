@@ -97,13 +97,24 @@ means hybrid).
   `smu13_driver_if_yellow_carp.h` and `docs/linux-ref/` is no longer in the
   tree. Without it every target fails at that include (3fw).
 - **A RELEASE build is a different build: `make plugin RELEASE=1`**, into
-  `build-release/`. It carries no VBIOS and no yellow_carp firmware, so the
-  peer takes `ATY,bin_image` from its own personality instead — put a
-  machine's own image there with
-  `python3 tools/vbios_plist.py <kext> firmware/VFCT.aml`, and check it with
-  `--check`. A dev build still bakes the ROM in, and the bundle's copy wins
-  over it. Never hand out a `build/` plugin: it contains the board's VBIOS
-  and 1.3 MB of AMD firmware (3fw).
+  `build-release/`. It carries no VBIOS (the yellow_carp firmware **stays** —
+  3fwc, functionally required, `yc_swapped 12`; this bullet claimed otherwise
+  until 3vb-e read the built binary) and takes the image from the machine's
+  own **ACPI VFCT table, in-kernel, with no per-machine step** (3vb-e, boot
+  552: `acpivb_how 5`, `acpivbios 0`,
+  **`vbios_src 3`**, every length and offset matching
+  `firmware/680m-vbios.rom` bit for bit). The route is the ACPI table cache at
+  `AppleACPIPlatformExpert + 0x150` plus exported
+  `OSDictionary::getObject("VFCT")` — **Lilu cannot reach AppleACPIPlatform**
+  (`acpivb_kinfo 0xffffffff`; that bundle has no `Contents/MacOS` in a KC
+  boot), so `solveSymbol` is not the route and `acpivb_sym 0` is correct, not
+  a failure. The offset is gated per OS by `RB_OSD_KEXTOFF`, so an unmeasured
+  OS refuses with `acpivb_how 0`. If the probe refuses, the peer still takes
+  `ATY,bin_image` from its own personality — put a machine's own image there
+  with `python3 tools/vbios_plist.py <kext> firmware/VFCT.aml`, and check it
+  with `--check`. A dev build still bakes the ROM in, and the bundle's copy wins
+  over it. Never hand out a `build/` plugin: it contains **this board's own
+  VBIOS**, which `LICENSE.amdgpu` does not cover (3fw).
 - **Always check the UUID moved** (`dwarfdump --uuid build/out/...`).
 - **A DANGLING `extern` OF OURS LINKS CLEAN AND PANICS (3fxf).** `-Xlinker
   -kext` defers every undefined symbol, and **`kmutil libraries -p` reports

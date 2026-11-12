@@ -68456,3 +68456,70 @@ all (rule 34: the arm is part of the experiment), which is why the dev build
 was the one installed.
 
 Dev **F9791B82**. Hosttest 0 failures, no undefined symbols of ours. Not booted.
+
+## 3VB-E CONFIRMED ON HARDWARE / BOOT 552 — THE VBIOS NOW COMES FROM THE
+## MACHINE'S OWN ACPI TABLE, IN-KERNEL, WITH NO PER-MACHINE STEP
+
+Plugin **9CEA4690-2479-3CDB-96A2-96C95B77A46A**, `rbgpu-boot` **552**,
+`armed 1`, `arm_why 0`, `AMD Radeon 680M` / Metal 3 in System Profiler. The
+3vb-e entry above named dev **F9791B82**; `sudo tools/efi.sh install` rebuilds
+before it installs, so the UUID moved with the working tree clean at 2901db5
+and no commits between — same source, a second link. Rule 15 is satisfied by
+reading the loaded UUID, not by assuming the one the entry named.
+
+`ioreg -rl -c RembrandtGPUPeer`, the whole acpivb group (decimal, as RBGPUDiag
+always is):
+
+    acpivb_how    5          the direct-dictionary route ran to the lookup
+    acpivbios     0          RB_ACPIVB_OK
+    vbios_src     3          ATY,bin_image came from the ACPI VFCT table
+    acpivb_keys   44         the ACPI table cache holds 44 tables
+    acpivb_tbl    44676      VFCT table length
+    acpivb_off    104        = 0x68, the first image's body
+    acpivb_len    44544      the option ROM's own length
+    acpivb_imgs   1          one image in the chain
+    acpivb_dev    5761       = 0x1681, our device id, matched on the first try
+    acpivb_hdr    400        = 0x190, the ATOM header start
+    acpivb_sig    1          " 761295520" present at 0x30
+    acpivb_vfct   0          rb_vfct_find returned OK
+    acpivb_cache  0xffffff8b92168fc8   the cache pointer, above the kalloc floor
+    acpivb_sym    0          no symbol was solved
+    acpivb_kinfo  4294967295 Lilu never reached AppleACPIPlatform
+
+**The last two are the finding as much as the first three.** `acpivb_sym 0`
+and `acpivb_kinfo 0xffffffff` say the solved-symbol route (3vb-d) did **not**
+run — the route that worked is 3vb-e's: read the table cache pointer at
+`AppleACPIPlatformExpert + 0x150`, `OSDynamicCast` it (self-validating via the
+object's own metaclass), and call exported `OSDictionary::getObject("VFCT")`.
+One per-OS byte offset, no per-OS addresses, no `solveSymbol`.
+
+**Every number has an offline control, and they all match bit for bit.**
+`firmware/VFCT.aml` (dumped by `tools/vfct.py` on a previous boot) is 44676
+bytes = `acpivb_tbl`; its first-image offset 0x4c + 28 = 0x68 = 104 =
+`acpivb_off`; `firmware/680m-vbios.rom` is 44544 bytes = `acpivb_len` and its
+`p[0x48] | p[0x49] << 8` is 0x190 = 400 = `acpivb_hdr`; and
+`aml[104:104+44544] == rom` is **True**, so the bytes the kext handed the
+PCI device are the same bytes the python parser extracted independently. That
+is the whole point of 304's practice applied to a buffer: the derivation and
+the live reading in the same comparison.
+
+**What this retires.** The release build carries no VBIOS (3fw) and took
+`ATY,bin_image` from its own personality, which meant a per-machine step:
+boot once with a DEBUG OpenCore to get `SysReport`, run `tools/vbios_plist.py`,
+reinstall. That step is now **gone on any machine whose firmware publishes a
+VFCT table**, which is every ACPI x86 box with an AMD display device —
+`pci_fixup_video()` exists upstream precisely because the APU's ROM is part of
+the sbios image and `amdgpu_soc15_read_bios_from_rom()` refuses on
+`AMD_IS_APU`. The baked ROM and the bundle image both remain, ahead of and
+behind the probe respectively, so a board whose VFCT is absent or implausible
+is no worse off than before — `rbgpu_vbios_plausible()` gates the ACPI image
+exactly as it gates the other two, and a failure publishes `acpivbios` rather
+than falling through silently (rule 14).
+
+**Not established:** n=1 machine. Every refusal code in the path is exercised
+by the hosttest, and the two real-file controls make the parse honest, but
+"the dictionary is at +0x150 and holds a 4-char key per table" is measured on
+**macOS 26.7.3 only** and `RB_OSD_KEXTOFF` in `rb_osver.h` is what refuses it
+elsewhere (rule 41). On an unmeasured OS the probe returns
+`RB_ACPIVB_E_NO_SYM` with `acpivb_how 0` and `acpivb_osmajor` naming the
+kernel, and the older routes take over.
