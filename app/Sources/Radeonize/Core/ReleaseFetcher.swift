@@ -38,9 +38,19 @@ enum ReleaseFetcher {
             let assets: [Asset]
         }
         let release = try JSONDecoder().decode(Release.self, from: data)
+        // The checksum has to be THIS zip's. Taking the first .sha256 in the
+        // list would pick another asset's sidecar - a release that also ships
+        // the app's own .dmg.sha256 would then fail with a checksum mismatch
+        // that looks like a corrupted download. So: prefer "<zip name>.sha256"
+        // and fall back to a lone .sha256 only when there is exactly one.
+        let shaCandidates = release.assets.filter { $0.name.hasSuffix(".sha256") }
         guard let zipAsset = release.assets.first(where: { $0.name.hasSuffix(".zip") }),
-              let shaAsset = release.assets.first(where: { $0.name.hasSuffix(".sha256") }) else {
-            throw RadeonizeError.message("Release \(release.tag_name) has no .zip and .sha256 pair.")
+              let shaAsset = shaCandidates.first(where: { $0.name == zipAsset.name + ".sha256" })
+                  ?? (shaCandidates.count == 1 ? shaCandidates.first : nil) else {
+            throw RadeonizeError.message(
+                "Release \(release.tag_name) has no .zip with a matching .sha256. "
+                + "Expected \(release.assets.first(where: { $0.name.hasSuffix(".zip") })?.name ?? "<name>.zip")"
+                + ".sha256 beside it.")
         }
 
         let (shaData, _) = try await URLSession.shared.data(from: shaAsset.browser_download_url)

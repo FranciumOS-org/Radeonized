@@ -69,7 +69,12 @@ documented in the release's `README-INSTALL.md`.
   still shown in the app and can be pasted into an issue by hand.
 - The kexts are released from the repository root, not from here: `Radeonized-<tag>.zip`
   containing `RembrandtGPU.kext`, `RBAMDFramebuffer.kext`, `README-INSTALL.md`,
-  `LICENSE.amdgpu` and `tools/`, with the sha256 in the release notes.
+  `LICENSE.amdgpu` and `tools/`.
+- **A release needs `Radeonized-<tag>.zip.sha256` beside the zip**, or `ReleaseFetcher`
+  stops with "has no .zip with a matching .sha256" before downloading anything - v0.1.0
+  shipped without it and the app refused the release it was built for. `shasum -a 256
+  Radeonized-<tag>.zip > Radeonized-<tag>.zip.sha256` is the whole step. The fetcher pins
+  the sidecar to the zip's own name, so shipping a `.dmg.sha256` as well is safe.
 
 ## Not tested on hardware yet
 

@@ -68683,3 +68683,40 @@ ASUS TUF A15"), and the two downloads described separately rather than
 collapsed into one archive. The testers section still carries the one `ioreg`
 line and says which values mean anything, because a report that cannot say
 whether the boot was armed is not a report (rule 8).
+
+## v0.1.0-b — THE INSTALLER REFUSED THE RELEASE IT WAS BUILT FOR
+
+The app stopped at step 1: `Release v0.1.0 has no .zip and .sha256 pair.`
+`ReleaseFetcher` requires **two** assets, a `.zip` and a `.sha256` sidecar, and
+the release carried the digests **in the notes** instead — human-readable,
+machine-invisible. Fixed by uploading `Radeonized-0.1.0.zip.sha256` (87 bytes,
+plain `shasum -a 256` output, digest first, which is the token the app parses).
+
+**Verified by walking the app's own logic against the live API**, not by
+assuming the upload satisfied it: fetch `/releases/latest`, apply the same
+`first(where:)` picks, download both assets, compare digests, and list the zip
+to confirm `RembrandtGPU.kext/` and `RBAMDFramebuffer.kext/` are both findable
+at depth. All five steps pass.
+
+**A hazard found in that walk and fixed before it could fire.** The fetcher
+took the **first** `.sha256` asset in the list, not the one belonging to the
+zip. The moment a release also ships the app's own `Radeonize-<tag>.dmg.sha256`
+— which this release nearly did, since both digests were wanted — the fetcher
+could pick the dmg's sidecar, compare it against the zip, and stop with
+*"Checksum mismatch: the download does not match the release's .sha256"*. That
+message accuses the download. The defect would have been in the picker, and
+the user would have been told their network corrupted a file. It now prefers
+`"<zip name>.sha256"` and falls back to a lone `.sha256` only when there is
+exactly one, with the refusal naming the file it expected.
+
+Rule 14's shape at the **release** boundary: the digest existed, the consumer
+could not see it, and the error named a missing *pair* rather than a missing
+*file*. And rule 26 again, one level up — I verified the notes quoted the right
+digests and never asked whether anything **reads** them.
+
+The dmg was rebuilt with the picker fix: sha256
+`fb4f97d30c3dd8581beab086400e93c8d2bef3f877a1fe32364aed7623d7e443`, up from
+`1e6cb154…`, re-uploaded, and the notes' digest line updated in the same edit
+so the published checksum matches the published file. Checked afterwards from
+the API: both digests appear in the release body and both match the bytes
+served.
