@@ -2579,8 +2579,67 @@ static uint32_t g_rbSentinelCleared = 0;
 
 static void rbgpu_sentinel_clear_now(const char *why, uint32_t by);
 
+/* 3rgr: THE ATTACH IS NOT SURVIVAL, and 2026-11-12 paid for the difference.
+ *
+ * 3fwd cleared the latch the instant the accelerator attached, on the argument
+ * that attaching is what the boot exists to do. Two cold boots then wedged
+ * HARD at +5.7 s and +5.3 s - measured from the log store, which stops dead at
+ * those timestamps - and boot 556's own timeline puts the accelerator's
+ * publish at +5.72 s. So the clear fired, synced, and the machine died a
+ * fraction of a second later. The latch was gone, the next boot came up armed,
+ * and it wedged identically: the user got two dead boots where the sentinel
+ * exists to allow exactly one. `rbgpu-safe` reading 0 after two hangs is the
+ * evidence, and it is also what made "were those boots even armed?" unanswerable
+ * for an afternoon.
+ *
+ * The attach signal is kept - it is what makes a deliberate reboot cheap, and
+ * five unreadable boots on 2026-11-11 are the reason it exists - but it now
+ * SCHEDULES the clear instead of performing it. A boot has to still be running
+ * kRbSentinelAttachGraceMs after the accelerator attached before it counts as
+ * survived, which is the weakest claim that covers the measured failure and
+ * still clears at ~21 s rather than 60.
+ *
+ * The 60 s timer stays as the backstop for a boot that never accelerates on
+ * purpose. Whichever fires first wins; `sentinel_cleared_by` says which.
+ */
+static const uint32_t kRbSentinelAttachGraceMs = 15000;
+static thread_call_t  g_rbSentinelAttachCall   = nullptr;
+static uint32_t       g_rbSentinelAttachSched  = 0;
+
+static void rbgpu_sentinel_attach_fire(thread_call_param_t, thread_call_param_t) {
+    rbgpu_sentinel_clear_now("the accelerator attached and the boot was still "
+                             "alive the whole grace period afterwards", 2);
+}
+
 void rbgpu_sentinel_accelerator_ok(void) {
-    rbgpu_sentinel_clear_now("the accelerator attached", 2);
+    if (g_rbSentinelCleared || g_rbSentinelAttachSched) {
+        return;   /* already cleared, or the grace period is already running */
+    }
+    if (!g_rbSentinelAttachCall) {
+        g_rbSentinelAttachCall =
+            thread_call_allocate(rbgpu_sentinel_attach_fire, nullptr);
+    }
+    if (!g_rbSentinelAttachCall) {
+        /* No timer. Clearing now is 3fwd's behaviour and is what this change
+         * exists to avoid, but the alternative is leaving the clear to the 60 s
+         * backstop, which is strictly safer - so take that instead and say so.
+         * Rule 14: this must not read as a normal attach clear. */
+        rbgpu_diag_set_num("sentinel_attach_sched", 0);
+        rbgpu_log("3rgr: thread_call_allocate FAILED for the attach grace, so "
+                  "the latch is left to the %u ms backstop instead of clearing "
+                  "here", kRbSentinelMs);
+        return;
+    }
+    g_rbSentinelAttachSched = 1;
+    rbgpu_diag_set_num("sentinel_attach_sched", 1);
+    rbgpu_diag_set_num("sentinel_attach_grace_ms", kRbSentinelAttachGraceMs);
+    uint64_t deadline = 0;
+    clock_interval_to_deadline(kRbSentinelAttachGraceMs, kMillisecondScale,
+                               &deadline);
+    thread_call_enter_delayed(g_rbSentinelAttachCall, deadline);
+    rbgpu_log("3rgr: the accelerator attached; the latch clears in %u ms if "
+              "this boot is still alive then, not now",
+              kRbSentinelAttachGraceMs);
 }
 
 static void rbgpu_sentinel_clear(thread_call_param_t, thread_call_param_t) {
