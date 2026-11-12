@@ -68720,3 +68720,61 @@ The dmg was rebuilt with the picker fix: sha256
 so the published checksum matches the published file. Checked afterwards from
 the API: both digests appear in the release body and both match the bytes
 served.
+
+## v0.1.0 CONFIRMED END TO END / BOOT 555 — A CLEAN MACHINE, THE PUBLISHED
+## DOWNLOAD, THE INSTALLER APP, AND AN ACCELERATED DESKTOP
+
+**The arm was the whole point of this one (rule 34):** before testing, every
+trace of ours was removed from the machine, so that nothing left behind could
+make a failure look like a success. `sudo tools/efi.sh uninstall` took the
+`Kernel -> Add` entry and the kext out of the EFI; `bootarg remove` took all
+**22** of our tokens out of boot-args in one edit, leaving the 18 that are not
+ours untouched (`wdt=-1` included); the new `sudo tools/fbuninstall.sh` took
+`RBAMDFramebuffer.kext` out of `/Library/Extensions` and rebuilt the auxiliary
+collection without it. Verified by **grepping the whole config.plist** for
+`rembrandt|rbgpu|radeoniz` (none, not just absent from `Kernel -> Add`) and by
+**diffing the rebuilt collection against its backup** (exactly
+`com.rembrandtgpu.fb` gone, the other eight kexts intact). NVRAM held no
+disarm. The user then ran the app.
+
+**Boot 555, 2026-11-11 22:30:37:**
+
+    kextstat   com.rembrandtgpu.plugin  52930D70-...  (the release plugin)
+               com.rembrandtgpu.fb      2527A89E-...  (the release framebuffer)
+    armed 1   arm_why 0
+    hwlibs_gate_ok 1   hwlibs_gate_regsvc 1   hwlibs_gate_ms 6375
+    yc_swapped 12, no yc_refused
+    acpivb_how 5   acpivbios 0   vbios_src 3
+    acpivb_cache 0xffffff8bf1... (a fourth address)
+    AMD Radeon 680M / Metal 3
+
+**Two of those readings need no sudo and settle the question of WHO installed
+it.** The plugin loaded **from the EFI**, and that file had been deleted — only
+the app could have put it back. And **`vbios_src 3`** rather than 1 says the
+bundle in the EFI carries **no** injected image: the driver found the board's
+own ROM in the machine's ACPI table by itself, on a machine where nothing was
+pre-staged, which is exactly the configuration a stranger downloads into.
+
+**The app's own logs, three operations in 25 seconds**, each with the check
+that matters rather than a success message: `download` (asked GitHub, matched
+the SHA-256 against `Radeonized-0.1.0.zip.sha256`, unpacked), `efi-install`
+(saved the EFI state, copied, **re-checked the copied binary against the
+release**, placed after Lilu at index 1, wrote), `fb-install` (saved state,
+copied, **dry-run collection, UUID check, live collection, UUID check** — the
+same order `fbinstall.sh` uses, including the trap that `kmutil create` exits 0
+when it writes nothing). Backups under
+`~/Library/Application Support/Radeonize/backups/`.
+
+**So the chain closes, every link measured on hardware:** source at `ba4f693`
+-> release build `52930D70` -> `Radeonized-0.1.0.zip` -> the anonymous GitHub
+download (`cmp`-identical) -> the app's checksum verification -> a clean
+machine -> an accelerated boot with the VBIOS taken from ACPI. Rule 45's
+shape, discharged in the direction it usually is not: the human-observed
+deliverable ("it's fully accelerated like before") came with its own
+instrumented reading in the same boot.
+
+**What this retires:** the per-machine VBIOS ritual (3vb-e, now verified
+through the whole pipeline rather than just in the kext), and the question of
+whether the installer path works for somebody who is not us. **Still n=1
+machine** — the ACPI offset is gated per macOS version and declines rather
+than guessing, and no second Rembrandt has run any of this.
