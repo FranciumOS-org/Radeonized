@@ -68634,3 +68634,52 @@ it is checked against a known-present case**, and the new entry for the list
 is **a zsh glob that fails aborts its command, so one bad pattern silences
 every other pattern in the same `ls`**. `git status`'s `M LICENSE` is what
 caught it — the instrument that was not the suspect.
+
+## v0.1.0 — THE RELEASE IS RENAMED, CARRIES BOTH DOWNLOADS, AND 312'S FIX IS
+## BACK IN THE CARD
+
+Release **`Radeonized - v0.1.0`**, tag **v0.1.0** at `ba4f693`, two assets:
+`Radeonized-0.1.0.zip` (both kexts, `README-INSTALL.md`, `LICENSE.amdgpu`,
+`tools/`) sha256
+`ed65e64d8415b5b2f20aef3d9a44fa6779898d2d7b02af81849bf37de02e41ab`, and
+`Radeonize-0.1.0.dmg` (the installer app) sha256
+`1e6cb1542a66c14a6fa00c0c40d2806bfb8e697a68dc43af8058228557fdc216`. Both were
+downloaded anonymously and `cmp`-matched against the local files, and the
+kexts inside the renamed zip were `cmp`-matched against `build-release/out`
+and against the framebuffer in `/Library/Extensions` — so renaming the archive
+did not silently rebuild anything. The old `Radeonized-3vb.zip` asset and the
+`v3vb` tag are deleted; `git log 7aaebce..HEAD -- src/ Makefile` is empty, so
+tagging at HEAD does not misdescribe the binaries.
+
+**THE CARD TOLD THE USER SOMETHING WAS BROKEN WHILE IT RAN ON THEIR SCREEN.**
+The first draft of these notes listed "MSAA, and WebGL with it" under *Not
+working*, copied from `CLAUDE.md`'s 311 entry. The user said it renders — a
+volumetric shader and shellshock.io at ~100 fps — and the journal agrees with
+the user: **312** (2026-11-09) found the MSAA colour failure was **our own
+swizzle cave** remapping the probe into a mode AddrLib refuses, the guard went
+into the cave, and **boot 521** measured `MSAA colour textures (312): 9 of 9
+allocated` with `cave 1` read out of the process's own memory rather than from
+the kext (rule 20), in the same run as 3mip-c's 0/160 BAD. The card carried
+311's **diagnosis** as the state of the world for five milestones after the
+fix landed.
+
+Two things in that, neither of them new:
+
+- **The card is a suspect, the journal is authoritative.** This file's own
+  header says findings go in the journal, and the one that got stale is the
+  one that was written as a finding in the card. The fix (312) was journalled
+  and the card was never updated, which is the exact failure the header warns
+  about, in the opposite direction from the usual ballooning.
+- **A user's observation is a measurement** (rule 45). "It renders at 100 fps"
+  came with a named workload and a frame rate, and it was right against a
+  document I had read that morning. Checking it cost one grep.
+
+`CLAUDE.md`'s entry is now **311/312** and states the fix, the boot it was
+measured on, and that the card was wrong until 2026-11-11.
+
+**Also in the notes, by the user's direction:** third-person prose, bold
+section headings, no tables, the preview caveat as one line ("Tested on an
+ASUS TUF A15"), and the two downloads described separately rather than
+collapsed into one archive. The testers section still carries the one `ioreg`
+line and says which values mean anything, because a report that cannot say
+whether the boot was armed is not a report (rule 8).
