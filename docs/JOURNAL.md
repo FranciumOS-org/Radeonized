@@ -68778,3 +68778,63 @@ through the whole pipeline rather than just in the kext), and the question of
 whether the installer path works for somebody who is not us. **Still n=1
 machine** — the ACPI offset is gated per macOS version and declines rather
 than guessing, and no second Rembrandt has run any of this.
+
+## 3rgr / 2026-11-12 — THE FIRST COLD BOOT AFTER v0.1.0 WEDGES AT ~5.7 s, AND THE SENTINEL DID NOT CATCH IT
+
+The user shut down at 00:41 and powered on at 10:25. Two boots wedged with the
+progress bar filling forever; a third with `-rbgpuoff` came up stock and is the
+boot these readings were taken in. **No code, no kext and no collection changed
+between the last good boot and these** — the only writes after boot 555 were a
+0.2 s read-only `kmutil` invoked by the Radeonize app at 23:24:54 (the user was
+re-testing the installer from `Radeonize-0.1.0-2.dmg`), and the auxiliary
+collection's mtime is still 22:29, before boot 555. The OS is unchanged:
+26.7.3 / 25G342, kernel still the Oct 12 build, `softwareupdate --history`
+showing nothing after 26.7.3 on 2026-11-11.
+
+**Established, from the log store (the wedged boots left one):**
+
+- Boot banners at **10:25:42**, **10:29:15** (the two hangs) and **10:34:46**
+  (`-rbgpuoff`). The hangs' logs **stop dead** at 10:25:48.198 and 10:29:20,
+  i.e. **~5.7 s and ~5.3 s in**, after 33 269 and 25 404 lines. This is a hard
+  wedge, not a slow boot: nothing is logged afterwards at all. "Alive behind
+  the progress bar" is wrong and was my first reading of it.
+- `RembrandtGPUPeer` published at **+0.54 s** in both hangs, the same offset as
+  the good boot's +0.55 s, so the peer attached normally.
+- In good boot 555 `RBAMDFramebuffer` published at **+5.84 s** and Apple's
+  `AMDRadeonX6000_AMDNavi21GraphicsAccelerator` at +6.19 s. **The wedge is at
+  +5.7 s — the same instant the framebuffer loads**, and in both hangs no aux
+  kext ever loaded: zero load notifications for `com.rembrandtgpu.fb`,
+  `com.nullmoth.NVRMFB`, `com.nullmoth.NVRM` or `AMDRadeonX6000`.
+- `kernelmanagerd`'s `error: tried to insert an invalid codeful kernel
+  extension in the restricted lookup table: com.rembrandtgpu.fb` is a **RED
+  HERRING** — it is present in the good boot too, and in the `-rbgpuoff` boot
+  where the kext then loads fine. Only the control established that.
+
+**The contradiction that is not resolved.** `rbgpu-boot` still reads **555**
+and `rbgpu-safe` reads **0**. Both writes are force-synced
+(`IONVRAM-FORCESYNCNOW-PROPERTY`), and `rbgpu_sentinel_begin()` is the third
+statement of `RembrandtGPUPeer::start`, before anything is armed. So either
+`start()` never reached line 27 in either hang — although the peer published
+and the machine then ran normally for five more seconds — or the latch was set
+and something cleared it, which the `-rbgpuoff` boot cannot have done, because
+`-rbgpuoff` returns from `start()` at line 2, before the sentinel. **Until this
+is resolved, "the hung boots were armed" is an assumption, not a reading.**
+It also means the sentinel did not protect the second boot, whatever the
+mechanism: the user got two wedges, not one.
+
+**What is NOT the explanation, checked:** no OS update; no kext or collection
+change; the chassis is still in Eco mode (no `0x10de` on the bus, only
+`1002:1681`); `/chosen` carries the normal-boot `boot-file`
+(`...BootKernelExtensions.kc`) with no dmg keys, so the 3rec-b recovery gate
+cannot have misfired; NullMoth's `NVRM`/`NVRMFB`/`NVAccel`/`NVRMAGDC` were
+already installed and **already loading in boot 555**, so they are not new.
+
+**The one axis that did change is COLD vs WARM.** Every boot of 2026-11-11
+(18:00, 20:14, 20:19, 20:25, 21:26, 21:45, 22:27, 22:30) was a restart from a
+running system. 10:25 was the first power-on from a full overnight shutdown
+since v0.1.0 was installed. n=2 on the cold side, n=1 on the warm, no proposed
+mechanism, and **not yet a finding** — rule 44. The cheap test is one warm
+reboot with the driver armed, from the `-rbgpuoff` desktop.
+
+**Release impact if cold boot is the variable: every user's first boot is a
+cold boot.** v0.1.0 is published and the installer is live.
