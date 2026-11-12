@@ -6,13 +6,18 @@
 > the journal under its tag. **Put findings in the journal, not here.** Nothing
 > is deleted, only moved; git history holds every earlier version.
 >
-> - `docs/HANDOFF-NEXT.md` — current state and what to do now. **Read next.**
-> - `docs/JOURNAL.md` (~61 000 lines) — the chronological evidence record,
+> - `docs/JOURNAL.md` (~68 600 lines) — the chronological evidence record,
 >   authoritative for what was measured, in order, including every withdrawn
 >   reading. **Never trimmed. Grep it by milestone tag** (`2xw`, `2zw`, `2E9`);
->   never read it whole.
-> - `docs/EXTERNAL-DISPLAY.md` — the one open goal, in full.
-> - `docs/PLAN.md`, `docs/APPLE-STACK.md`, `docs/UPSTREAM.md`.
+>   never read it whole. **Read it next** — it is where the current state is.
+> - `docs/PLAN.md`, `docs/RULES.md` — the only other docs in the tree.
+> - **`HANDOFF-NEXT.md`, `EXTERNAL-DISPLAY.md`, `APPLE-STACK.md`,
+>   `CACHE-RECOVERY.md`, `UPSTREAM.md` and the SPEC/SCOPE files were DELETED
+>   when the repository was prepared for publication (`d8fc2b7`).** Every
+>   reference to them in this card and in `docs/RULES.md` is a pointer into git
+>   history, not a file: `git show d8fc2b7^:docs/EXTERNAL-DISPLAY.md`. Nothing
+>   in them is lost, but **do not send a reader or yourself to a path that is
+>   not there** — the journal carries the same material under its tags.
 
 **A SESSION OF REBOOTS NEEDS `-rbgpunosentinel` (3fwd).** A boot shorter than
 60 s leaves the latch, so the NEXT boot comes up stock with `arm_why 6` — and
