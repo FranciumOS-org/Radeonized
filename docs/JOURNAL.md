@@ -68523,3 +68523,63 @@ by the hosttest, and the two real-file controls make the parse honest, but
 elsewhere (rule 41). On an unmeasured OS the probe returns
 `RB_ACPIVB_E_NO_SYM` with `acpivb_how 0` and `acpivb_osmajor` naming the
 kernel, and the older routes take over.
+
+## 3VB-E / BOOTS 553 AND 554 — THE RELEASE PLUGIN IS THE ONE VERIFIED NOW, AND
+## THE ACPI ROUTE HELD WITH NOTHING UNDER IT
+
+**Boot 553 reproduced 552 for free.** A reboot happened before the install, and
+the dev plugin `9CEA4690` came up with `acpivb_how 5`, `acpivbios 0`,
+`vbios_src 3`, `acpivb_tbl 44676`, `acpivb_len 44544`, `acpivb_off 104`,
+`acpivb_hdr 400`, `acpivb_dev 5761`, `acpivb_keys 44`, `acpivb_imgs 1`,
+`acpivb_sig 1` — every field identical to 552 — with **`acpivb_cache`
+different** (`0xffffff8b92168fc8` on 552, `0xffffff8bebcb3b60` on 553). A
+kernel pointer that moves boot to boot while everything derived from it stays
+put is the reading that says the route is being walked rather than cached:
+rule 44's second sample, taken at no cost because rule 33 was applied before
+reading anything.
+
+**Boot 554 is the release.** `sudo env RBGPU_KEXT=build-release/out/... \
+tools/efi.sh install` put **52930D70-19E0-3037-840B-4BAC81F7AF8C** in the EFI
+(RBGPU_KEXT set, so nothing was rebuilt and the installed bytes are the ones
+`cmp` matches against the shipped archive), and `kextstat` shows that UUID with
+framebuffer `2527A89E` beside it — rule 15 for both artifacts.
+
+    rbgpu-boot 554   armed 1   arm_why 0
+    hwlibs_gate_ok 1   hwlibs_gate_regsvc 1   hwlibs_gate_ms 6650
+    yc_swapped 12, no yc_refused
+    acpivb_how 5   acpivbios 0   vbios_src 3
+    acpivb_cache 0xffffff8c411f7eb0   (a third address)
+    AMD Radeon 680M / Metal 3
+
+**This is the boot that actually tests 3vb-e.** 552 and 553 ran a dev build,
+which bakes the ROM in — so had the ACPI route failed there, the baked image
+would have taken over and the machine would have looked the same. The release
+carries **no VBIOS at all**: `grep -c ATY,bin_image` on its Info.plist is 0,
+`" 761295520"` does not occur in its binary, and nothing was staged into the
+bundle. `vbios_src 3` on that plugin means the image can only have come from
+the machine's own ACPI table. The fallback that made the earlier two readings
+ambiguous is gone, which is the definition of the configuration that exhibits
+the question (rule 39, used forwards for once).
+
+`hwlibs_gate_ms 6650` is the gate's fourth sample (6225 / 6375 / 6475 / 6650).
+
+**An instrument defect in the install path, fixed in the same breath.**
+`tools/efi.sh install` printed *"a RELEASE=1 build needs: python3
+tools/vbios_plist.py ..."* — the step this milestone removed, printed by the
+very command that installed the build which removes it. It now names the
+reading instead (`vbios_src` 3, `acpivbios` 0) and keeps `vbios_plist.py` as
+the override. Harmless here because I knew what the warning meant, which is
+exactly why it would have cost somebody else a reboot.
+
+**Carried forward and NOT chased:** System Profiler reports `VRAM (Total)
+2 GB`. This was already withdrawn as a finding under 3fxc — the user changed
+the UMA allocation themselves — so it is not evidence about this boot and the
+grep that found the earlier entry is what kept it from becoming a line of
+work.
+
+**Shipped:** `build-release/dist/Radeonized-3vb.zip`, 407122 bytes, sha256
+`e2e1b28fd67b5ff5144e82dfe179cbeb4495b83ed7b8d12dda080b4e7bed8482`. Its
+plugin binary is `cmp`-identical to `build-release/out`'s, whose UUID is the
+one `kextstat` listed on boot 554, and its framebuffer is `2527A89E`, the one
+inside the live auxiliary collection. README-INSTALL.md no longer carries the
+"has not booted" paragraph, because it has.
