@@ -1085,23 +1085,21 @@ table, which we have on disk); **polling `checkTimestamps()` harder**
 (`rbgpuretiredrain`, measured dead); **efficiency/power** (moved to
 `~/Developer/Econized`).
 
-**311 - WEBGL IS NOT MISSING; MSAA COLOUR SURFACE SIZING RETURNS 0.** Browser
-pages are white because `getContext('webgl')` defaults to `antialias: true`.
-Isolated to that one attribute (interleaved, five pairs, two sizes): `true` ->
-default framebuffer `INCOMPLETE_ATTACHMENT`, every op **1286**; `false` ->
-correct throughout. Below the browser, Metal claims
-`supportsTextureSampleCount` 2/4/8 and returns **nil for all three**. The
-matrix splits it: multisampled **colour** fails in four formats, two sample
-counts, two sizes, array and not; multisampled **depth/stencil** (D32, D16,
-D32S8, S8) all allocate. The failing call is
-**`heapTextureSizeAndAlignWithDescriptor:`** - **size 0, align `0xD7739C01`**
-against the control's 16384/4096 and MSAA depth's 65536/65536, i.e. an
-**unwritten output struct** (rule 14 inside Apple's stack). **FMASK is a
-CANDIDATE, not a mechanism** - the split is FMASK-versus-HTILE shaped, but no
-FMASK path has been read and no configuration here lacks the symptom (rule
-39). `tools/msaa/`; `dscinv.sh` does not accept
-`AMDRadeonX6000MTLDriver` yet. Metal is otherwise unaffected - everything
-measured on this chip runs single-sampled.
+**311/312 - WEBGL WAS WHITE BECAUSE OUR OWN SWIZZLE CAVE BROKE MSAA COLOUR.
+FIXED.** Browser pages were white because `getContext('webgl')` defaults to
+`antialias: true`, and below the browser `heapTextureSizeAndAlignWithDescriptor:`
+returned **size 0, align `0xD7739C01`** for multisampled **colour** (four
+formats, two sample counts, two sizes, array and not) while multisampled
+depth/stencil allocated fine - an unwritten output struct, rule 14 inside
+Apple's stack. **312 found the cause was ours**: the cave remapped the MSAA
+colour probe into a mode AddrLib refuses. The guard went into the cave and
+**boot 521 measured `MSAA colour textures (312): 9 of 9 allocated`** with
+`cave 1` read out of the process's own memory, not from the kext (rule 20),
+in the same run as 3mip-c's 0/160 BAD. Confirmed by the user since: WebGL
+games and volumetric shaders render, ~100 fps. `tools/msaa/`,
+`build/out/mipprobe`. This card called it broken until 2026-11-11, five
+milestones after the fix - the card is the suspect, the journal is
+authoritative.
 
 **Open:** the rest of the external-display chain — `docs/EXTERNAL-DISPLAY.md`
 for the state, `docs/HANDOFF-NEXT.md` for the next step. **THE BLOCKER IS
