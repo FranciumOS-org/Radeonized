@@ -9,7 +9,7 @@
 
 <p align="center">
   <img alt="macOS Sequoia and Tahoe" src="https://img.shields.io/badge/macOS-Sequoia%20%7C%20Tahoe-0B0D12?logo=apple&logoColor=white">
-  <img alt="Rembrandt 1002:1681" src="https://img.shields.io/badge/GPU-Radeon%20680M%20(1002%3A1681)-E0242B?logo=amd&logoColor=white">
+  <img alt="Rembrandt 1002:1681" src="https://img.shields.io/badge/GPU-Radeon%20680M/660M%20(1002%3A1681)-E0242B?logo=amd&logoColor=white">
   <img alt="OpenCore" src="https://img.shields.io/badge/boot-OpenCore-7C5CFF">
   <img alt="License MIT" src="https://img.shields.io/badge/license-MIT-blue">
 </p>
