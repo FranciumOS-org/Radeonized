@@ -69462,3 +69462,61 @@ evidence than it feels — at a ~50 % rate it happens about an eighth of the
 time — and boot 568 also changed the framebuffer, so it is not even a clean
 sample of the same configuration (rule 44). Still nothing contradicting the
 revert, still nothing supporting it.
+
+## 3rgr-i (2026-11-14) — eight good boots, and the revert is NOT the explanation
+
+Boots 566 through 573, eight consecutive armed boots, all accelerated, no
+stalls. Against 3rgr-b's baseline of four good and four stalled that is a real
+change and not a feeling: under a 50 % stall rate eight in a row has
+probability 1/256, and boots 568-573 alone are six on one unchanged
+configuration at 1/64. Something is different.
+
+**But the kick revert cannot be the cause, and this entry exists to say so
+before the tally gets attributed to it.** `git log` puts 3rgr-d (`a0112e3`,
+the kick) *after* 3rgr-b's tally was recorded. The configuration that stalled
+four times out of eight never had the kick in it. Removing something the
+stalling configuration did not contain cannot explain the stalls stopping.
+3rgr-e's revert stands on its own grounds — it fires from Lilu's patcher
+context, it restarts matching at a point nothing else does, and it was worth
+at most 25 ms — but crediting it with this would be inventing a mechanism out
+of an ordering of events, which is rule 17 exactly.
+
+3rgr-c's breadcrumb is eliminated too, and for a stronger reason: boot 566
+published `hwlibs_gate_mark_why 1`, so it never wrote at all. An instrument
+that did nothing cannot have fixed anything.
+
+**What actually changed between the two eras, honestly enumerated.** Of the
+code: 3rgr's sentinel attach grace, 3rgr-e's revert, 3rgr-f's default-on mode
+ladder (first live at boot 566), 3rgr-g's decoupled breadcrumb, and 3fb's
+derived geometry (first live at 568). Of the machine: **the Wi-Fi
+configuration**. The user disabled auto-connect for their home network so the
+machine would associate with a phone hotspot for SSH, and it has been on that
+hotspot ever since — `en1` holds 172.20.10.4 through AirPort_RTW89, home
+Wi-Fi unused, and that change was made for a reason unrelated to the stall
+and at almost exactly the moment the stalls stopped.
+
+That is the leading candidate, and it is the project's own evidence pointing
+at it rather than a new guess. 3rgr-b's only quantitative measurement taken
+*during* a stall was AirPort_RTW89's own AWDL timing report — "1000 windows
+of 16384 us, mean 951 us late, worst 144929 us ... 8 window(s) missed" — and
+the correlation the user spotted unaided was that on every good boot the
+hotspot associated at the instant the GPU accelerated, and on the stalled one
+it never associated. Wi-Fi has been inside this failure from the first
+reading; what nobody did was treat the Wi-Fi *configuration* as a variable.
+A 144 ms late window in a driver that holds AWDL timing is a far better
+candidate for a system-wide stall than anything in a gate that publishes one
+property.
+
+**The test is one the user can run and it is nearly free.** Re-enable
+auto-connect for the home network, boot several times on it, and count. If
+stalls return with our code unchanged, the fault is in the Wi-Fi path and
+every milestone from 3rgr to 3rgr-g has been instrumenting the wrong
+subsystem. If eight more boots on the home network stay clean, the network is
+eliminated and the code changes become the candidates again, in which order
+being a separate question. Either answer is worth more than the next
+unexplained stall, and unlike every previous step this one costs no build and
+no install.
+
+Stated plainly so the record is not warmer than the evidence: the stall is
+**not fixed**, it is **not reproducing**, and nothing in this project has been
+shown to have caused either state.
