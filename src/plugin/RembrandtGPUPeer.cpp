@@ -2212,12 +2212,35 @@ static uint32_t g_rbHwlibsGateMarked = 0; /* ms at the last 601 mark */
 static IORegistryEntry *rbgpu_options(void);   /* defined below */
 
 static void rbgpu_hwlibs_gate_mark(uint32_t stage, const char *what) {
-    static int nogate = -1;
-    if (nogate < 0) {
-        nogate = rbgpu_arg("-rbgpunogates") ? 1 : 0;
+    /* 3rgr-g: DECOUPLED from -rbgpunogates, and boot 566 is why.
+     *
+     * 3rgr-c wired this to the same dial "like every other gate" without
+     * checking which way that dial's default points. `-rbgpunogates` is in
+     * rb_defaults.h's DEFAULT-ON table (line 46), so the trail has been off by
+     * default since 2fo and the enabling token is the derived `-rbgpugates`.
+     * Boot 566 published `hwlibs_gate_mark_why 1` and said so directly, which
+     * also retires 3rgr-e's diagnosis: the silent fromPath early return was
+     * inference, the dial was the whole of it, and the instrument added to
+     * stop me inferring is what caught the inference.
+     *
+     * The coupling was wrong on its own terms. 2fo's dial exists to silence
+     * ~24 synchronous flash writes inside IOService::start, a volume that was
+     * suspected of causing wedges across ~17 boots. This is at most seven
+     * writes from a thread_call, and it is the only record of the gate that
+     * can outlive a boot that dies - rbgpu_log reaches no log store at all
+     * (checked on boot 566: our only lines in `log show` are softwareupdated
+     * sandbox noise reading our keys), so there is no cheaper route.
+     *
+     * So it gets its own dial, `-rbgpunohwgate`, derived-negative style and
+     * default-on, checked both directions against every -rbgpu token in the
+     * tree for rule 30. Turning the big trail off no longer takes this with
+     * it, and turning this off no longer requires arming the big trail. */
+    static int nomark = -1;
+    if (nomark < 0) {
+        nomark = checkKernelArgument("-rbgpunohwgate") ? 1 : 0;
     }
-    if (nogate) {
-        rbgpu_diag_set_num("hwlibs_gate_mark_why", 1);   /* -rbgpunogates */
+    if (nomark) {
+        rbgpu_diag_set_num("hwlibs_gate_mark_why", 1);   /* -rbgpunohwgate */
         return;
     }
 

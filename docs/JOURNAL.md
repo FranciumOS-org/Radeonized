@@ -69206,3 +69206,70 @@ second-mode advertisement is exactly the kind of new variable rule 16 says to
 keep out of a measurement. It is committed separately from 3rgr-e for that
 reason, so the two can be installed in either order or apart; the choice of
 whether to take a clean stall count first is the user's.
+
+## 3rgr-g (2026-11-14) — boot 566: the mode ladder works end to end, and 3rgr-e's diagnosis is retired by my own instrument
+
+Boot 566 with plugin 6D297D12 and framebuffer 0DC74962, both UUIDs confirmed
+loaded against what was built (rule 15).
+
+**3rgr-f works, and it is measured rather than observed.** `RBFBModeCount 8`
+and `RBFBModeListN 8` — eight modes, not the two expected, because the ladder
+is derived: `RBFBModelSrc "derived"`, `RBFBModeClkHz 342080714`,
+`RBFBModeBaseMhz 143872`, `RBFBModeRefuse 0`, `RBFBModeArmed Yes`. The
+deliverable here is something a human observes (a picker in System Settings),
+which rule 45 says needs its own instrument, and it has one:
+`RBFBModeSwitches 1`, `RBFBModeApplies 3`, `RBFBModeLastAsked 105` equal to
+`RBFBModeCur 105`, `RBFBModeCurLines 2707` and `RBFBModeCurMhz 60004`. So 60
+Hz was asked for, honoured, and the raster is running at 60.004 Hz against
+the 59.989 that rb_drr.h predicts for 2707 lines. `RBFBDrrRefuse 10` stays
+`DRR_REFUSE_NOT_ARMED`, as 3rgr-f said it would, and nothing is fighting.
+
+**3rgr-e's diagnosis is withdrawn, and the thing that withdrew it is the
+instrument 3rgr-e added.** `hwlibs_gate_mark_why` read **1**, which is
+`-rbgpunogates`. That token is in rb_defaults.h's **default-on** table (line
+46), so the `rbgpu-gate` trail has been off by default since 2fo and the
+enabling token is the derived `-rbgpugates` (`defaults_test.c:141-142` pins
+it). 3rgr-c had wired the new marks to that dial "like every other gate"
+without checking which way its default points, and 3rgr-e then explained the
+silence with a silent `fromPath` early return — a mechanism that was pure
+inference, published as if it were the finding. The dial was the whole of it.
+This is the recurring error in its "read the evidence already in hand" form
+for the second time in this family, and the only reason it got caught in one
+boot instead of five is that 3rgr-e published the reason beside the refusal
+rather than returning silently (rule 14). The correction is cheap; the
+inference was not necessary.
+
+**The coupling was wrong on its own terms, so it is gone.** 2fo's dial exists
+to silence ~24 synchronous flash writes inside `IOService::start`, a volume
+that was suspected of causing wedges across ~17 boots. The gate marks are at
+most seven writes from a `thread_call`. Tying the two together meant the only
+record of the gate that can outlive a boot that dies was off for everybody,
+while the thing the dial was built to suppress was untouched. The marks now
+take their own `-rbgpunohwgate`, default-on, checked both directions against
+all 117 `-rbgpu` tokens in the tree for rule 30. Turning the big trail off no
+longer takes this with it, and turning this off no longer requires arming the
+big trail.
+
+**And the cheap route for reading a stall is not NVRAM at all.** `rbgpu_log`
+reaches no log store: boot 566's only lines in `log show --last boot` matching
+our keys are `softwareupdated` sandbox violations reading them, 126 of them
+and not one of ours, which is rule 31's point measured directly rather than
+cited. But 3rgr-b established the kernel stays alive through a stall, so SSH
+works and `tools/stallcapture.sh` (cfde269) can read the live stalled machine
+— no flash writes, no rebuild, no new suspect, which is the opposite of
+arming `-rbgpugates` mid-diagnosis.
+
+What that tool lacked was findability: it emits ~3900 lines and the numbers
+that locate a stall were buried in them. It now opens with a VERDICT block
+carrying boot, latch, the eleven gate and sentinel keys, the framebuffer's arm
+and mode keys, and four lines on how to read them — `hwlibs_gate_ok 1` with
+`ms` set meaning the gate closed and a stall after it is not the gate, which
+is the question 3rgr-c was built to ask and could not. The peer being absent
+from the registry prints as a statement that the numbers are unavailable
+rather than as a blank, because a missing key read as zero is rule 14's
+standing complaint.
+
+Plugin rebuilt, UUID 638F142D-201A-367B-A568-53861BEB6F77, superseding
+6D297D12 which is the one running now; hosttest clean with zero `error:`
+lines. The framebuffer is unchanged from 0DC74962 and does not need
+reinstalling. Nothing here addresses the stall itself and nothing claims to.

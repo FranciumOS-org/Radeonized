@@ -26,6 +26,38 @@ say "WHEN"
 say "OUR KEXTS"
 kextstat 2>/dev/null | grep -iE "rembrandt|lilu|nullmoth" >> "$out" || echo "  NONE LOADED" >> "$out"
 
+# 3rgr-g: the four questions a stalled boot has to answer, at the TOP.
+# The full dumps below run to ~3900 lines and the numbers that decide where a
+# stall got to were buried in them. Read over SSH on a machine that is stalled
+# but alive, which 3rgr-b established is the actual failure mode.
+say "VERDICT (read this first)"
+{
+    printf '  %-26s %s\n' "boot" "$(nvram rbgpu-boot 2>/dev/null | awk '{print $2}')"
+    printf '  %-26s %s\n' "safe latch" "$(nvram rbgpu-safe 2>/dev/null | awk '{print $2}')"
+    if ioreg -rl -c RembrandtGPUPeer 2>/dev/null | grep -q RBGPUDiag; then
+        ioreg -rl -c RembrandtGPUPeer 2>/dev/null | tr ',' '\n' \
+          | grep -E '"(armed|arm_why|hwlibs_patched|hwlibs_gate_ms|hwlibs_gate_ok|hwlibs_gate_alloc|hwlibs_gate_kick|hwlibs_gate_kick_armed|hwlibs_gate_marks|hwlibs_gate_mark_why|sentinel_cleared|sentinel_cleared_by|sentinel_attach_sched)"' \
+          | sed 's/^ */  /'
+    else
+        # Rule 14: the peer being absent is a reading, not a blank.
+        echo "  PEER ABSENT FROM THE REGISTRY - it never published, so every"
+        echo "  gate number below is unavailable rather than zero."
+    fi
+    ioreg -rl -c RBAMDFramebuffer 2>/dev/null | tr ',' '\n' \
+      | grep -E '"(RBFBArmWhy|RBFBModeCount|RBFBModeRefuse|RBFBModeArmed|RBFBModeCurMhz|RBFBCrumbBoot)"' \
+      | sed 's/^ */  /' \
+      || echo "  RBAMDFramebuffer ABSENT FROM THE REGISTRY"
+    echo "  -- how to read it --"
+    echo "  hwlibs_gate_ok 1 + ms set   the gate closed; a stall after this is"
+    echo "                              NOT the gate (3rgr-c's question)"
+    echo "  hwlibs_gate_alloc 1, no ok  the gate armed and never closed"
+    echo "  hwlibs_gate_mark_why 1      -rbgpunogates is default-on, so the"
+    echo "                              rbgpu-gate trail is OFF - expected"
+    echo "  arm_why 6                   the sentinel latch; the PREVIOUS boot"
+    echo "                              did not survive, this one came up stock"
+} >> "$out"
+echo >> "$out"
+
 say "PEER DIAG (RembrandtGPUPeer)"
 if ioreg -rl -c RembrandtGPUPeer 2>/dev/null | grep -q RBGPUDiag; then
     ioreg -rl -c RembrandtGPUPeer 2>/dev/null | tr ',' '\n' >> "$out"
