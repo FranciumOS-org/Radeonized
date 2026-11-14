@@ -69032,3 +69032,99 @@ never installed. Verified: no dangling externs (3fxf), zero `IOGraphicsFamily`
 in the plugin's `Info.plist`, zero libraries from `SystemKernelExtensions.kc`
 (2oz), no baked VBIOS in the release bundle, hosttest clean with no `error:`
 lines (rule 48's `-Werror` trap).
+
+## 3rgr-e (2026-11-14) — 3rgr-c's instrument never wrote, 3rgr-d's kick is withdrawn to opt-in, and the refresh rate was a missing boot-arg
+
+Three reports arrived together: the stall rate is now roughly three in five
+boots where 3rgr-b's count stood at four good and four stalled, the refresh
+rate has disappeared from System Settings, and a new GitHub issue is open.
+The last could not be read — `gh` returned `dial tcp 140.82.113.6:443:
+connect: network is unreachable`, the machine being on a phone hotspot — and
+is deferred rather than guessed at.
+
+**3rgr-c's breadcrumb is inert, and the way it failed is the one it was built
+to prevent.** Boot 565 published `hwlibs_gate_ok 1`, `hwlibs_gate_ms 5700`
+and `hwlibs_gate_kick 1`, so `rbgpu_hwlibs_gate_publish` ran to completion,
+and `hwlibs_gate_alloc 1` shows the arm path reached the statement
+immediately before mark 600. Yet `rbgpu-gate` still held the old 2fg-era
+trail, `46 49 47 40 101 151 45 50 54 55 60 102 152 32 | 32 mapQueues ...
+[w=14 f=0 t=369 wx=356]`. The distinction that settles it is reading the
+value out of the **live registry** rather than out of flash: `ioreg -p
+IODeviceTree -n options -rl` shows the same stale string, so `setProperty`
+never ran at all and this is not a flush that failed. The only thing between
+the mark and the write is `rbgpu_gate_nvram`'s first guard, which returns
+**silently** when `IORegistryEntry::fromPath("/options", gIODTPlane)` yields
+nothing. That is rule 14 sitting in code 3rgr-c built on without reading to
+the end of, and the failure it produces — a mark never attempted being
+indistinguishable from a mark whose write was refused — is precisely the
+confusion 3rgr-c was written to remove. Four stalls were spent unable to read
+the gate, and 3rgr-c would have made a fifth no better.
+
+Fixed by resolving /options through `rbgpu_options()`, which caches for the
+boot and which the peer's own `start()` path already uses successfully, so if
+the cause was an unpopulated cache at gate time it is gone; and by publishing
+the outcome either way in the diag table, which is known to work this boot.
+`hwlibs_gate_mark_why` reads 0 wrote, 1 `-rbgpunogates`, 2 no /options, and
+`hwlibs_gate_marks` counts attempts. What this does not claim: nothing here
+has shown that `setProperty` on this key succeeds, so `hwlibs_gate_marks`
+moving while the trail stays stale is still a possible outcome, and it is a
+different fix.
+
+**3rgr-d's kick is withdrawn to opt-in, default off.** It shipped on by
+default two days ago, the stall rate worsened, and it is the newest variable
+in the boot path. The mechanism is concrete rather than merely temporal:
+`processHWLibs` runs inside Lilu's patcher context during kext load, and from
+there the kick cancels and re-enters a `thread_call` whose handler publishes
+`LoadAccelerator` and calls `registerService()`, restarting IOKit matching at
+a point in the load where nothing has ever restarted it. It is also worth
+nothing measurable — boot 565 read `hwlibs_gate_ms 5700` **with** the kick
+armed, because the edge arrives when `processHWLibs` runs and the 25 ms poll
+was already observing it inside one interval. So 3rgr-d traded at most 25 ms
+against a change in boot-time ordering, which is a bad trade at any stall
+rate, and 3rgr-d's own entry overstated the value of the change while
+understating the risk of the context it fires from.
+
+This is **not** a claim that the kick caused the regression. n is small, the
+machine was already intermittent, and 3rgr-b's own 4 good / 4 stalled shows
+how wide the variance is; three in five is not separable from four in eight
+by anything but more boots. It is the removal of a new suspect while removing
+it is still cheap, which is rule 16 — when a measurement and a suspect are
+both new, remove the suspect rather than reasoning about it. Default off
+restores byte for byte the path 3rgr-b measured, so the stall rate becomes
+comparable against that baseline instead of against a configuration that
+existed for two days. `-rbgpugatekick` arms it again; the token was checked
+in both directions against all 114 `-rbgpu` tokens in the tree for rule 30,
+which opt-in tokens need manually because the hosttest's assertion covers
+only derived negatives. `hwlibs_gate_kick_armed` publishes the decision so
+the next boot states it rather than leaving it inferred.
+
+3rgr-d also gave a default-on feature no disarm, which rule 37 forbids: a
+feature must stay disarmable from the machine it runs on, and the only way
+out of the kick was a rebuild. Opt-in makes that moot, but the omission is
+the recorded error.
+
+**The refresh rate is a missing boot-arg, not a regression.** `RBFBModeCount
+1`, `RBFBDrrArmed No`, `RBFBDrrRefuse 10` = `DRR_REFUSE_NOT_ARMED`, and
+`RBAMDFramebufferDRR.cpp:246` requires `-rbgpufbdrr`, which line 25 of that
+file states is "opt-in only, never in rb_defaults.h". `nvram boot-args` holds
+no `-rbgpu` token of any kind, so DRR cannot arm, the framebuffer offers one
+mode, and macOS hides the picker. `sudo tools/efi.sh bootarg add
+-rbgpufbdrr` restores it, with no rebuild; it is mutually exclusive with
+`-rbgpufbmodes`, which is absent, so there is nothing to fight. How the token
+left boot-args is not established — `efi.sh defaults` prunes our redundant
+args and is the obvious suspect, but it was not observed doing it and no
+claim is made.
+
+Also corrected, because it cost a detour: `RBFBArmWhy 10` reads as a refusal
+and is not one. `RBAMDFramebuffer.cpp:289` sets 10 for "the peer ran first
+and said armed" and then returns `!peerStock` = true, taking the panel. The
+variable is named `armRefuseWhy` and carries armed outcomes in it.
+
+Built both variants so they cannot drift: `build/out` (which `tools/efi.sh:39`
+is what actually installs, defaulting to `$root/build/out`, not the
+`build-release` path 3rgr-d's handover named) UUID
+DF5F5E47-B283-3CB0-9325-2C40C8467A11, and `build-release/out` UUID
+ABD89AD4-68C8-3FFE-8A00-77B1BFAAA5B7. Verified on the installed-path build:
+no dangling externs (3fxf), zero `IOGraphicsFamily`, zero libraries from
+`SystemKernelExtensions.kc` (2oz), all four new tokens and diag keys present
+in the binary, hosttest clean with no `error:` lines (rule 48).

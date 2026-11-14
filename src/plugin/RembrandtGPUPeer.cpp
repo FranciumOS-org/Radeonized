@@ -2209,14 +2209,52 @@ static int           g_rbHwlibsGateDone  = 0;
 
 static uint32_t g_rbHwlibsGateMarked = 0; /* ms at the last 601 mark */
 
+static IORegistryEntry *rbgpu_options(void);   /* defined below */
+
 static void rbgpu_hwlibs_gate_mark(uint32_t stage, const char *what) {
     static int nogate = -1;
     if (nogate < 0) {
         nogate = rbgpu_arg("-rbgpunogates") ? 1 : 0;
     }
     if (nogate) {
+        rbgpu_diag_set_num("hwlibs_gate_mark_why", 1);   /* -rbgpunogates */
         return;
     }
+
+    /* 3rgr-e (2026-11-14): boot 565 read `hwlibs_gate_ok 1`, `ms 5700` and
+     * `kick 1` - so publish ran - while `rbgpu-gate` still held an old
+     * 2fg-era trail, in the LIVE REGISTRY and not merely in flash. So
+     * setProperty never ran, and the only thing between this function and it
+     * is rbgpu_gate_nvram's first guard, which returns silently when
+     * `IORegistryEntry::fromPath("/options", gIODTPlane)` yields nothing.
+     * That silent return is rule 14 in code 3rgr-c built on without reading
+     * to the end of: a mark that was never attempted and a mark whose write
+     * was refused are indistinguishable, which is exactly the confusion
+     * 3rgr-c existed to remove.
+     *
+     * Two things here. First, resolve /options through rbgpu_options(), which
+     * caches for the boot and which the peer's own start() path already uses
+     * successfully - if the cause was an unpopulated cache at gate time, this
+     * removes it. Second, publish the outcome either way, in the diag table,
+     * which IS known to work this boot. The next boot then says which of the
+     * two it was instead of leaving me to infer it again.
+     *
+     *   hwlibs_gate_mark_why  0 wrote, 1 -rbgpunogates, 2 no /options
+     *   hwlibs_gate_marks     how many marks were attempted
+     *
+     * Note what this does NOT claim: the trail still may not reach flash,
+     * because nothing here has shown that setProperty on this key succeeds.
+     * `hwlibs_gate_marks` moving with the trail still stale would say that,
+     * and that is a different fix. */
+    static uint32_t marks = 0;
+    marks++;
+    rbgpu_diag_set_num("hwlibs_gate_marks", marks);
+
+    if (!rbgpu_options()) {
+        rbgpu_diag_set_num("hwlibs_gate_mark_why", 2);
+        return;
+    }
+    rbgpu_diag_set_num("hwlibs_gate_mark_why", 0);
     rbgpu_gate_nvram(stage, what);
 }
 
@@ -2330,6 +2368,44 @@ static void rbgpu_hwlibs_gate_action(thread_call_param_t, thread_call_param_t) {
  * after it has closed rbgpu_hwlibs_gate_publish's own guard discards it, and
  * a double fire publishes once. */
 void rbgpu_hwlibs_gate_kick(void) {
+    /* 3rgr-e: OPT-IN, default OFF, and the reason is a regression report.
+     *
+     * 3rgr-d shipped this on by default. Since it was installed the user
+     * reports roughly three stalls in five boots where 3rgr-b's count stood
+     * at four good and four stalled, and this is the newest variable in the
+     * boot path. The mechanism is concrete rather than merely temporal:
+     * processHWLibs runs inside Lilu's patcher context during kext load, and
+     * from there this cancels and re-enters a thread_call whose handler
+     * publishes LoadAccelerator and calls registerService(), restarting IOKit
+     * matching at a point in the load that nothing has ever restarted it at.
+     *
+     * It is also worth nothing measurable. `hwlibs_gate_ms` still read 5700
+     * on boot 565 WITH the kick, because the edge arrives when processHWLibs
+     * runs and the poll was already observing it within 25 ms. So this trades
+     * at most 25 ms against a change in boot-time ordering, which is a bad
+     * trade at any stall rate.
+     *
+     * Default OFF restores byte-for-byte the path that 3rgr-b measured, so
+     * the stall rate becomes comparable with that baseline again instead of
+     * being measured against a configuration that existed for two days. This
+     * is not a claim that the kick CAUSED the regression - n is small, the
+     * machine was already intermittent, and 3rgr-b's own 4/4 shows how wide
+     * the variance is. It is the removal of a new suspect while it is still
+     * cheap, which is rule 16: when a measurement and a suspect are both new,
+     * remove the suspect rather than reasoning about it.
+     *
+     * `-rbgpugatekick` turns it back on, and the token was checked both
+     * directions against all 114 -rbgpu tokens in the tree for rule 30. The
+     * gate's own 25 ms poll is what closes the gate either way, so OFF is not
+     * a loss of function. */
+    static int kickOn = -1;
+    if (kickOn < 0) {
+        kickOn = rbgpu_arg("-rbgpugatekick") ? 1 : 0;
+        rbgpu_diag_set_num("hwlibs_gate_kick_armed", (uint64_t)kickOn);
+    }
+    if (!kickOn) {
+        return;
+    }
     if (g_rbHwlibsGateDone || !g_rbHwlibsGateCall) {
         return;
     }
