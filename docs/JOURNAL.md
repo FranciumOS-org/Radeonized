@@ -69316,3 +69316,109 @@ Still outstanding and unchanged: the stall's cause, and the new GitHub issue,
 which has now failed to load on three attempts (`gh`: `dial tcp
 140.82.114.6:443: connect: network is unreachable`) and is deferred rather
 than guessed at.
+
+## 3fb (2026-11-14) — issue #4: the framebuffer derives its geometry from the chip
+
+Issue #4 on FranciumOS-org/Radeonized, filed 2026-11-13 by FinalVillain: on a
+Lenovo Legion 7 16ARHA7 (Ryzen 7 6800H, 680M `1002:1681` **revision 0xc8**,
+2560x1600 eDP), an armed v0.1.0 boot never reaches the desktop — WindowServer
+fails to start and `watchdogd` panics with "userspace watchdog timeout" about
+139 s in — while `-rbgpuoff` boots the same EFI to 2560x1600 on the stock
+framebuffer. The report is unusually complete: correct UUIDs for both release
+kexts, `vbios_src=3` / `acpivb_how=5` / `acpivb_len=44544` confirming 3vb-e's
+ACPI VFCT route works on that board, `os_measured=1`, HWLibs patched at
+deviceTypeTable index 66, and the crashed boot's own `rbgpu-diag-prev` showing
+`ax0_w=0x780 ax0_h=0x438` — our panel's size on their machine.
+
+The reporter located the cause exactly. `RBAMDFramebuffer.cpp` carried
+`kWidth = 1920`, `kHeight = 1080`, `kBytesPerRow = 7680`,
+`kApertureBytes = 8294400` as constants, the last of them read live out of
+`IOFBMemorySize` **on this board** and then frozen. That is rule 41 in its
+plainest form, and it had been true of every build this project ever shipped.
+
+**The numbers are all derivable, from registers this tree already models.**
+`src/common/rb_fbmode.h`, pure logic, read-only, no setter:
+
+    OTG0_H_BLANK_START_END  0x1b2b   rb_otg.h:23   0x007f07ff -> 2047-127 = 1920
+    OTG0_V_BLANK_START_END  0x1b36   rb_otg.h:26   0x0014044c -> 1100- 20 = 1080
+    HUBP0_SURFACE_PITCH              rb_hubp.h:338 1919 + 1          = 1920 px
+
+The active-size derivation is not invented here: `rb_strenc.h:516` already
+states `h_active = BLANK_START - BLANK_END`, inverted out of
+`optc1_program_timing` in 304 and validated in boot 473 against CEA-861
+1080p60 exactly. The stride is READ rather than computed as `width * 4`
+precisely because `width * 4` happens to be right here — the old constants'
+own comment says the rows are unpadded, checked against `IOFBMemorySize` — and
+a stride wrong by a padding allowance renders a sheared image rather than
+failing, which is the worst failure mode available.
+
+**There is no fallback to the constants, deliberately.** Falling back would
+put 1920x1080 on a 2560x1600 panel, which *is* the reported failure. A
+framebuffer that cannot learn its own geometry declines the panel instead:
+`armRefuseWhy = 11`, publishing `RBFBGeoWhy` before returning false, which
+leaves the firmware's framebuffer in place — the state `-rbgpuoff` produces
+and which the reporter confirmed boots to 2560x1600. The safe direction is the
+one that gives a working desktop.
+
+**One coupling was deliberately not created.** rb_fbmode.h refuses a pitch
+below the active width, which a failed `hubpSetup()` would present as pitch 0,
+so wiring it straight through would have made taking the panel newly
+dependent on `hubpSetup()` succeeding — a dependency `start():828` explicitly
+does not have ("independent of hubpSetup's result by design"). So when the
+HUBP pitch is unusable the caller assumes stride = active width, and
+`RBFBGeoRowSrc` says which happened (1 HUBP, 2 assumed). Width and height are
+the defect in #4 and come from the OTG either way; the stride only matters on
+a panel whose rows are padded, and it is now published rather than silent.
+
+**The control is this board, and it is the whole point of the test.**
+`fbmode_test.c` feeds this board's live register words to the derivation and
+asserts it rebuilds **all four** frozen constants bit for bit — 1920, 1080,
+7680, 8294400 — so if the derivation ever stops reproducing what was measured
+here, the build fails. The 2560x1600 cases are CONSTRUCTED from ordinary
+timings for that size, because #4 gives the panel size but not the register
+words, and they are labelled as such; what they establish is that the
+arithmetic is not accidentally pinned to 1920x1080 and that a padded pitch is
+carried through rather than collapsed.
+
+**Two defects in my own work, both caught before install.**
+
+First, rule 48's sweep found a guard that FIRED NOTHING. The "a refused
+derivation writes nothing into `*out`" check originally refused only via a
+zeroed H blank word, which returns at the *first* guard, so a write inserted
+after that guard left the test green. A check that covers only the earliest
+exit is not coverage of "no exit writes". It now drives all six refusals,
+early and late, and the same break then fires two FAILs.
+
+Second, and worse, I asserted in a comment that `OTG_*_TOTAL` holds
+total-minus-one, compensated with a `+1`, and wrote the hosttest's anchor as
+2105/1128 so that the control passed for the wrong reason. Reading the live
+keys off the running machine before installing settled it: `RBFBOtgHTotal`
+publishes **2106** and `RBFBOtgVTotal` **1129** from raw reads
+(`RBAMDFramebufferVBL.cpp:697`), and `rb_drr.h` and `drr_test.c` both use
+2106/1129 directly to reproduce the refresh measured on an `OTG0_FRAME_COUNT`
+edge. The registers hold the real totals. The check is now `w >= h_total` and
+the test is anchored to the live values, with a case at `h_total = 1921`
+proving the bound is exactly one pixel wide in both directions.
+
+**Why installing this on this board is safe to assert.** `rb_otg.h:14-32`
+records boots 2oq/2os reading all four words on this panel, two of which are
+confirmed live today (`H_TOTAL` 2106, `V_BLANK_START_END` 1311820), and both
+axes close exactly: h front 59 + sync 60 + back 67 = 186 = 2106-1920, and v
+29 + 5 + 15 = 49 = 1129-1080. That closure is an independent check on the
+field order *and* on the totals' semantics, i.e. on the correction above. So
+the derivation yields byte-identical numbers to the constants it replaces
+here, and the change is only observable on a board whose panel differs.
+
+Nine new published keys (`RBFBGeoW/H/Row/Aper/PitchPx/Padded/RowSrc/Why/Ok`),
+`geoWhy` published on success too so "derived cleanly" and "never attempted"
+are different readings (rule 14). No log line: this file has no logging macro
+and rule 31 says `IOLog` is not the instrument.
+
+Also: the `-Werror` trap, **ninth** appearance. Keeping the four constants as
+`const` for the record tripped `-Wunused-const-variable`; the numbers moved
+into the comment, where the hosttest that pins them is the real record.
+
+Framebuffer UUID F6EE3DB6-DA99-3F0E-9F71-A5D61B312C1A, plugin 638F142D
+unchanged by this work, release plugin B866C61E. Hosttest clean, zero
+`error:` lines. Not yet tested on any 2560x1600 panel — the reporter offered
+to test builds, which is the only way that half gets measured.

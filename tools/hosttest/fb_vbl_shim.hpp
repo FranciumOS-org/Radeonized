@@ -470,6 +470,15 @@ public:
     uint64_t hubpTripleWrites=0, hubpTripleRefused=0;
     bool hubpTripleApply(bool enable);
     uint32_t hubpPitch=0;
+    /* 3fb (issue #4): the shim mirrors the real class's geometry members so
+     * the VBL publish compiles here too. The VALUES are not exercised by this
+     * test - the derivation itself is covered by fbmode_test.c against this
+     * board's live registers - so they are zeros and that is deliberate: a
+     * shim that invented plausible geometry would be a second source of truth
+     * for numbers the hosttest is supposed to derive. */
+    uint32_t geoW=0, geoH=0, geoRow=0, geoAper=0;
+    uint32_t geoPitchPx=0, geoPadded=0, geoWhy=0, geoRowSrc=0;
+    bool     geoOk=false;
     uint32_t hubpConfig=0;
     uint64_t hubpOrig=0;
     uint64_t hubpWrites=0;

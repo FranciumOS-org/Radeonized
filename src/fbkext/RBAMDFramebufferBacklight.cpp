@@ -62,6 +62,10 @@
  */
 
 #include "RBAMDFramebuffer.hpp"
+
+extern "C" {
+#include "rb_fbmode.h"
+}
 #include "rb_backlight.h"
 #include "rb_dcn_deny.h"
 #include "rb_regs.h"
@@ -126,6 +130,8 @@ static const uint32_t kRbDmuSeg2Bl = 0x34c0;
 #define RB_OTG0_DW_V_TOTAL_MID    0x1b32u
 #define RB_OTG0_DW_V_TOTAL_CNTL   0x1b33u
 #define RB_OTG0_DW_V_BLANK_SE     0x1b36u
+/* 3fb: rb_regs.h:122, base_idx 2, the H axis of the pair already read below. */
+#define RB_OTG0_DW_H_BLANK_SE     0x1b2bu
 #define RB_OTG0_DW_FRAME_COUNT    0x1b4cu
 
 /* Bounded wait for BL_PWM_GRP1_REG_UPDATE_PENDING to clear. Linux waits
@@ -159,6 +165,8 @@ bool RBAMDFramebuffer::blSetup(void)
 {
     blRefuse = 0;
     blReady = false;
+    geoOk = false; geoWhy = 0; geoRowSrc = 0;
+    otgHBlankSE = 0;
     blMap = nullptr;
     blRegs = nullptr;
     blSets = 0;
@@ -228,7 +236,65 @@ bool RBAMDFramebuffer::blSetup(void)
     otgVTotalMid   = regs[kRbDmuSeg2Bl + RB_OTG0_DW_V_TOTAL_MID];
     otgVTotalCntl  = regs[kRbDmuSeg2Bl + RB_OTG0_DW_V_TOTAL_CNTL];
     otgVBlankSE    = regs[kRbDmuSeg2Bl + RB_OTG0_DW_V_BLANK_SE];
+    otgHBlankSE    = regs[kRbDmuSeg2Bl + RB_OTG0_DW_H_BLANK_SE];
     otgFrameCount0 = regs[kRbDmuSeg2Bl + RB_OTG0_DW_FRAME_COUNT];
+
+    /* 3fb (issue #4): derive the framebuffer geometry here, for the same
+     * reason 2y4 sampled the raster here - before any gate below refuses,
+     * because a backlight refusal says nothing about the raster, and because
+     * start() needs this before it builds the aperture at line ~905 and
+     * before IOFramebuffer::start(). hubpSetup() has already run (one call
+     * earlier in start()), so hubpPitch is in hand if it read.
+     *
+     * THE STRIDE FALLS BACK, THE SIZE DOES NOT. rb_fbmode.h is strict and
+     * refuses a pitch below the active width, which a failed hubpSetup would
+     * produce as pitch 0. Letting that decline the panel would make taking
+     * the panel newly dependent on hubpSetup succeeding - a coupling this
+     * file deliberately does not have ("independent of hubpSetup's result by
+     * design", start():828). So when the HUBP pitch is unusable the stride is
+     * assumed to be the active width, which is what this board measures
+     * anyway (1920 px, rows unpadded, checked against IOFBMemorySize), and
+     * geoRowSrc says which happened. Width and height are the defect in #4
+     * and they come from the OTG either way; the stride is a refinement that
+     * only matters on a panel whose rows are padded. */
+    {
+        struct rb_fbmode_in fin;
+        struct rb_fbmode_out fout;
+        uint32_t wActive = rb_fbmode_active(otgHBlankSE, NULL, NULL);
+
+        memset(&fin, 0, sizeof(fin));
+        fin.h_total           = otgHTotal;
+        fin.v_total           = otgVTotal;
+        fin.h_blank_start_end = otgHBlankSE;
+        fin.v_blank_start_end = otgVBlankSE;
+        if (hubpPitch != 0u && ((hubpPitch & 0xffffu) + 1u) >= wActive) {
+            fin.surface_pitch = hubpPitch;
+            geoRowSrc         = 1;
+        } else {
+            fin.surface_pitch = (wActive > 0u) ? (wActive - 1u) : 0u;
+            geoRowSrc         = 2;
+        }
+
+        memset(&fout, 0, sizeof(fout));
+        geoWhy = rb_fbmode_derive(&fin, &fout);
+        geoOk  = (geoWhy == RB_FBMODE_OK);
+        if (geoOk) {
+            geoW       = fout.width;
+            geoH       = fout.height;
+            geoRow     = fout.bytes_per_row;
+            geoAper    = fout.aperture_bytes;
+            geoPitchPx = fout.pitch_px;
+            geoPadded  = fout.padded;
+            /* No log line here: this file has no logging macro, and rule 31
+             * says IOLog is not an instrument - what makes this readable is
+             * RBFBGeoW/H/Row/Aper/PitchPx/Padded/RowSrc/Why/Ok, published
+             * from the VBL path, plus the raw otgHBlankSE/otgVBlankSE and
+             * hubpPitch that were already published beside them. A refused
+             * derivation is readable the same way, and start() publishes
+             * RBFBGeoWhy itself before declining so the code survives even a
+             * boot where the periodic publish never runs. */
+        }
+    }
 
     if ((blOtgCtl & RB_BL_OTG_MASTER_EN) == 0u) {
         blRefuse = 5;

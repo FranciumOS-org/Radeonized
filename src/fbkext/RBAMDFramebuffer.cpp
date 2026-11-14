@@ -40,10 +40,21 @@ namespace {
  * (kModeIDFast = 100, kModeID60 = 101) because RBAMDFramebufferModes.cpp
  * needs them and this namespace is anonymous - the same trap 2y5 hit with
  * argOn. Nothing here redefines them. */
-const UInt32 kWidth                 = 1920;
-const UInt32 kHeight                = 1080;
-const UInt32 kBytesPerRow           = 7680;
-const UInt32 kApertureBytes         = 8294400;      /* IOFBMemorySize, live */
+/* 3fb (issue #4): kWidth / kHeight / kBytesPerRow / kApertureBytes are GONE.
+ * They were 1920, 1080, 7680 and 8294400 - this board's panel, the last read
+ * live out of IOFBMemorySize - and they were the SOURCE of the mode on every
+ * machine that ran this kext, which is the whole of the reported defect.
+ * Every consumer now reads geoW/geoH/geoRow/geoAper, derived from the chip in
+ * blSetup() by rb_fbmode.h.
+ *
+ * The four numbers are not lost and are not left here as dead code: they are
+ * the hosttest's CONTROL. fbmode_test.c feeds this board's live register
+ * words to the derivation and asserts it rebuilds exactly 1920, 1080, 7680
+ * and 8294400, so if the derivation ever stops reproducing what was measured
+ * here the build fails. Keeping them as `const` as well cost the -Werror trap
+ * its ninth appearance in this project (-Wunused-const-variable), which is
+ * rule 6's point: "redundant" and "inert" differ, and a measurement's home is
+ * the test that pins it, not an unreferenced definition. */
 
 /* 2w9: the VRAM byte offset published as `ATY,fb_offset`. Non-zero because the
  * accelerator's gate rejects 0 (see the long note in start()). 16 MB is the
@@ -108,7 +119,8 @@ uint32_t armRefuseWhy = 0;   /* 0 armed, 2 -rbgpuoff/-rbgpustock, 3 rbgpu-fb=0,
                               * 5 -rbgpunoownfb, 6 the sentinel latch,
                               * 7 rbgpu-arm=0 (rule 38), 9 the peer ran first
                               * and said stock, 10 the peer ran first and said
-                              * armed */
+                              * armed, 11 the 3fb geometry derivation refused
+                              * so there is no mode to publish (issue #4) */
 
 /* 2xz: the framebuffer's half of the OS gate. The plugin asks the identical
  * question in rbgpu_os_measured(), off the identical kernel global, because
@@ -826,6 +838,23 @@ bool RBAMDFramebuffer::start(IOService *provider)
     vblRetunes = 0;
     otgTimingReset(); /* 2y4: before blSetup, which may not run at all */
     blSetup();        /* 2xs: independent of hubpSetup's result by design */
+
+    /* 3fb (issue #4): a framebuffer that could not learn its own geometry must
+     * not take the panel. Falling back to this board's 1920x1080 is exactly
+     * the reported failure - WindowServer never starts on a 2560x1600 panel
+     * and watchdogd panics ~139 s in - whereas declining leaves the firmware's
+     * working framebuffer in place, which is the state `-rbgpuoff` produces
+     * and which that reporter confirmed boots. So this is the safe direction,
+     * and it is a refusal with a published code rather than a silent one. */
+    if (!geoOk) {
+        armRefuseWhy = 11;
+        LOG("3fb: declining the panel - the geometry derivation refused %u, so "
+            "there is no measured mode to publish. The firmware framebuffer "
+            "keeps the display. RBFBGeoWhy carries the code.", geoWhy);
+        setProperty("RBFBGeoWhy", (UInt64)geoWhy, 32);
+        setProperty("RBFBArmWhy", (UInt64)armRefuseWhy, 32);
+        return false;
+    }
     /* 2y0: AFTER blSetup, because it refuses unless blReady, and BEFORE
      * IOFramebuffer::start() below, because that is what can create an
      * IODisplayConnect - and IOKit matching is asynchronous, so a handler
@@ -902,14 +931,14 @@ bool RBAMDFramebuffer::start(IOService *provider)
         LOG("no BAR0 device memory; refusing to start");
         return false;
     }
-    aperture = IODeviceMemory::withSubRange(bar0, 0, kApertureBytes);
+    aperture = IODeviceMemory::withSubRange(bar0, 0, geoAper);
     if (!aperture) {
-        LOG("could not make the %u-byte aperture sub-range of BAR0", kApertureBytes);
+        LOG("could not make the %u-byte aperture sub-range of BAR0", geoAper);
         return false;
     }
     LOG("aperture: BAR0 phys %#llx + 0, %u bytes, %ux%u stride %u",
-        bar0->getPhysicalSegment(0, nullptr, 0), kApertureBytes,
-        kWidth, kHeight, kBytesPerRow);
+        bar0->getPhysicalSegment(0, nullptr, 0), geoAper,
+        geoW, geoH, geoRow);
     crumb(2);   /* aperture sub-range made */
 
     vblCall = thread_call_allocate(vblFired, this);
@@ -1056,7 +1085,7 @@ bool RBAMDFramebuffer::start(IOService *provider)
                 }
             }
             UInt64 offset = (UInt64)mb << 20;
-            UInt64 size   = kApertureBytes;
+            UInt64 size   = geoAper;
 
             setProperty("ATY,fb_offset", &offset, (unsigned int)sizeof(offset));
             setProperty("ATY,fb_size",   &size,   (unsigned int)sizeof(size));
@@ -1346,8 +1375,8 @@ IOReturn RBAMDFramebuffer::getInformationForDisplayMode(IODisplayModeID displayM
         return kIOReturnBadArgument;
     }
     bzero(info, sizeof(*info));
-    info->nominalWidth  = kWidth;
-    info->nominalHeight = kHeight;
+    info->nominalWidth  = geoW;
+    info->nominalHeight = geoH;
     /* The only field that differs between the two: same 1920x1080 active
      * raster, same depth, same everything else, because a longer V_TOTAL is a
      * longer vertical blank and nothing more (2y5). */
@@ -1378,7 +1407,7 @@ IOReturn RBAMDFramebuffer::getPixelInformation(IODisplayModeID displayMode, IOIn
         return kIOReturnBadArgument;
     }
     bzero(info, sizeof(*info));
-    info->bytesPerRow      = kBytesPerRow;
+    info->bytesPerRow      = geoRow;
     info->bitsPerPixel     = 32;
     info->pixelType        = kIORGBDirectPixels;
     info->componentCount   = 3;
@@ -1386,8 +1415,8 @@ IOReturn RBAMDFramebuffer::getPixelInformation(IODisplayModeID displayMode, IOIn
     info->componentMasks[0] = 0x00ff0000;
     info->componentMasks[1] = 0x0000ff00;
     info->componentMasks[2] = 0x000000ff;
-    info->activeWidth      = kWidth;
-    info->activeHeight     = kHeight;
+    info->activeWidth      = geoW;
+    info->activeHeight     = geoH;
     strlcpy(info->pixelFormat, IO32BitDirectPixels, sizeof(info->pixelFormat));
     return kIOReturnSuccess;
 }

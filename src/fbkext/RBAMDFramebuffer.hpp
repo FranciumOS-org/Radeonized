@@ -1117,6 +1117,23 @@ private:
     uint32_t           otgVTotalMid;
     uint32_t           otgVTotalCntl;
     uint32_t           otgVBlankSE;
+    uint32_t           otgHBlankSE;   /* 3fb: OTG0_H_BLANK_START_END 0x1b2b */
+
+    /* 3fb (issue #4): the geometry, DERIVED, never constants. geoWhy is an
+     * rb_fbmode.h code and geoOk is the only thing start() may act on; a
+     * refused derivation declines the panel rather than falling back to this
+     * board's 1920x1080, which is the reported failure. geoRowSrc says where
+     * the stride came from, because an assumed stride and a read one are
+     * different facts (rule 14). */
+    uint32_t           geoW;
+    uint32_t           geoH;
+    uint32_t           geoRow;
+    uint32_t           geoAper;
+    uint32_t           geoPitchPx;
+    uint32_t           geoPadded;
+    uint32_t           geoWhy;
+    uint32_t           geoRowSrc;     /* 1 HUBP pitch, 2 assumed = width */
+    bool               geoOk;
     uint32_t           otgFrameCount0;
     uint64_t           blParmSets;
     /* 2y2: per KEY, not one total. The whole question the boot answers is

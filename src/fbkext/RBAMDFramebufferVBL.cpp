@@ -160,6 +160,19 @@ void RBAMDFramebuffer::publishVBLState(void)
     setProperty("RBFBHubpRefuse", (uint64_t)hubpRefuse, 32);
     setProperty("RBFBHubpOtgCtl", (uint64_t)hubpOtgCtl, 32);
     setProperty("RBFBHubpPitch", (uint64_t)hubpPitch, 32);
+    /* 3fb (issue #4): the derived geometry. geoWhy is published even on
+     * success, so "derived cleanly" and "never attempted" are different
+     * readings, and geoRowSrc separates a stride that was READ from one
+     * assumed to be the active width. */
+    setProperty("RBFBGeoW", (uint64_t)geoW, 32);
+    setProperty("RBFBGeoH", (uint64_t)geoH, 32);
+    setProperty("RBFBGeoRow", (uint64_t)geoRow, 32);
+    setProperty("RBFBGeoAper", (uint64_t)geoAper, 32);
+    setProperty("RBFBGeoPitchPx", (uint64_t)geoPitchPx, 32);
+    setProperty("RBFBGeoPadded", (uint64_t)geoPadded, 32);
+    setProperty("RBFBGeoRowSrc", (uint64_t)geoRowSrc, 32);
+    setProperty("RBFBGeoWhy", (uint64_t)geoWhy, 32);
+    setProperty("RBFBGeoOk", geoOk);
     setProperty("RBFBHubpConfig", (uint64_t)hubpConfig, 32);
     setProperty("RBFBHubpAddrCfg", (uint64_t)hubpAddrCfg, 32);
     setProperty("RBFBHubpFlipCtl", (uint64_t)hubpFlipCtl, 32);

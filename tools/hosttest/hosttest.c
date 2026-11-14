@@ -57,6 +57,7 @@ int defaults_tests(void);
 int dmub_tests(void);          /* 2zn */
 int osver_tests(void);
 int drr_tests(void);
+int fbmode_tests(void);
 
 static int failures;
 #define CHECK(c) do { if (!(c)) { printf("  FAIL %s:%d: %s\n", __FILE__, __LINE__, #c); failures++; } } while (0)
@@ -906,6 +907,7 @@ int main(int argc, char **argv)
     failures += dmub_tests();
     failures += osver_tests();
     failures += drr_tests();
+    failures += fbmode_tests();
     test_fuzz();
 
     if (failures) {
