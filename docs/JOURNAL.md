@@ -69273,3 +69273,46 @@ Plugin rebuilt, UUID 638F142D-201A-367B-A568-53861BEB6F77, superseding
 6D297D12 which is the one running now; hosttest clean with zero `error:`
 lines. The framebuffer is unchanged from 0DC74962 and does not need
 reinstalling. Nothing here addresses the stall itself and nothing claims to.
+
+## 3rgr-h (2026-11-14) — the breadcrumb writes, and the running tally
+
+Boot 567, plugin 638F142D loaded and confirmed, `hwlibs_gate_mark_why 0`,
+`hwlibs_gate_marks 3`, and `rbgpu-gate` reads
+
+    600 601 602 | 602 hwlibs gate closed ok=1 ms=6125 regsvc=1 [w=3 f=0 t=6228 wx=5064]
+
+in flash and, checked separately, in the live registry — the distinction that
+caught 3rgr-c's failure in the first place. Three marks, three writes, zero
+refusals. `t=6228` is the span from the first mark to the last and `wx=5064`
+is the worst mark-to-mark gap, which is simply the 5 s poll interval between
+600 and 601, so 2fk's "the gates are the crawl" reading does not apply here.
+3rgr-g's decoupling is therefore confirmed on hardware, and the question
+3rgr-c was built to ask is answerable for the first time: a stall whose trail
+ends at 600 or 601 had the gate open when the machine stopped, and one
+reaching 602 did not.
+
+**The tally, because "it feels consistent again" is not a measurement.**
+Against 3rgr-b's baseline of four good and four stalled:
+
+    565  good   kick ARMED (3rgr-d default-on)
+    566  good   kick disarmed (3rgr-e), modes default-on (3rgr-f)
+    567  good   as 566, plus 3rgr-g's decoupled breadcrumb
+
+So two good boots on the reverted configuration. That is **not** evidence the
+revert fixed anything. With a baseline that stalls about half the time, two
+consecutive good boots occur by chance roughly a quarter of the time, and
+3rgr-b's own run contained consecutive good boots before any of this. Rule 44
+wants boots per side and this is two on one side; rule 17 is the standing
+warning against turning a run of readings into a mechanism. The honest
+statement is that nothing has yet contradicted the revert and nothing has yet
+supported it.
+
+What would settle it is a stall with the trail armed, which is now the cheap
+outcome rather than the wasted one — five stalls in this family taught nothing
+because the gate could not be read, and the next one will say something
+whichever way it falls.
+
+Still outstanding and unchanged: the stall's cause, and the new GitHub issue,
+which has now failed to load on three attempts (`gh`: `dial tcp
+140.82.114.6:443: connect: network is unreachable`) and is deferred rather
+than guessed at.
