@@ -69128,3 +69128,81 @@ ABD89AD4-68C8-3FFE-8A00-77B1BFAAA5B7. Verified on the installed-path build:
 no dangling externs (3fxf), zero `IOGraphicsFamily`, zero libraries from
 `SystemKernelExtensions.kc` (2oz), all four new tokens and diag keys present
 in the binary, hosttest clean with no `error:` lines (rule 48).
+
+## 3rgr-f (2026-11-14) — the 60 Hz mode is default-on, and it is -rbgpufbmodes, not -rbgpufbdrr
+
+The user's instruction was to make the refresh-rate boot-arg default-on, "it
+should have been like that... for everyone". Correct, and the token I had
+named in 3rgr-e was the wrong one.
+
+**-rbgpufbdrr is not the refresh-rate feature, and defaulting it on would
+have been actively bad.** `RBAMDFramebufferDRR.cpp:15-21` says so in the
+file's own words: "WHAT THIS IS NOT YET: a display mode. macOS still
+advertises one mode at 143.836 Hz ... That is why this reverts itself and why
+it is a measurement rather than a feature." It writes `V_TOTAL_MIN/MAX` once
+from a `thread_call` some seconds after start, holds ~60 Hz for
+`rbgpudrrsecs`, and reverts unconditionally; it never touches
+`getDisplayModeCount()`. Default-on would have blinked every user's panel
+after login and still offered no picker. 3rgr-e's handover line
+"`-rbgpufbdrr` restores it" was wrong and is withdrawn — the diagnosis in
+3rgr-e stands (DRR was indeed not armed, refusal 10 is indeed
+`DRR_REFUSE_NOT_ARMED`), but the remedy named the wrong feature, and a reader
+following that entry would have reached a worse configuration than the one
+they started from.
+
+**The feature that advertises the mode is `-rbgpufbmodes`** (2y6), which is
+precisely why the two are mutually exclusive. It is now in
+`rb_defaults.h`'s default-on table.
+
+2y6's reason for making it opt-in has to be answered rather than waved past,
+because it is still true: the risk is not the register write, it is
+ADVERTISING. `getDisplayModeCount()` has returned 1 since 2sl and every boot
+since has been read against that, so a second mode changes what WindowServer
+sees at the moment the framebuffer comes up, and 2xx is the standing lesson
+in what a WindowServer that dislikes its framebuffer costs to diagnose.
+
+What answers it is that 2y6 built the failure path before the feature. On any
+of refusals 20..27 the mode table collapses back to the single 143.836 Hz
+mode the preceding six milestones were measured on, rather than advertising a
+mode it cannot deliver, and the hosttest pins that constant bit for bit so a
+silent retime of the compositor fails the BUILD rather than the next boot. So
+the default-on failure mode is "the machine behaves exactly as it did
+before", which is the only failure mode that makes a default acceptable. The
+user's reason is what decides it: a Mac whose Display settings offer no
+refresh rate at all reads as a broken driver to everyone who is not reading
+these files.
+
+Consequences recorded rather than left to be discovered. `-rbgpufbdrr` stays
+opt-in and will now refuse with 27 `MODE_REFUSE_DRR_BUSY` in the common case,
+because `drrSetup()` declines while the mode table is armed — that is 2y6's
+deliberate choice so that a refusal can never mean two things, and it means
+the DRR experiment needs `-rbgpunofbmodes` alongside it from now on. The
+disarm is the derived `-rbgpunofbmodes`, checked in both directions against
+every `-rbgpu` token in the tree for rule 30; `argOn()` already honours the
+derived negative, `-rbgpustock`, `-rbgpuoff` and an unmeasured OS, so no new
+plumbing was needed and the framebuffer reads the table the same way the
+plugin does.
+
+The hosttest's assertion that this token "stays OFF ... which no boot has yet
+done" was **inverted rather than deleted**, so the reversal costs a line that
+names what changed, and the paragraph stating the risk was left in place
+above it. `RB_DEFAULT_ON_COUNT` moves 52 -> 53; that count is asserted
+precisely so a token arriving cannot go unnoticed (2z4's lesson). Rule 48:
+removing the token from the table fires **two** FAILs — the count and the
+value — with zero `error:` lines, so neither guard passes for the wrong
+reason and neither is the `-Werror` trap.
+
+Both kexts rebuilt because `rb_defaults.h` is shared: framebuffer UUID
+0DC74962-B14E-3303-999E-D4CB4EF6F90F, plugin
+6D297D12-DC4B-30C8-BB78-631F3D90DC65, release plugin
+2B8E4497-05B4-38D3-B806-B101B2E56543. Verified the framebuffer still requires
+IOGraphicsFamily and the plugin still does not.
+
+**Sequencing, stated because it affects what the next boot can prove.** This
+lands while 3rgr-b's stall is unexplained and 3rgr-e has just reverted the
+kick to opt-in. Installing both in one reboot means a stall count from that
+boot measures neither change cleanly (rule 44), and a first-ever
+second-mode advertisement is exactly the kind of new variable rule 16 says to
+keep out of a measurement. It is committed separately from 3rgr-e for that
+reason, so the two can be installed in either order or apart; the choice of
+whether to take a clean stall count first is the user's.

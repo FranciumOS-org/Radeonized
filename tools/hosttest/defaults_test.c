@@ -44,10 +44,10 @@ int defaults_tests(void)
      * number is asserted so the table cannot drift by accident - a token
      * arriving or leaving should cost a line in a journal entry, not go
      * unnoticed, and this assertion is what made 2z4 say so. */
-    CHECK(RB_DEFAULT_ON_COUNT == 52,
+    CHECK(RB_DEFAULT_ON_COUNT == 53,
           "the table holds boot 231's 45 tokens, 2y2's three brightness "
-          "tokens, 2z4's -rbgpunopg, 2CA's -rbgpufbgpuname and 2CE's "
-          "-rbgpumtlname");
+          "tokens, 2z4's -rbgpunopg, 2CA's -rbgpufbgpuname, 2CE's "
+          "-rbgpumtlname and 3rgr-f's -rbgpufbmodes");
 
     /* 2CE: the Metal name, promoted on two measured boots (417, 418). Pinned
      * by value as well as by the count, because this is the token that
@@ -190,9 +190,23 @@ int defaults_tests(void)
      * WindowServer sees before any user has asked for anything. 2xx is the
      * standing lesson on what a WindowServer that dislikes its framebuffer
      * costs to diagnose. */
-    CHECK(!rb_default_on("-rbgpufbmodes"),
-          "-rbgpufbmodes stays OFF - it changes the mode list WindowServer "
-          "sees at startup, which no boot has yet done");
+    /* 3rgr-f: PROMOTED, and this assertion is inverted rather than deleted so
+     * the reversal costs a line that names what changed. The paragraph above
+     * stays because the risk it states is still the risk; what answers it is
+     * that 2y6 built the failure path before the feature. On any of refusals
+     * 20..27 the table collapses back to the single 143.836 Hz mode every
+     * milestone since 2sl was measured against, and the constant is pinned bit
+     * for bit below, so a silent retime of the compositor fails the build
+     * rather than the next boot. The default-on failure mode is therefore "the
+     * machine behaves exactly as it did before".
+     *
+     * The user's reason is the one that decides it: a Mac whose Display
+     * settings offer no refresh rate at all reads as a broken driver to
+     * everyone not reading this file. "which no boot has yet done" was true
+     * when it was written and is the thing being changed deliberately. */
+    CHECK(rb_default_on("-rbgpufbmodes"),
+          "-rbgpufbmodes is default-on (3rgr-f) - it advertises the 60 Hz mode "
+          "and collapses to the single measured mode on any refusal");
     {
         char off[64];
         rb_off_token("-rbgpufbmodes", off, sizeof(off));

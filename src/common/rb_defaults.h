@@ -53,6 +53,36 @@ static const char *const rb_default_on_tokens[] = {
     "-rbgpuagdccaps", "-rbgpuownfb", "-rbgpufbaty", "-rbgpufbamtr",
     "-rbgpufbhubp", "-rbgpufbflipall", "-rbgpufbflippend", "-rbgpufbnotready",
     "-rbgpufbotgany", "-rbgpufbretire", "-rbgpufbpoll", "-rbgpuschedtick",
+    /* 3rgr-f: the 60 Hz display mode, default-on, because a Mac whose Display
+     * settings offer no refresh rate at all reads as a broken driver to every
+     * user who is not reading this file. 2y6 made it opt-in for a reason that
+     * has to be answered rather than waved past: ADVERTISING is the risk, not
+     * the register write - a second mode changes what WindowServer sees at the
+     * moment the framebuffer comes up, and 2xx is the standing lesson in what
+     * a WindowServer that dislikes its framebuffer costs to diagnose.
+     *
+     * What answers it is that 2y6 built the failure path first. On ANY refusal
+     * the table collapses back to the single 143.836 Hz mode the last six
+     * milestones were measured on, rather than advertising a mode it cannot
+     * deliver, and the hosttest asserts the table reproduces that constant bit
+     * for bit so a silent retime of the compositor fails the BUILD. The
+     * refusals are numbered 20..27 and published. So the default-on failure
+     * mode is "the machine behaves exactly as it did before", which is the
+     * only failure mode that makes a default acceptable.
+     *
+     * NOT -rbgpufbdrr. That one writes V_TOTAL_MIN/MAX once, holds ~60 Hz for
+     * a few seconds and reverts unconditionally; it is a measurement and it
+     * never touches getDisplayModeCount(), so defaulting it on would blink
+     * every user's panel after login and still offer no picker. The two are
+     * mutually exclusive and drrSetup() declines with refusal 27 while this is
+     * armed, which is now the common case - that is by design, 2y6 chose it so
+     * that a refusal can never mean two things, and it is why -rbgpufbdrr
+     * stays opt-in.
+     *
+     * Disarm is the derived "-rbgpunofbmodes", checked both directions against
+     * every -rbgpu token in the tree for rule 30, plus -rbgpustock/-rbgpuoff
+     * and an unmeasured OS, all of which argOn() already honours. */
+    "-rbgpufbmodes",
     /* 3gl-d: the OpenGL swizzle cave. Default-on for the same reason the
      * Metal one is: without it every OpenGL client on this machine renders
      * the `_X` swizzle defect - eaten glyphs and scrambled images - while
