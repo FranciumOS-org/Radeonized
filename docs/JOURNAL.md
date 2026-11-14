@@ -69422,3 +69422,43 @@ Framebuffer UUID F6EE3DB6-DA99-3F0E-9F71-A5D61B312C1A, plugin 638F142D
 unchanged by this work, release plugin B866C61E. Hosttest clean, zero
 `error:` lines. Not yet tested on any 2560x1600 panel — the reporter offered
 to test builds, which is the only way that half gets measured.
+
+## 3fb-b (2026-11-14) — boot 568: the derivation reproduces all four constants on hardware
+
+Framebuffer F6EE3DB6 loaded and confirmed against what was built (rule 15),
+boot 568, latch 0, `RBFBArmWhy 10` (the peer ran first and said armed, which
+takes the panel). The derivation ran in the real kext and published:
+
+    RBFBGeoW 1920   RBFBGeoH 1080   RBFBGeoRow 7680   RBFBGeoAper 8294400
+    RBFBGeoPitchPx 1920   RBFBGeoPadded 0   RBFBGeoRowSrc 1   RBFBGeoOk Yes
+    RBFBGeoWhy 0
+
+All four numbers that were hard-coded, rebuilt from registers, on the machine
+they were originally measured on. The hosttest asserted this against recorded
+words; this is the same assertion against the live chip, which is the part a
+hosttest cannot make. `RBFBGeoRowSrc 1` is the reading that matters most
+beyond the four: the stride came from `HUBP0_SURFACE_PITCH`, read, not from
+the `width * 4` fallback — so the path that protects a padded panel is the
+one that executed here, rather than being inert code that only runs on
+hardware nobody has.
+
+The inputs are all visible in the same sample and all match what `rb_otg.h`
+recorded in boots 2oq/2os: `RBFBOtgHTotal 2106`, `RBFBOtgVTotal 1129`,
+`RBFBOtgVBlankSE 1311820` (= 0x0014044c), `RBFBHubpPitch 1919`. `GeoPadded 0`
+independently agrees with the deleted constants' own comment, which asserted
+from `IOFBMemorySize` that this board's rows are unpadded.
+
+Nothing is claimed about 2560x1600. This boot shows the derivation is correct
+where there is a control; the reported configuration still has none.
+
+Side readings from the same boot: the mode ladder holds at `RBFBModeCount 8`
+with `RBFBModeCurMhz 60006`, so 3rgr-f's 60 Hz selection survived the
+framebuffer swap; and 3rgr-g's trail wrote a third time, `600 601 602 | 602
+hwlibs gate closed ok=1 ms=6525 regsvc=1 [w=3 f=0 t=6623 ...]`.
+
+**Tally: 566, 567, 568 all good on the reverted configuration**, against
+3rgr-b's baseline of four good and four stalled. Three in a row is weaker
+evidence than it feels — at a ~50 % rate it happens about an eighth of the
+time — and boot 568 also changed the framebuffer, so it is not even a clean
+sample of the same configuration (rule 44). Still nothing contradicting the
+revert, still nothing supporting it.
