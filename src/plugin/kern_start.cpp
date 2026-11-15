@@ -9766,6 +9766,24 @@ static bool rbgpu_dal_allow(uint32_t reg, uint32_t *reg_out) {
         // instead, and the hosttest covers it.
         uint32_t use = reg;
         const uint32_t act = rb_dcn_dal_action_enc(reg, g_dal_enc, &use);
+        /* 3ret-f: NO MARK ON THE WRITE PATH, and the reason is 2fo.
+         *
+         * Three bounded marks on the write counter were written here and then
+         * removed before any boot ran them. 2fo's comment on `rbgpu_gate_2en`
+         * is explicit: ~24 synchronous NVRAM device transactions inside
+         * `IOService::start` are the one thing present in all 24 wedged boots
+         * of that family and absent from the twenty milestones before it, and
+         * "the trail has never been removed and the chain never run without
+         * it." Putting a flash commit inside the DAL write classifier - which
+         * runs during Apple's `start()`, the exact window 2fo indicts - would
+         * add commits to the path being measured. Rule 16: the instrument is a
+         * suspect, and when a measurement and a suspect are both new, remove
+         * the suspect rather than reason about it.
+         *
+         * Boot 582 crawled with `w=3`, so the commit budget this boot is
+         * small and the five marks that remain (700-704) are all outside the
+         * write path. The write counters are still published to the diag table
+         * by the two start hooks, which is where they were always read from. */
         if (act == RB_DCN_ACT_REDIRECT) {
             if (reg_out) { *reg_out = use; }
             g_dal_wrr++;
@@ -9956,6 +9974,7 @@ static uint32_t hooked_dal_r3_2pi(void *self, uint32_t reg, uint32_t a, uint8_t 
 }
 
 static bool hooked_ctl_start_2ph(void *self, void *provider) {
+    rbgpu_gate_2en(701, "AmdRadeonControllerNavi2::start ENTERED");
     if (!g_dal_safe) {
         // Rule 14: refuse loudly. This is the interlock, and it firing is a
         // GOOD outcome - it means the boot is intact and we learned the
@@ -9971,6 +9990,7 @@ static bool hooked_ctl_start_2ph(void *self, void *provider) {
               (unsigned long long)g_dal_writes);
     rbgpu_diag_set_num("dal_start", 1);
     bool ret = orig_ctl_start_2ph(self, provider);
+    rbgpu_gate_2en(702, "AmdRadeonControllerNavi2::start RETURNED");
     rbgpu_log("2ph: controller start() returned %d after %llu dropped writes "
               "- DAL got as far as it could with no hardware behind it",
               ret, (unsigned long long)g_dal_writes);
@@ -10019,7 +10039,40 @@ static t_rbCtlStart orig_wr_start_2pk = nullptr;
 
 static bool hooked_wr_start_2pk(void *self, void *provider) {
     rbgpu_diag_set_num("dalfb_start", 1);
+    /* 3ret-f: THE 700-SERIES TRAIL, because boot 582 could not be located.
+     *
+     * Boot 582 crawled for two minutes with the Wrangler promoted and left
+     * nothing to read. Three instruments were checked afterwards and all three
+     * failed, each for its own reason:
+     *
+     *   - the LOG STORE has zero of our lines for that boot (controlled: two
+     *     in the previous boot's tail and four in the next boot, same capture,
+     *     so the search works). A boot that never completes does not flush.
+     *   - `rbgpu-diag-prev` holds 31 keys and 516 bytes against `diag_used`
+     *     586, so at least 70 bytes were cut, and it contains no `dal_*` key
+     *     at all. Rule 10: what must survive an uncapturable boot has to be
+     *     NVRAM and periodic, and this table is neither small enough nor
+     *     ordered for it.
+     *   - the GATE TRAIL survived and read `600 601 602 | 602 hwlibs gate
+     *     closed ok=1 ms=5875`, which says boot 582 was HEALTHY at 5.9 s and
+     *     our own accelerator published normally - and then says nothing,
+     *     because nothing downstream of the hwlibs gate was ever marked. The
+     *     trail ending at 602 locates nothing (rule 14), and 2fk's own comment
+     *     predicted exactly this.
+     *
+     * The gate trail is the right instrument - written on the calling thread
+     * and flushed immediately, so it survives a wedge (2eo-2fg) - it simply
+     * had no marks here. These are those marks, bounded at eight so the
+     * 192-byte trail cannot overflow.
+     *
+     * 703 WITHOUT 704 is the finding this is built for: it puts the crawl
+     * inside Apple's `AmdGpuWrangler::start`, which is where 2pl and 2po put
+     * it by inference and nothing has ever put it by measurement. 704 present
+     * moves the crawl downstream of the promotion entirely, which would be a
+     * different problem from the one three milestones have assumed. */
+    rbgpu_gate_2en(703, "AmdGpuWrangler::start ENTERED - DAL is about to run");
     bool ret = orig_wr_start_2pk(self, provider);
+    rbgpu_gate_2en(704, "AmdGpuWrangler::start RETURNED");
     rbgpu_log("2pk: AmdGpuWrangler::start returned %d after %llu dropped "
               "writes and %llu reads (hw %llu atom %llu bios %llu)",
               ret, (unsigned long long)g_dal_writes,
@@ -10203,6 +10256,7 @@ void RGPU::processX6000FB(KernelPatcher &patcher, size_t id,
         rbgpu_diag_set_num("dalfb_srouted", 0);
     }
 
+    rbgpu_gate_2en(700, "DAL routes installed - the remap is in force");
     KernelPatcher::RouteRequest st(
         "__ZN39AMDRadeonX6000_AmdRadeonControllerNavi25startEP9IOService",
         hooked_ctl_start_2ph, orig_ctl_start_2ph);

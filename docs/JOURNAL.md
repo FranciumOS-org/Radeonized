@@ -71217,3 +71217,138 @@ a consumed key and a deliberate disarm are the same state and re-arming is
   prediction — 3dcn-d's crawl had two mechanisms and only one was found.
 
 Plugin **8A507195**, not yet installed.
+
+---
+
+## 3ret-f / boot 582 — the rescue worked, the remap is not the crawl's fix, and no instrument reached the boot
+
+**2026-11-15 02:35:14 → 02:37:20, boot 582.** Plugin **8A507195**, the
+Wrangler promotion armed. It crawled — the progress bar never finished, for
+about two minutes, and the user force-rebooted into a stock boot. Same symptom
+as 3dcn-d's two boots, now with the dcn302→dcn312 remap armed.
+
+### The rescue is confirmed on hardware, both layers
+
+This is the part that worked, and it is worth recording precisely because
+3ret-e's guards had no hosttest coverage and were only verified structurally.
+
+- `rbgpu-dalfb` reads **0**. The only writer is the branch gated on
+  `(!dalStock && dalfbArg)`, so the one-shot was consumed and **the promotion
+  was reached**. Nothing else in the tree touches that key.
+- `rbgpu-safe` was **1** at the next boot, so the hold took effect: the stock
+  boot published `sentinel 4`, `safe_latch 1`, `arm_why 6` and cleared the
+  latch. The 60 s backstop and 3rgr's 15 s attach grace would both have fired
+  during a two-minute crawl; neither did.
+
+So a boot that failed by crawling cost **one** boot, which is what 3ret-e was
+built for and what the two boots of 3dcn-d cost twice. Rule 21's test — a
+recovery procedure exercised in the situation it exists for — passed.
+
+Boot-args at the time, read from the running system after the fact:
+`-rbgpuretirevbl -rbgpudal -rbgpudalpass rbgpudalenc=dword -rbgpudalremap
+-rbgpudalfbreal`.
+
+### The remap did not prevent the crawl
+
+The promotion ran with `-rbgpudalremap` in force and the boot crawled anyway.
+3ret-e named the remap as the *candidate* answer to the crawl — writes that
+would spin in `REG_WAIT` on dcn302 offsets now redirect to the dcn312 ones —
+and that candidate is now **refuted as a sufficient fix**.
+
+What is **not** established, and must not be written as if it were: whether the
+remap did anything at all. No counter from that boot survived, so "the remap
+applied and the crawl has another cause" and "the remap never got far enough to
+apply" are both live, and they are different problems. Rule 17 — two readings
+are not a mechanism, and one reading is not two.
+
+### THREE INSTRUMENTS, THREE FAILURES
+
+The boot was uncapturable and every way of reading it afterwards failed, each
+for its own reason. This is the finding of the milestone.
+
+1. **The log store has nothing.** Zero of our lines in the promoted boot's
+   range, against a control in the same capture: two in the previous boot's
+   tail and four in the following stock boot, same grep. So the search works
+   and the boot genuinely persisted nothing of ours — the last kernel content
+   from it is early PMAP init. A boot that never completes does not flush.
+2. **`rbgpu-diag-prev` is too small and wrongly ordered.** It holds **31 keys
+   and 516 bytes** while the boot's own `diag_used` reads **0x24a = 586**, so
+   at least 70 bytes were cut, ending at `mcp_kext_base`. It contains **no
+   `dal_*` key at all** and no `sentinel_*` key. Whether those were absent from
+   the table or lost to the cap is **not established** from this evidence, and
+   the conclusion is the same either way. Rule 10, stated in the card and not
+   satisfied: what must survive an uncapturable boot has to be NVRAM **and**
+   periodic, and a 768-byte insertion-ordered table behind a ~520-byte NVRAM
+   cap is neither.
+3. **The gate trail survived and located nothing.** It read:
+
+   ```
+   600 601 602 | 602 hwlibs gate closed ok=1 ms=5875 regsvc=1 [w=3 f=0 t=5983 wx=5068]
+   ```
+
+   Attribution: this boot is stock (`armed 0`) and the hwlibs gate only arms on
+   an armed boot, so the trail is 582's and was not overwritten. It says boot
+   582 was **healthy at 5.9 s** and our own accelerator published normally,
+   with `w=3` flash commits and `wx=5068` accounted for by the gate's own 5 s
+   poll. And then it says nothing, because **nothing downstream of the hwlibs
+   gate was ever marked**. A trail ending at 602 means "602 is the last mark
+   that exists", not "the thread stopped there" — rule 14. 2fk's own comment
+   predicted this failure for the hwlibs keys and it has now happened to a
+   second question.
+
+### The fix: five marks, and the ones left out matter more
+
+The gate trail is the right instrument — written on the calling thread and
+flushed immediately, so it survives a wedge (2eo-2fg) — it simply had no marks
+on this path. Added, bounded at five:
+
+```
+700  DAL routes installed - the remap is in force
+701  AmdRadeonControllerNavi2::start ENTERED
+702  AmdRadeonControllerNavi2::start RETURNED
+703  AmdGpuWrangler::start ENTERED - DAL is about to run
+704  AmdGpuWrangler::start RETURNED
+```
+
+**703 without 704 is what this is built for.** It would put the crawl inside
+Apple's `AmdGpuWrangler::start`, which is where 2pl and 2po put it by
+inference and where nothing has ever put it by measurement. **704 present**
+moves the crawl downstream of the promotion entirely, which is a different
+problem from the one three milestones have assumed.
+
+**Three marks on the write counter were written and then removed before any
+boot ran them.** 2fo's comment on `rbgpu_gate_2en` is explicit: ~24
+synchronous NVRAM device transactions inside `IOService::start` are the one
+thing present in all 24 wedged boots of that family and absent from the twenty
+milestones before it, and *"the trail has never been removed and the chain
+never run without it."* A flash commit inside the DAL write classifier runs
+during Apple's `start()` — the exact window 2fo indicts. Rule 16: when a
+measurement and a suspect are both new, remove the suspect rather than reason
+about it. Boot 582 crawled at `w=3`, so the budget is small; the five marks
+that remain are all outside the write path, and the write counters are still
+published to the diag table by the two start hooks, which is where they were
+always read from.
+
+The trail's own self-test comes free and must be read before anything else
+(2fk): `t` small at the last mark means the thread genuinely stopped and the
+endpoint locates it; `t` already seconds with `wx` in the hundreds means the
+gates **are** the crawl and this milestone timed its own instrument again.
+
+### Also fixed, found while reading
+
+Nothing. The diag-table cap is **not** fixed — it is named here as the standing
+defect it is, and the marks route around it rather than repairing it. A
+dedicated small periodic key for the DAL counters is the real answer to rule 10
+and has not been built.
+
+### Not established
+
+- **Where the crawl is.** That is the next boot's question and the marks exist
+  to answer it.
+- **Whether the five added commits change the boot.** They take `w` from 3 to 8.
+  The trail reports `w`, `f`, `t` and `wx` precisely so this is readable rather
+  than assumed.
+- None of 3ret-e's or 3ret-f's guards has hosttest coverage; they are kext-side
+  NVRAM and IOKit with no `src/common` logic to drive. No coverage is claimed.
+
+Plugin **088C9353**, not yet installed.
