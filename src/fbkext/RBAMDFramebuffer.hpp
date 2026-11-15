@@ -328,6 +328,12 @@ private:
     uint32_t           hubpRefuse;     /* 0 = set up; else why we will not write */
     uint32_t           hubpPitch;      /* the pipe state we proved ourselves on */
     uint32_t           hubpConfig;
+    /* 3fc: gate 2's pitch term is relative to these two (issue #5). Both are
+     * published whether the gate passed or refused, because a refusal that
+     * does not say which width it compared against cannot be diagnosed off a
+     * remote machine - which is exactly how issue #5 arrived. */
+    uint32_t           hubpHBlankSE;   /* OTG0_H_BLANK_START_END, raw */
+    uint32_t           hubpActiveW;    /* active width derived from it, 0 = none */
     uint32_t           hubpOtgCtl;
     uint32_t           hubpAddrCfg;   /* DCSURF_ADDR_CONFIG, read-only */
     uint32_t           hubpFlipCtl;   /* 2xj: DCSURF_FLIP_CONTROL, read-only */

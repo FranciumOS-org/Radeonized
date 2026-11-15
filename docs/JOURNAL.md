@@ -69520,3 +69520,196 @@ no install.
 Stated plainly so the record is not warmer than the evidence: the stall is
 **not fixed**, it is **not reproducing**, and nothing in this project has been
 shown to have caused either state.
+
+---
+
+## 3fc (2026-11-14) — issue #5: the HUBP gate still held this board's pitch, and 3fb did not touch it
+
+SevenStar77777 filed issue #5 against v0.1.0 and against a build of `main`
+carrying 3fb, on a Lenovo-class hybrid machine — Ryzen 7 7735H with a Radeon
+680M *and* an RTX 4060 present, firmware left in hybrid rather than
+iGPU-only/Eco, macOS 15.8.2 (24H232), internal panel 2560x1440 at 144 Hz. The
+report is unusually good: two independent armed boots, byte-identical
+breadcrumbs, and three controls run before filing. It also contains a finding
+we should have made ourselves, which is the subject of this entry.
+
+### The defect, and it is rule 41 in its exact shape
+
+`rb_hubp.h:338` defined `RB_HUBP_EXPECT_PITCH 0x0000077fu` — 1920 pixels in the
+pitch-minus-one encoding, read off this board's live pipe in boot 133 (2os).
+`rb_hubp_check_state()` compared the live `HUBP0_SURFACE_PITCH` against it for
+equality, as the first of gate 2's three terms. While the framebuffer only ever
+ran on this laptop that was a legitimate check: it asserted that the dword at
+that offset decodes as the pitch of the surface the panel is scanning, which is
+addressing evidence about the segment and the offset, not a geometry
+preference.
+
+3fb (`2795a68`) made the framebuffer's own geometry dynamic — width, height,
+stride and aperture all derived from `OTG0_H/V_BLANK_START_END` and
+`HUBP0_SURFACE_PITCH` by `rb_fbmode.h` — and fixed issue #4. It did not touch
+this constant. The consequence is mechanical and the reporter derived it
+unaided, from the source, before we did: on any panel whose width is not 1920
+the equality can never hold, so gate 2 returns `RB_HUBP_REFUSE_PITCH`,
+`hubpReady` stays false, no surface address is ever programmed, and the whole
+scanout path the framebuffer exists to drive is never armed. Their crumb says
+it in one field, on both boots:
+
+```
+rbgpu-fbcrumb = b=6  s=10 f=100 e=2 r=1 h=6 w=0 k=0 t=0 p=0 n=0 K=0 D=0 E=0 A=0 R=0 G=0
+rbgpu-fbcrumb = b=11 s=10 f=100 e=2 r=1 h=6 w=0 k=0 t=0 p=0 n=0 K=0 D=0 E=0 A=0 R=0 G=0
+```
+
+`h=6` is `RB_HUBP_REFUSE_PITCH`. `w=0` is zero HUBP writes, which follows.
+`t=0` is zero accelerator transactions, which follows from that. One refusal
+code explains three fields of their crumb, and it is ours.
+
+This is rule 41 — a constant is only a constant on the OS *and the board* it
+was measured on — surviving five milestones past the board. It is also the
+recurring error's "read the evidence already in hand" form one more time: 3fb's
+own header comment names `RB_HUBP_EXPECT_PITCH` in `rb_fbmode.h:42`, as the
+documentation of the pitch encoding, while that same file was being written to
+make the geometry dynamic. The constant was cited and not followed to its
+caller.
+
+### What the term carried, and what replaces it
+
+The information in the pitch term was never "this panel is 1920 wide". That is
+a fact about one laptop and no gate should hold it. It was "this word is a
+plausible pitch for the raster this pipe is fetching", and that generalises
+exactly — but only because the width is available from a **different register
+block**. `HUBP0_SURFACE_PITCH` says how wide the surface is; `OTG0_H_BLANK_START_END`
+in the DMU says how wide the raster is. Gate 2 now asks whether the two agree
+within `rb_fbmode.h`'s pitch window.
+
+That the two registers are independently addressed is what makes this a real
+check rather than a tautology. Had the expected width been derived from HUBP's
+own pitch, the comparison would have carried no information at all, which is
+rule 48's shape and the defect this project has written into its own guards
+three times. The width comes from the OTG block, read in `hubpSetup()` with the
+same mapping gate 1 already took for `OTG0_CONTROL`, at dword `0x1b2b`.
+
+The arithmetic is not duplicated. `rb_fbmode.h` gained
+`rb_fbmode_pitch_px()` and `rb_fbmode_pitch_check()`, plus
+`RB_FBMODE_PITCH_PAD_MAX 4096u` and `RB_FBMODE_PITCH_MASK 0xffff`, and both the
+3fb derivation and gate 2 call them. A second copy of the bound is precisely
+the defect this factoring exists to prevent, since the two copies would be free
+to drift exactly as the constant and the derivation drifted.
+
+The other two terms of gate 2 are unchanged and deliberately so.
+`RB_HUBP_EXPECT_CONFIG 0x08` is ARGB8888, the format macOS composites in on
+every board; a pipe scanning something else is not a pipe whose address we
+understand. `RB_HUBP_EXPECT_ADDR_HI 0xf4` is Rembrandt's MC carve-out high
+dword, a property of the aperture rather than of the panel, and the same
+constant `rb_hubp_check_addr()` enforces — relaxing it would mean permitting a
+write outside the carve-out. Only the first of the three was ever a fact about
+one laptop.
+
+`RB_HUBP_REFUSE_NO_WIDTH` was **appended** to `enum rb_hubp_verdict` as 10, not
+inserted. Every value above it is published in `h=` of `rbgpu-fbcrumb`, is
+quoted in issue reports and appears throughout this journal; renumbering would
+silently re-interpret every crumb already collected, issue #5's own `h=6`
+included.
+
+`RBFBHubpHBlankSE` and `RBFBHubpActiveW` are new and are published whether the
+gate passed or refused, and `rb_hubp_check_state()` writes its derived width
+through `w_out` even on a pitch refusal. Rule 14: a refusal that does not say
+which width it compared against cannot be diagnosed from a remote machine,
+which is exactly how this issue arrived and exactly what the reporter had to
+read the source to reconstruct.
+
+### What this change gives up, stated rather than hidden
+
+The old equality refused a pitch word of `1920`, on the correct grounds that
+the register is pitch-minus-one so `1920` decodes as 1921 pixels — a trap 2os's
+own annotation sets for a fast reader, and the hosttest pinned it. The
+panel-relative form **cannot** refuse it: a 1921-pixel pitch over a 1920 raster
+is a one-pixel padded surface, hardware really does pad rows, and no rule
+available in this header distinguishes that from a reader who misread the
+encoding. It is accepted deliberately, and the hosttest now asserts the
+acceptance with the reasoning attached rather than deleting the case. Nothing
+downstream is harmed: 3fb derives `bytes_per_row` from the same register, so a
+padded pitch yields a consistent stride rather than a sheared image.
+
+### Coverage
+
+`hubp_test.c`'s gate-2 section was rewritten. The control is this board,
+measured: pitch `0x077f`, `OTG0_H_BLANK_START_END 0x007f07ff` from
+`rb_otg.h:23` (boots 2oq/2os), which must still be accepted at width 1920 and
+is. Issue #5's panel is represented by **constructed** words, labelled as such
+in the file — the reporter gave the panel size and the refusal code but not the
+two register values, so `(127 << 16) | 2687` and pitch `2559` are built to the
+field layout `rb_otg.h` documents and prove only that the arithmetic admits a
+2560-wide panel. They are not evidence about that machine and the test says so;
+`RBFBHubpHBlankSE` exists so the real words can replace them.
+
+The defect itself is pinned (`C_PITCH_2560 != RB_HUBP_EXPECT_PITCH`), so a
+future edit reintroducing the equality fails with a line explaining why. The
+retained protection is tested in the direction that matters — a 1920 pitch
+under a 2560 raster is refused, since a surface narrower than its raster cannot
+be the one being fetched — with the boundary pinned at a single pixel (1918
+refused, 1919 accepted). `NO_WIDTH` is exercised four ways and asserted not to
+write `*w_out`, so a caller cannot publish a stale width; both width bounds are
+shown inclusive, so the code is about a word that is not a raster rather than
+about rejecting a small panel.
+
+Six break-it checks, one per guard added, all six FIRED: the lower width bound
+(7 FAIL), `w_out` written on a refusal it should not be (3), the `PITCH_LOW`
+term (6), the `PITCH_HIGH` term (4), the pitch-minus-one decode (18), and a
+deliberate regression of gate 2 back to the issue-#5 equality (6). No build
+errors in any of the six, so the `-Werror` trap did not fire this time and none
+of the six is an inconclusive run. Framebuffer UUID **E0245179**, not installed
+on this board.
+
+### THE STALL IS A SEPARATE QUESTION AND THIS DOES NOT CLAIM TO FIX IT
+
+The reporter asks whether the signature points at anything known. Three things
+can be said from the source, and one correction has to be made to their reading
+before any of them.
+
+**"Exactly 100 vblanks" is almost certainly the instrument's resolution, not an
+event.** `RBAMDFramebufferVBL.cpp:1073` writes `crumb(10)` at `vblFires == 100`
+and `crumb(11)` at `vblFires == 1000`; there is nothing in between. So `s=10`
+with no `s=11` means the boot stopped being able to write crumbs somewhere
+between fire 100 (~0.7 s) and fire 1000 (~7 s) — a tenfold window, not a cutoff
+at 100. Reproducing `s=10 f=100` twice reproduces the window, not an
+exact-100 event. `f=100` is the same single sample, by construction, since the
+crumb records the fire count at which it was written.
+
+**The one reading that would make "exactly 100" meaningful also makes our own
+instrument the suspect.** `crumb()` performs a synchronous NVRAM flash commit,
+and at fire 100 it does so from the vblank path. This project has already paid
+for that mistake: 2fo spent about seventeen boots chasing roughly twenty-four
+flash writes issued inside `IOService::start`, and rule 16 exists because of
+it. If the stall is *at* the crumb write rather than merely after it,
+`-rbgpufbnocrumb` gets past it, and that is a free test with no build. The cost
+is named: that boot-arg also nulls `nvram`, which disables the 2wp self-disarm,
+so a bad boot no longer sets the sentinel latch and the user's own
+`-rbgpustock` becomes the only way back.
+
+**The frozen display and a hung system are not the same thing, and `h=6`
+predicts the first.** With `hubpReady` false the framebuffer programs no
+surface address at all, so the panel keeps scanning whatever the firmware left
+there, forever, while the framebuffer is nonetheless the console and publishes
+a 2560x1440 mode into which WindowServer composites. That is a display frozen
+on its last firmware frame — and rule 12 says a black or frozen panel is
+indistinguishable from a hang from the keyboard. The machine may well be fully
+up behind it. The reporter's own evidence hints the same way: the last visible
+line differs across boots while the crumb does not, which is what a console
+that stopped updating looks like, and `apfs_vfsop_unmount` waiting on the pager
+cleaner is a shutdown-path signature rather than an early-boot one. SSH into a
+stalled boot settles it in one attempt, and they have offered exactly that.
+
+**The hybrid firmware is an unmeasured configuration, not a known failure.**
+Rule 47 and the card say this chassis must be in iGPU-only/Eco mode because in
+hybrid mode the eDP backlight is wired to the dGPU and our registers drive
+nothing — six milestones went into that gap. That is a statement about
+*brightness* on *this* chassis, and it is not evidence that an armed boot on
+hybrid firmware must stall. No boot of this project has ever been measured on
+hybrid firmware with a dGPU present on the bus, so the honest answer is that
+the configuration claims nothing either way, in `rb_osver.h`'s sense. It is a
+variable to remove, not a diagnosis.
+
+So: the pitch gate is fixed and the fix is tested, their `h=6` is explained and
+it is our defect, and the stall is **not** claimed fixed. Whether removing
+`h=6` also removes the stall is unknown, because nothing here has been run on
+that machine.

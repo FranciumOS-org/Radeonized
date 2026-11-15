@@ -54,6 +54,10 @@
 
 #include <stdint.h>
 
+/* Gate 2's pitch term is panel-relative since issue #5, and the arithmetic
+ * lives in one place. */
+#include "rb_fbmode.h"
+
 #define RB_HUBP_COUNT  4u
 
 /* Dword offsets inside DMU segment 2, from
@@ -335,7 +339,40 @@ static inline int rb_hubp_otg_gate(uint32_t otg0, uint32_t otg1, uint32_t otg2,
             otg3 == RB_HUBP_OTG_OFF_VALUE) ? 1 : 0;
 }
 
-#define RB_HUBP_EXPECT_PITCH    0x0000077fu   /* 1920 px, pitch-1 encoding */
+/* 3fc / ISSUE #5: THIS CONSTANT IS A RECORD, NOT A GATE ANY MORE.
+ *
+ * 0x077f is what boot 133 measured on THIS board's pipe: 1920 px in the
+ * pitch-minus-one encoding. For as long as the framebuffer only ever ran on
+ * this board, comparing the live pitch against it was a legitimate third
+ * term in gate 2 - it asserted that the dword at this offset decodes as the
+ * pitch of the surface the panel is scanning, which is addressing evidence,
+ * not a geometry preference.
+ *
+ * 3fb (commit 2795a68) made the framebuffer's own geometry dynamic and did
+ * not touch this line, and the reporter of issue #5 read the consequence off
+ * their own machine before we did: on a 2560-wide panel the equality can
+ * never hold, so gate 2 refuses RB_HUBP_REFUSE_PITCH, `hubpReady` stays
+ * false, and the scanout path is never armed. Their crumb says it in one
+ * field - `h=6` - on two independent boots. Rule 41 in its exact form: a
+ * constant is only a constant on the board it was measured on, and this one
+ * outlived the board by five milestones.
+ *
+ * WHAT THE TERM ACTUALLY CARRIED, and what replaces it. Not "the panel is
+ * 1920 wide" - that is a fact about one laptop and no gate should hold it.
+ * The information was "this word is a plausible pitch for the raster this
+ * pipe is fetching", and that generalises exactly, because the width comes
+ * from a DIFFERENT register block: OTG0_H_BLANK_START_END in the DMU, read
+ * with the same mapping gate 1 already uses for OTG0_CONTROL. HUBP says how
+ * wide the surface is, OTG says how wide the raster is, and the gate asks
+ * whether the two agree within rb_fbmode.h's pitch window. That is a real
+ * cross-check between two independently addressed registers, so it is NOT
+ * the tautology that comparing HUBP's pitch against a width derived from
+ * HUBP's pitch would have been (rule 48: a term that carries no information
+ * is not a guard).
+ *
+ * On this board the new form accepts exactly what the old one did - w 1920,
+ * pitch 0x077f - and the hosttest keeps that as its control. */
+#define RB_HUBP_EXPECT_PITCH    0x0000077fu   /* 2os, THIS board: 1920 px */
 #define RB_HUBP_EXPECT_CONFIG   0x00000008u   /* ARGB8888 */
 #define RB_HUBP_EXPECT_ADDR_HI  0x000000f4u   /* the carve-out's high dword */
 
@@ -358,7 +395,12 @@ enum rb_hubp_verdict {
     RB_HUBP_REFUSE_PITCH,      /* pipe pitch is not what 2os measured */
     RB_HUBP_REFUSE_CONFIG,     /* pipe format is not what 2os measured */
     RB_HUBP_REFUSE_STATE_HI,   /* pipe is not scanning the carve-out */
-    RB_HUBP_REFUSE_FRAME       /* the frame would run past the carve-out */
+    RB_HUBP_REFUSE_FRAME,      /* the frame would run past the carve-out */
+    /* 3fc: APPENDED, never inserted. The numeric values of everything above
+     * are published in `h=` of rbgpu-fbcrumb and are quoted in issue reports
+     * and throughout the journal, so renumbering them would silently
+     * re-interpret every crumb already collected. */
+    RB_HUBP_REFUSE_NO_WIDTH    /* OTG0 H blank gives no usable active width */
 };
 
 static inline uint32_t rb_hubp_dw(unsigned hubp, enum rb_hubp_reg which)
@@ -367,10 +409,39 @@ static inline uint32_t rb_hubp_dw(unsigned hubp, enum rb_hubp_reg which)
     return rb_hubp_regs[hubp][which];
 }
 
-/* Is the pipe the one 2os measured? Called once, before anything is written. */
-static inline int rb_hubp_check_state(uint32_t pitch, uint32_t config, uint32_t hi)
+/* Is this pipe scanning a surface we may write the address of? Called once,
+ * before anything is written.
+ *
+ * `hblank` is OTG0_H_BLANK_START_END, raw, from the DMU - the kext hands the
+ * register over and decides nothing. `w_out`, when given, receives the active
+ * width this call derived, so a refusal can publish what it refused ON and
+ * not merely that it refused (rule 14); it is written whenever the width was
+ * derivable, including on a pitch refusal, and left alone otherwise.
+ *
+ * The three terms, and what each is for:
+ *   pitch  - panel-relative since issue #5, see RB_HUBP_EXPECT_PITCH above.
+ *   config - the surface FORMAT, ARGB8888. Nothing panel-specific about it;
+ *            macOS composites in it on every board, and a pipe scanning some
+ *            other format is not a pipe whose address we understand.
+ *   hi     - the carve-out's high dword. A property of Rembrandt's MC
+ *            aperture, not of the panel, and the same constant the address
+ *            guard below enforces, so relaxing it would mean allowing a
+ *            write outside the carve-out.
+ * Only the first was ever a fact about one laptop. */
+static inline int rb_hubp_check_state(uint32_t pitch, uint32_t config,
+                                      uint32_t hi, uint32_t hblank,
+                                      uint32_t *w_out)
 {
-    if (pitch  != RB_HUBP_EXPECT_PITCH)   { return RB_HUBP_REFUSE_PITCH; }
+    const uint32_t w = rb_fbmode_active(hblank, 0, 0);
+    uint32_t pc;
+
+    if (w < RB_FBMODE_W_MIN || w > RB_FBMODE_W_MAX) {
+        return RB_HUBP_REFUSE_NO_WIDTH;
+    }
+    if (w_out) { *w_out = w; }
+
+    pc = rb_fbmode_pitch_check(rb_fbmode_pitch_px(pitch), w);
+    if (pc != RB_FBMODE_OK)               { return RB_HUBP_REFUSE_PITCH; }
     if (config != RB_HUBP_EXPECT_CONFIG)  { return RB_HUBP_REFUSE_CONFIG; }
     if (hi     != RB_HUBP_EXPECT_ADDR_HI) { return RB_HUBP_REFUSE_STATE_HI; }
     return RB_HUBP_OK;

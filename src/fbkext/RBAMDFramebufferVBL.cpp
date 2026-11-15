@@ -160,6 +160,10 @@ void RBAMDFramebuffer::publishVBLState(void)
     setProperty("RBFBHubpRefuse", (uint64_t)hubpRefuse, 32);
     setProperty("RBFBHubpOtgCtl", (uint64_t)hubpOtgCtl, 32);
     setProperty("RBFBHubpPitch", (uint64_t)hubpPitch, 32);
+    /* 3fc: the two inputs to gate 2's pitch term, so `RBFBHubpRefuse` 6 is
+     * readable without a rebuild (issue #5). */
+    setProperty("RBFBHubpHBlankSE", (uint64_t)hubpHBlankSE, 32);
+    setProperty("RBFBHubpActiveW", (uint64_t)hubpActiveW, 32);
     /* 3fb (issue #4): the derived geometry. geoWhy is published even on
      * success, so "derived cleanly" and "never attempted" are different
      * readings, and geoRowSrc separates a stride that was READ from one

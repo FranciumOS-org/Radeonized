@@ -50,6 +50,15 @@ static const uint32_t kRbDmuSeg2 = 0x34c0;
 #define RB_OTG_OFF_VALUE  0x300u
 static const uint32_t kRbOtgControl[4] = { 0x1b41, 0x1bc1, 0x1c41, 0x1cc1 };
 
+/* 3fc: OTG0_H_BLANK_START_END, dword offset, same DMU segment as the
+ * OTG_CONTROL words above and the same mapping gate 1 already took. Gate 2's
+ * pitch term needs the raster width this pipe is fetching for, and this is
+ * where the firmware put it (rb_otg.h:23, this board 0x007f07ff -> 1920).
+ * RBAMDFramebufferBacklight.cpp defines the same offset for 3fb's geometry
+ * derivation; that read happens in blSetup(), which runs AFTER hubpSetup(),
+ * so this gate cannot borrow it and reads the register itself. */
+static const uint32_t kRbOtg0HBlankSE = 0x1b2bu;
+
 /* The HUBP this project writes. 2os measured HUBP0 as the live pipe - it is
  * the one whose primary surface address reads the carve-out base - and the
  * state gate re-proves that every boot rather than trusting it. */
@@ -301,6 +310,8 @@ bool RBAMDFramebuffer::hubpSetup(void)
     hubpOtgCtl3 = 0;
     hubpPitch = 0;
     hubpConfig = 0;
+    hubpHBlankSE = 0;
+    hubpActiveW = 0;
     hubpOtgCtl = 0;
     hubpAddrCfg = 0;
     hubpTiling = 0;
@@ -482,9 +493,13 @@ bool RBAMDFramebuffer::hubpSetup(void)
         return false;
     }
 
-    /* Gate 2: is the pipe the one 2os measured? Pitch, format and the high
-     * dword of the address, all three, decided by the pure function the
-     * hosttest runs. */
+    /* Gate 2: is this pipe scanning a surface we understand? Pitch, format
+     * and the high dword of the address, all three, decided by the pure
+     * function the hosttest runs.
+     *
+     * 3fc: the pitch term is now relative to the raster OTG0 is scanning,
+     * read here from a second register block, rather than to this board's own
+     * 1920 (issue #5). */
     hubpPitch  = rbRead(regs, kRbDmuSeg2 + rb_hubp_dw(hubpIndex, RB_HUBP_REG_PITCH));
     hubpConfig = rbRead(regs, kRbDmuSeg2 + rb_hubp_dw(hubpIndex, RB_HUBP_REG_CONFIG));
     const uint32_t lo = rbRead(regs, kRbDmuSeg2 + rb_hubp_dw(hubpIndex, RB_HUBP_REG_ADDR));
@@ -503,7 +518,10 @@ bool RBAMDFramebuffer::hubpSetup(void)
     hubpFlipCtl  = rbRead(regs, kRbDmuSeg2 + rb_hubp_dw(hubpIndex, RB_HUBP_REG_FLIP_CTL));
     hubpFlipCtl2 = rbRead(regs, kRbDmuSeg2 + rb_hubp_dw(hubpIndex, RB_HUBP_REG_FLIP_CTL2));
 
-    const int state = rb_hubp_check_state(hubpPitch, hubpConfig, hi);
+    hubpHBlankSE = rbRead(regs, kRbDmuSeg2 + kRbOtg0HBlankSE);
+    hubpActiveW  = 0;
+    const int state = rb_hubp_check_state(hubpPitch, hubpConfig, hi,
+                                          hubpHBlankSE, &hubpActiveW);
     if (state != RB_HUBP_OK) {
         hubpRefuse = (uint32_t)state;
         map->release();

@@ -81,6 +81,38 @@
 #define RB_FBMODE_BPP           4u
 #define RB_FBMODE_APER_CAP  (256u * 1024u * 1024u)
 
+/* The pitch window, factored out because TWO gates now apply it: this file's
+ * derivation and rb_hubp.h's gate 2. Issue #5 is what made that necessary -
+ * gate 2 compared the pitch register against this board's own 0x077f for
+ * five milestones after the geometry itself became dynamic, so every panel
+ * whose width is not 1920 refused with RB_HUBP_REFUSE_PITCH and could never
+ * arm. One copy of the arithmetic, in the file whose hosttest proves it; a
+ * second copy is the defect this factoring exists to prevent.
+ *
+ * The LOW bound is arithmetic: a surface cannot be narrower than the raster
+ * fetched out of it. The HIGH bound is a sanity allowance, not a measurement
+ * - 4096 extra pixels covers any row padding seen in the wild and 2x covers
+ * a double-width stride, while a word that is neither (a dead block, another
+ * register, a shifted segment) lands outside. It is deliberately loose: its
+ * job is to reject a word that is not a pitch, not to rank real panels. */
+#define RB_FBMODE_PITCH_PAD_MAX  4096u
+#define RB_FBMODE_PITCH_MASK    0xffffu
+
+static inline uint32_t rb_fbmode_pitch_px(uint32_t surface_pitch)
+{
+    return (surface_pitch & RB_FBMODE_PITCH_MASK) + 1u;
+}
+
+/* 0 ok, RB_FBMODE_E_PITCH_LOW, or RB_FBMODE_E_PITCH_HIGH. */
+static inline uint32_t rb_fbmode_pitch_check(uint32_t pitch_px, uint32_t width)
+{
+    if (pitch_px < width) { return RB_FBMODE_E_PITCH_LOW; }
+    if (pitch_px > (2u * width) + RB_FBMODE_PITCH_PAD_MAX) {
+        return RB_FBMODE_E_PITCH_HIGH;
+    }
+    return RB_FBMODE_OK;
+}
+
 /* 13-bit position fields, START low and END high. rb_otg.h's RB_OTG_POS_MASK
  * is the same constant; it is restated rather than included so this header
  * stays usable from the hosttest on its own. */
@@ -150,9 +182,11 @@ static inline uint32_t rb_fbmode_derive(const struct rb_fbmode_in *in,
         return RB_FBMODE_E_VTOTAL;
     }
 
-    pitch = (in->surface_pitch & 0xffffu) + 1u;
-    if (pitch < w)                     { return RB_FBMODE_E_PITCH_LOW;  }
-    if (pitch > (2u * w) + 4096u)      { return RB_FBMODE_E_PITCH_HIGH; }
+    pitch = rb_fbmode_pitch_px(in->surface_pitch);
+    {
+        const uint32_t pc = rb_fbmode_pitch_check(pitch, w);
+        if (pc != RB_FBMODE_OK) { return pc; }
+    }
 
     row  = pitch * RB_FBMODE_BPP;
     aper = (uint64_t)row * (uint64_t)h;

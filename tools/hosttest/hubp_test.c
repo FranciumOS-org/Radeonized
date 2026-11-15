@@ -200,22 +200,124 @@ int hubp_tests(void)
     A(rb_hubp_dw(RB_HUBP_COUNT, RB_HUBP_REG_ADDR) == 0);
     A(rb_hubp_dw(0, RB_HUBP_REG_COUNT) == 0);
 
-    /* 4. The live pipe 2os measured is accepted, and each field on its own is
-     * load-bearing: move any one and the state gate refuses, with a code that
-     * says which. A single `return RB_HUBP_OK` would fail all three. */
+    /* 4. Gate 2's state check. THE CONTROL IS THIS BOARD, MEASURED: boot 133
+     * read HUBP0_SURFACE_PITCH 0x077f and HUBP0_SURFACE_CONFIG 0x0008, and
+     * rb_otg.h:23 records OTG0_H_BLANK_START_END 0x007f07ff on the same
+     * panel, which decodes 2047 - 127 = 1920. The new panel-relative form
+     * must accept exactly what the old equality accepted. */
+#define LIVE_HBLANK_1920  0x007f07ffu   /* rb_otg.h:23, boots 2oq/2os */
+    {
+    uint32_t w = 0;
     A(rb_hubp_check_state(RB_HUBP_EXPECT_PITCH, RB_HUBP_EXPECT_CONFIG,
-                          RB_HUBP_EXPECT_ADDR_HI) == RB_HUBP_OK);
-    A(rb_hubp_check_state(0x0780, RB_HUBP_EXPECT_CONFIG,
-                          RB_HUBP_EXPECT_ADDR_HI) == RB_HUBP_REFUSE_PITCH);
+                          RB_HUBP_EXPECT_ADDR_HI, LIVE_HBLANK_1920, &w)
+                          == RB_HUBP_OK);
+    A(w == 1920);
+
+    /* Each of the other two fields is still load-bearing on its own: move it
+     * and the gate refuses with a code that says which. A single
+     * `return RB_HUBP_OK` would fail both. */
     A(rb_hubp_check_state(RB_HUBP_EXPECT_PITCH, 0x0a,
-                          RB_HUBP_EXPECT_ADDR_HI) == RB_HUBP_REFUSE_CONFIG);
+                          RB_HUBP_EXPECT_ADDR_HI, LIVE_HBLANK_1920, 0)
+                          == RB_HUBP_REFUSE_CONFIG);
     A(rb_hubp_check_state(RB_HUBP_EXPECT_PITCH, RB_HUBP_EXPECT_CONFIG,
-                          0x000000f5) == RB_HUBP_REFUSE_STATE_HI);
-    /* The pitch register is pitch-1, so 1920 itself is the WRONG value and
-     * must be refused - the trap 2os's annotation ("1920 px" for 0x77f)
-     * sets for anyone reading the journal too quickly. */
-    A(rb_hubp_check_state(1920, RB_HUBP_EXPECT_CONFIG,
-                          RB_HUBP_EXPECT_ADDR_HI) == RB_HUBP_REFUSE_PITCH);
+                          0x000000f5, LIVE_HBLANK_1920, 0)
+                          == RB_HUBP_REFUSE_STATE_HI);
+
+    /* 4b. ISSUE #5. A 2560-wide panel must arm, and the old gate could not.
+     *
+     * THESE WORDS ARE CONSTRUCTED, NOT MEASURED. The reporter gave the panel
+     * (2560x1440) and the refusal code (h=6) but not the two register
+     * values, so these are built to the field layout rb_otg.h documents:
+     * END 127 kept from this board, START raised to 2687, giving
+     * 2687 - 127 = 2560 active; the pitch word is 2559 in the pitch-minus-one
+     * encoding. They prove the ARITHMETIC admits a 2560 panel. They are not
+     * evidence about that machine and must not be cited as any (rule 17).
+     * `RBFBHubpHBlankSE` and `RBFBHubpActiveW` exist so the real words can be
+     * read off it, and this case rewritten from them. */
+#define C_HBLANK_2560  ((127u << 16) | 2687u)   /* constructed: 2560 active */
+#define C_PITCH_2560   2559u                    /* constructed: 2560 px     */
+    A(rb_fbmode_active(C_HBLANK_2560, 0, 0) == 2560);
+    A(rb_hubp_check_state(C_PITCH_2560, RB_HUBP_EXPECT_CONFIG,
+                          RB_HUBP_EXPECT_ADDR_HI, C_HBLANK_2560, &w)
+                          == RB_HUBP_OK);
+    A(w == 2560);
+
+    /* And the defect itself, pinned so it cannot come back: the old gate was
+     * an equality against this board's own word, which no 2560 panel can
+     * satisfy. If a future edit reintroduces it, the case above fails and
+     * this line says why. */
+    A(C_PITCH_2560 != RB_HUBP_EXPECT_PITCH);
+
+    /* 4c. What the pitch term still refuses, which is the whole reason it is
+     * not simply deleted: a pitch that cannot belong to this raster. The
+     * reporter's own situation inverted - a 1920 surface under a 2560
+     * raster - is exactly a surface too narrow to be the one being fetched. */
+    A(rb_hubp_check_state(RB_HUBP_EXPECT_PITCH, RB_HUBP_EXPECT_CONFIG,
+                          RB_HUBP_EXPECT_ADDR_HI, C_HBLANK_2560, &w)
+                          == RB_HUBP_REFUSE_PITCH);
+    /* Rule 14: a refusal publishes what it refused ON. The width was
+     * derivable, so it is handed back even though the gate said no. */
+    A(w == 2560);
+    /* Absurdly wide for the raster - a word that is not a pitch at all. */
+    A(rb_hubp_check_state(0xfffeu, RB_HUBP_EXPECT_CONFIG,
+                          RB_HUBP_EXPECT_ADDR_HI, LIVE_HBLANK_1920, 0)
+                          == RB_HUBP_REFUSE_PITCH);
+    /* One pixel under the raster is the boundary, and it is refused. */
+    A(rb_hubp_check_state(1918u, RB_HUBP_EXPECT_CONFIG,
+                          RB_HUBP_EXPECT_ADDR_HI, LIVE_HBLANK_1920, 0)
+                          == RB_HUBP_REFUSE_PITCH);
+    /* Exactly the raster width passes, so the bound is at one pixel and not
+     * somewhere vaguer. */
+    A(rb_hubp_check_state(1919u, RB_HUBP_EXPECT_CONFIG,
+                          RB_HUBP_EXPECT_ADDR_HI, LIVE_HBLANK_1920, 0)
+                          == RB_HUBP_OK);
+
+    /* 4d. WHAT THIS CHANGE GIVES UP, stated rather than hidden. The old
+     * equality refused a pitch word of 1920, on the grounds that the
+     * register is pitch-minus-one so 1920 means 1921 px. The panel-relative
+     * form CANNOT refuse it: a 1921 px pitch over a 1920 raster is a
+     * one-pixel padded surface, which is a thing hardware really does, and
+     * no rule in this header can tell that from a reader who misread the
+     * encoding. It is accepted deliberately. Nothing downstream assumes
+     * otherwise - 3fb derives bytes_per_row from this same register, so a
+     * padded pitch produces a consistent stride rather than a sheared one. */
+    A(rb_hubp_check_state(1920u, RB_HUBP_EXPECT_CONFIG,
+                          RB_HUBP_EXPECT_ADDR_HI, LIVE_HBLANK_1920, 0)
+                          == RB_HUBP_OK);
+
+    /* 4e. No usable width is its own code, and it does NOT write *w_out -
+     * so a caller that publishes the width cannot publish a stale one. */
+    w = 0xdeadu;
+    A(rb_hubp_check_state(RB_HUBP_EXPECT_PITCH, RB_HUBP_EXPECT_CONFIG,
+                          RB_HUBP_EXPECT_ADDR_HI, 0u, &w)
+                          == RB_HUBP_REFUSE_NO_WIDTH);
+    A(w == 0xdeadu);
+    /* START below END is not a raster; so is a width under or over the
+     * bounds rb_fbmode.h sets. Each lands on NO_WIDTH, never on PITCH. */
+    A(rb_hubp_check_state(RB_HUBP_EXPECT_PITCH, RB_HUBP_EXPECT_CONFIG,
+                          RB_HUBP_EXPECT_ADDR_HI, (2047u << 16) | 127u, 0)
+                          == RB_HUBP_REFUSE_NO_WIDTH);
+    A(rb_hubp_check_state(RB_HUBP_EXPECT_PITCH, RB_HUBP_EXPECT_CONFIG,
+                          RB_HUBP_EXPECT_ADDR_HI, (0u << 16) | 639u, 0)
+                          == RB_HUBP_REFUSE_NO_WIDTH);
+    A(rb_hubp_check_state(RB_HUBP_EXPECT_PITCH, RB_HUBP_EXPECT_CONFIG,
+                          RB_HUBP_EXPECT_ADDR_HI, (0u << 16) | 7681u, 0)
+                          == RB_HUBP_REFUSE_NO_WIDTH);
+    /* The two bounds themselves are inclusive, so NO_WIDTH is about a word
+     * that is not a raster and not about rejecting a real small panel. */
+    A(rb_hubp_check_state(639u, RB_HUBP_EXPECT_CONFIG,
+                          RB_HUBP_EXPECT_ADDR_HI, (0u << 16) | 640u, 0)
+                          == RB_HUBP_OK);
+
+    /* 4f. The codes are pairwise distinct, so `h=` in the crumb identifies
+     * one gate. NO_WIDTH was APPENDED: every value already published keeps
+     * its meaning, which is what makes issue #5's `h=6` readable at all. */
+    A(RB_HUBP_REFUSE_PITCH == 6);
+    A(RB_HUBP_REFUSE_NO_WIDTH == 10);
+    A(RB_HUBP_REFUSE_PITCH != RB_HUBP_REFUSE_NO_WIDTH);
+    A(RB_HUBP_REFUSE_CONFIG != RB_HUBP_REFUSE_NO_WIDTH);
+    A(RB_HUBP_REFUSE_STATE_HI != RB_HUBP_REFUSE_NO_WIDTH);
+    }
 
     /* 5. Boot 194's measured surface address is accepted, with one frame. */
     const uint64_t frame = 1920ULL * 1080ULL * 4ULL;   /* 0x7e9000 */

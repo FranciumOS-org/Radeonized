@@ -470,6 +470,10 @@ public:
     uint64_t hubpTripleWrites=0, hubpTripleRefused=0;
     bool hubpTripleApply(bool enable);
     uint32_t hubpPitch=0;
+    /* 3fc: mirrored as zeros so the VBL publish compiles here. Deliberately
+     * not plausible geometry - this shim measures nothing. */
+    uint32_t hubpHBlankSE=0;
+    uint32_t hubpActiveW=0;
     /* 3fb (issue #4): the shim mirrors the real class's geometry members so
      * the VBL publish compiles here too. The VALUES are not exercised by this
      * test - the derivation itself is covered by fbmode_test.c against this
