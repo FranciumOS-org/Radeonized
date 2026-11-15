@@ -71752,3 +71752,184 @@ DCHUBBUB claim — the one piece of evidence that it ever got close — does not
 reproduce (3ret-j).
 
 Plugin **1D161B39**, boot 584 still up.
+
+## 3dmc — no boots: the DMCUB image is a SUBSET, Apple's stack never had a DP-alt PHY path, and the version is a misread twice over
+
+Written with no hardware and no network. GitHub is unreachable on every path tried
+from this connection — HTTPS to `140.82.114.3:443` and `140.82.113.4:443`,
+`ssh.github.com:443`, `github.com:22`, `codeload.github.com:443` and
+`api.github.com:443` — while a control to `1.1.1.1:443` succeeds, so IPv4 egress
+works and GitHub specifically is blocked. An earlier NAT64 theory of mine was
+wrong and the control is what refuted it: `ping6` fails to both the synthesized
+prefix and `2606:4700:4700::1111`, so IPv6 is not routable here at all and there
+was never a NAT64 path to synthesize onto. That blocks the 660m-Metal read this
+milestone was supposed to be, and it blocks pushing six commits. Everything below
+came off this disk instead.
+
+### Apple's DAL tops out at DCN 3.0.2 and contains no DP-alt material whatsoever
+
+`strings -a build/re/AMDRadeonX6000Framebuffer` yields **117 distinct
+`trunk/ampc/SunburstE/dal/...` source paths** — Apple's own build paths, left in
+the binary by the assertion macros. That is a complete inventory of the DAL
+Apple vendored, and it is worth recording in full shape because three milestones
+of this line have reasoned about what Apple's display driver can and cannot do:
+
+- Hardware families present: `dce80`, `dce100`, `dce110`, `dce112`, `dce120`,
+  `dcn10`, `dcn20`, `dcn21`, `dcn30`, `dcn302`. **It stops at
+  `dc/dcn302/dcn302_resource.c`.**
+- **There is no `dcn31` anything.** No `dcn31_resource.c`, no
+  `dcn31_dio_link_encoder.c`.
+- **There is no DPCS file of any kind** — no `dcn31_dio_link_encoder.c`, nothing
+  naming `dpcs`, and so none of
+  `dpcs_initialize_phy` / `configure_phypll` / `enable_dpcs` / `set_phy_source`.
+- **There is no DPIA file** (`dc_link_dp_dpia.c` absent), consistent with 306
+  killing that branch on source grounds.
+- `dmub/src/dmub_srv.c` and `falcon_dm/.../AmdDalDmcubService.cpp` **are**
+  present, so Apple does drive a DMCUB.
+
+This settles by inventory what 307 could only infer. Apple's display driver is a
+Navi 2x discrete-GPU driver, and a discrete GPU has no USB-C DP alternate mode,
+so **no part of the macOS graphics stack has ever contained code that brings up a
+DP-alt PHY.** Routing, hooking or borrowing Apple's code for the external display
+is not a route that was hard — it is a route whose target does not exist. Every
+remaining mechanism is on the firmware's side of the mailbox, which is where
+309b, 310 and 310d had already arrived from the other direction.
+
+### Neither the ROM nor Apple's kext carries a DMUB firmware image
+
+Linux's `dmub_fw_meta_info` opens with `magic_value` = `DMUB_FW_META_MAGIC`
+`0x444D5542`, stored little-endian, so an image on disk contains the bytes
+`"BUMD"` near its end. A scanner for that pattern, both byte orders, plus the
+packed forms of a `4.0.15.47`-shaped version word, was run over
+`firmware/680m-vbios.rom`, `firmware/VFCT.aml` and the extracted
+`build/re/AMDRadeonX6000Framebuffer`, **with a positive control in the same run**
+(a temporary file built to contain the magic, which the scanner found at the
+offset it was placed — rule 26, since a scanner that finds nothing proves nothing
+until it has found something known-present).
+
+- **The ROM: no hit.** It is also eliminated independently by size: 44 544 bytes
+  total, against a DMUB image of order 100 KB. 308b had already shown the ROM's
+  master command table has `dig1transmittercontrol` = `0x0000`; it does not hold
+  the firmware either.
+- **`VFCT.aml`: no hit**, as expected, being the same image plus a header.
+- **Apple's kext: six hits, five of them strings.** The five are the ASCII text
+  `"DMUB"` inside log and assertion literals — `"Error queuing DMUB command:
+  status=%d"`, `"Error starting DMUB execution: status=%d"`, `"Error waiting for
+  DMUB idle: status=%d"`, `"No reply for DMUB command: status=%d"` and
+  `status == DMUB_STATUS_OK`. The sixth, the only little-endian one, is at
+  `0xd6fe7`, is not four-byte aligned, and its context is
+  `81 7e c0 42 55 4d 44` — `cmpl $0x444D5542, -0x40(%rsi)`. That is Apple's
+  **verifier** for the magic, i.e. code that *reads* an image, not an image.
+
+So there is no DMUB image anywhere in the operating system or in this board's
+ROM. **The DMCUB that is running was loaded by the system firmware before macOS,
+and nothing in the OS replaces it.** On Linux, `amdgpu` loads
+`yellow_carp_dmcub.bin` from `linux-firmware` at driver init and programs CW0/CW1
+itself, replacing exactly this pre-OS image. We do not have that file:
+`firmware/linux/` holds `yellow_carp_{ce,rlc,mec,mec2,pfp,me,toc}.bin` and **no
+`_dmcub.bin`**.
+
+### The firmware is alive and implements a SUBSET of the command set
+
+This is the finding, and every reading in it was already in the tree. It is the
+recurring error's "read the evidence already in hand" form again, across four
+boots that were never put side by side.
+
+**The microcontroller is alive and answers.** Boot 276, reproduced on boot 433:
+`dmubbl gpint` wrote `0x10010000` to `DMCUB_GPINT_DATAIN1` and read back
+`0x00010000` — the firmware cleared the status nibble we set — `acked 1`, with
+`DMCUB_SCRATCH7` moving `0x00000001 -> 0x04001547`. There is no memory, no
+window, no `mc2pa` and no ring anywhere in that path, and the positive control
+came out of a different register than the answer. So none of "the DMCUB is
+wedged", "it reads a base we have never looked at" or "RPTR advances for another
+reason" survives as a general explanation.
+
+Against that, three commands that can each give evidence of their own execution:
+
+| command | family | boot | result |
+|---|---|---|---|
+| `GET_FW_VERSION` | GPINT 1 | 276, 433 | **answers** — status nibble cleared, SCRATCH7 moves |
+| `..._QUERY_DP_ALT` = 26 | VBIOS (128) | 449, 470, 471, 485 | **answers** — `is_usb` mask `0x1c`, ROM match against 2E1 |
+| `QUERY_FEATURE_CAPS` = 6 | top-level | 275 | **ignored** — slot still `06 00 01 0e`, `ret_status` STILL SET |
+| `..._SET_PHY_FSM` = 29 | VBIOS (128) | 485 | **ignored** — reply slot bit-for-bit as we left it, four sends |
+
+The two ignored commands are the two whose contract is that *the firmware writes
+back*: `dc_dmub_srv_query_caps_cmd` sets `ret_status = 1` before sending and
+accepts the reply only if the firmware has cleared it, and `SET_PHY_FSM`'s
+payload is declared "passed in/out" with a `uint32_t status`. Both were left
+exactly as we wrote them, in boots where the ring demonstrably drained and a
+sibling command on the same ring in the same boot replied correctly.
+
+**So this image implements a subset of the DMUB command set, and the subset
+excludes both commands that would report execution.** That is a materially
+different conclusion from 310d's "DMCUB 4.0.15.47 does not act on sub-type 29",
+because sub-type 29 is no longer a lone anomaly — it is the second member of a
+pattern whose first member has been sitting in `src/common/rb_dmub.h` since 2zs,
+written up with its own three-way hypothesis and never revisited after GPINT
+killed two of the three branches. A pre-OS display image has one job, lighting
+the internal panel, and has no reason to carry the driver-facing query and FSM
+commands. That is consistent with every reading above and is **not** yet
+established: nothing here distinguishes "not implemented" from "implemented and
+rejects these arguments without setting status", and the two remain the pair
+310d could not separate either.
+
+### The DMCUB version is a misread, twice, in opposite directions
+
+The measured quantity is one word: `DMCUB_SCRATCH7` = **`0x04001547`**,
+reproduced on boots 276 and 433. Everything dotted is a rendering convention
+applied to it, and the tree contains two incompatible ones plus a third reading
+of a different register:
+
+- **`4.0.15.47`** is each byte printed as **hex digits** (`04 00 15 47`). This is
+  what `CLAUDE.md` carries as a chip fact, in five places, and what
+  `tools/dmubbl.m`'s own explanatory text tells the reader to check against.
+- **`4.0.21.71`** is each byte printed as **decimal** (4, 0, 21, 71). This is
+  what `tools/dmubbl.m:211` actually prints, via
+  `(s7 >> 24) & 0xff, (s7 >> 16) & 0xff, (s7 >> 8) & 0xff, s7 & 0xff`. So the
+  tool's numbers and the tool's prose disagree with each other.
+- Boot 276 noticed this, called the decimal form a misread of its own tool, and
+  kept the hex form because it "agreed with an independent reading" from a level-2
+  probe of `SCRATCH0`. **Boot 433 then reinstated the decimal form** — "the
+  authoritative instrument is the one that asks, and it says 4.0.21.71" — off the
+  same register holding the same value, while recording that `SCRATCH0` read
+  `0x00000002` that boot, "which is not a version at all".
+
+**Both are unfounded, and the decisive evidence is on this disk.** Apple's
+`AMDRadeonX6000Framebuffer` — the same vendored DAL, with `dmub_srv.c` in it —
+prints this field as `dmcub_version      : %08x`. Opaque hex, no split into
+components. No header in the tree attests a field layout for the word
+(`docs/linux-ref/` is network-fetched and absent), and the only four-component
+split anyone has offered is ours.
+
+So the honest chip fact is **the word `0x04001547`**, and the dotted forms should
+not be used until a header attests the layout. The hex-digit reading has the
+better claim of the two, because a BCD-style build stamp is why `0x1547` would
+avoid the digits `a`-`f` at all, but that is an argument, not a source.
+
+Nothing downstream depended on it, which is the one piece of luck: 2BE's
+`has_query_dp_alt()` reasoning excludes only versions 4.0.0 to 4.0.10 and both
+candidate readings sit above that, and in any case `QUERY_DP_ALT` is now measured
+working on four boots, so the gate's conclusion is confirmed by measurement
+rather than resting on the version at all.
+
+### What this leaves, and what it costs
+
+The external-display blocker is unchanged in substance — PHY2 held in reset, the
+atom ENABLE not releasing it, no driver-side bringup anywhere — but the shape of
+the remaining work is now sharp. Apple's stack is eliminated by inventory. Our
+side of the mailbox is eliminated by 308, 309, 309b and 310d. The firmware is
+alive, answers two commands and ignores the two that report execution. **The one
+mechanism Linux actually uses on this chip is the one thing never tried here:
+replace the DMCUB image.** That means `yellow_carp_dmcub.bin`, a DMCUB soft
+reset, CW0/CW1 programming and an auto-load handshake, performed under a live
+firmware-lit panel whose backlight we already drive ourselves from registers.
+
+It is a large, genuinely risky change, and it is **blocked on the network**, not
+on the hardware: the image is not in the tree and `linux-firmware` is
+unreachable. It should not be started until that file is in hand, and its first
+step is not a boot but a read — whether a DMCUB reset drops the panel OTG0 is
+currently driving, which decides whether the rescue is the sentinel hold (one
+boot, proven on boots 582, 583 and 584) or something stronger.
+
+Cost of this milestone: no boots, no reboots, no hardware. Four readings that
+were already paid for, put next to each other for the first time.

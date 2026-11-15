@@ -220,10 +220,24 @@ static inline int rb_dmub_bl_type_ok(long t)
  * And there is a POSITIVE CONTROL, from a different register than the answer
  * (rule 26: an instrument needs a known-present case). DMUB_GPINT__GET_FW_
  * VERSION = 1 returns the firmware version in DMCUB_SCRATCH7, and this
- * project read **4.0.15.47 running, 4.0.21.71 on ROM** off DMCUB_SCRATCH0 in
- * a level-2 probe long before any of this - 0x01e3 against 0x01ea, two
- * different registers. So the answer can be checked against something that
- * was not measured by the instrument producing it.
+ * project read a version off DMCUB_SCRATCH0 in a level-2 probe long before any
+ * of this - 0x01e3 against 0x01ea, two different registers. So the answer can
+ * be checked against something that was not measured by the instrument
+ * producing it.
+ *
+ * 3dmc WITHDRAWS THE DOTTED VERSIONS THIS COMMENT USED TO CARRY. It said
+ * "4.0.15.47 running, 4.0.21.71 on ROM". Those are not two readings: they are
+ * the SAME measured word, DMCUB_SCRATCH7 = 0x04001547 (boots 276 and 433),
+ * rendered two ways - bytes as hex digits, and bytes as decimal. dmubbl.m:211
+ * prints the decimal one while the prose beside it tells the reader to check the
+ * hex one, boot 276 called the decimal form a misread of its own tool, and boot
+ * 433 then reinstated it as authoritative off the same register holding the same
+ * value. The decisive source is on this disk and is neither: Apple's own
+ * vendored DAL, inside AMDRadeonX6000Framebuffer, prints this field as
+ * `dmcub_version      : %08x` with no split into components, and no header in
+ * this tree attests a field layout for the word. **Use 0x04001547.** The
+ * positive-control ARGUMENT above is untouched - it rests on SCRATCH7 and
+ * SCRATCH0 being different registers, not on how either is printed.
  *
  * union dmub_gpint_data_register: param:16, command_code:12, status:4.
  * Registers from dcn_3_1_2_offset.h, all base_idx 2 (DMU segment 2, 0x34c0).

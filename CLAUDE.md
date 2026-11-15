@@ -436,7 +436,14 @@ documented in files already in the tree).
   clock ~342 011 761 Hz (derived; the DP PLL has never been located).
   `V_BLANK_START_END` 1311820 (start 1100, end 20) is why V_TOTAL can change
   without touching the active raster. OTG0 runs (`OTG0_CONTROL 0x00011201`),
-  OTG1-3 at 0x300 = off, DMCUB **4.0.15.47**. Measure refresh by latching both
+  OTG1-3 at 0x300 = off, **DMCUB version word `0x04001547`** (`SCRATCH7`, boots
+  276/433). **THE DOTTED FORMS ARE BOTH UNFOUNDED (3dmc)**: `4.0.15.47` is that
+  word's bytes as hex digits, `4.0.21.71` is them as decimal and is what
+  `dmubbl.m:211` actually prints, boot 276 retired the decimal form and boot 433
+  reinstated it, and **Apple's own DAL prints this field `%08x`** with no split.
+  No header in the tree attests a layout, so use the word. Nothing depended on
+  it: `QUERY_DP_ALT` is measured working on four boots. Measure refresh by
+  latching both
   endpoints on an `OTG0_FRAME_COUNT` edge, never over a fixed window.
 - A Transfer TRB's dword 2 is
   `length[16:0] | TD-size[21:17] | interrupter[31:22]` — the USB fix's basis.
@@ -582,7 +589,7 @@ against the panel and refuses **-2** when the subject *is* the control.
 **308b: THE ROM IS ELIMINATED.** `firmware/680m-vbios.rom`'s master command
 table (`0xa480`, rev 2.1, 81 entries) has slot 39 `dig1transmittercontrol` =
 **`0x0000`**, with every display-encoder entry 0 — so the firmware servicing
-our command is **DMCUB's image** (4.0.15.47, CW0/CW1), not the ROM. `dmubbl`
+our command is **DMCUB's image** (`0x04001547`, CW0/CW1), not the ROM. `dmubbl`
 had printed this since 2E2 and a handoff of mine said to read the ROM anyway.
 **And no sibling project has the answer:** **nullarc** (780M, Phoenix, DCN
 3.1.4 — the nearest chip to ours, MIT/GPL-2.0 + PolyForm-NC) lists external
@@ -695,7 +702,7 @@ bytes, untouched`**, so DMCUB wrote nothing into the **whole 64-byte slot**.
 (`Rptr == Wptr == 2432`, 1 ack — DMCUB consumed it), and `dmubbl dpaltq`
 returned `is_usb` mask `0x1c` with `alt_disable` 0 on PHY2 alone, **ROM MATCH**
 against 2E1 — so a sibling command on the same ring in the same boot **does**
-reply, and the reply is the chip's. **DMCUB 4.0.15.47 does not act on
+reply, and the reply is the chip's. **THIS DMCUB DOES NOT ACT ON
 sub-type 29.** Not separated: unimplemented vs implemented-and-rejects-phyid-2
 with no status either way; both are "does not act on it". `phylook` after all
 four: PHY2 **byte-identical to where 307 found it** and still to dark PHY3.
@@ -1127,18 +1134,51 @@ VBIOS table is the only mechanism, our payload is verified field by field, and
 answer.** Four sends, states 2 / 3 / 10 / 2, `refusal 0` each: the reply slot
 came back **bit-for-bit as we left it**, PHY2 moved **nothing**, all four
 controls held still — while the ring **drained** and `QUERY_DP_ALT` on the
-same ring in the same boot returned a **ROM MATCH**. So **DMCUB 4.0.15.47
+same ring in the same boot returned a **ROM MATCH**. So **THIS DMCUB
 does not act on sub-type 29**, and the execution evidence this line needed has
 now been asked for with the one command that could give it. **Every candidate
 on our side of the mailbox is dead**: 308's SRAM handshake, 309's ownership
 registers, 309b's survey as a method (nine registers cannot tell PHY2 from
 PHY3 while `QUERY_DP_ALT` can), and now the FSM command itself. The CR window
 is **not a read** (310) and is deprioritised. **What is left is not a register
-and not a command we can name**: DMCUB's own image (4.0.15.47, CW0/CW1 — it
+and not a command we can name**: DMCUB's own image (`0x04001547`, CW0/CW1 — it
 services both the command that replies and the one that does not, and it is
 the only party that has ever moved this PHY), or evidence from a machine where
 this PHY *has* been brought up. Both are a different kind of work from
 anything 300-310 did, and neither has a boot spent on it.
+
+**3dmc NARROWED IT TO ONE MECHANISM, WITH NO BOOTS.** Two things off this disk.
+**(1) Apple's stack is eliminated by INVENTORY, not reasoning.** Apple's
+assertion macros leave its build paths in the binary: **117 distinct
+`trunk/ampc/SunburstE/dal/...` sources**, and the family list **stops at
+`dcn302_resource.c`** — no `dcn31` anything, **no DPCS file of any kind**, no
+DPIA. Navi 2x is discrete and a discrete GPU has no DP alt mode, so **no part of
+the macOS graphics stack has ever contained DP-alt PHY bringup**. Routing
+Apple's code was never a hard route; its target does not exist.
+**(2) THIS DMCUB IMPLEMENTS A SUBSET, and the subset excludes both commands that
+report execution.** The firmware is **alive** (GPINT `GET_FW_VERSION`: status
+nibble cleared, SCRATCH7 moves, no memory/window/`mc2pa` in the path — boots 276
+and 433). It **answers** VBIOS sub-type 26 `QUERY_DP_ALT` (ROM match, boots 449,
+470, 471, 485). It **ignores** top-level type 6 `QUERY_FEATURE_CAPS` (boot 275,
+slot still `06 00 01 0e`, `ret_status` STILL SET) and VBIOS sub-type 29
+`SET_PHY_FSM` (boot 485, reply slot bit-for-bit as we left it). So 310d's
+sub-type 29 is **not a lone anomaly** — it is the second member of a pattern
+whose first member sat in `rb_dmub.h` since 2zs with its own three-way
+hypothesis, never revisited after GPINT killed two branches. Not separated:
+unimplemented vs implemented-and-rejects-without-status.
+**And there is NO DMUB IMAGE IN THE OS OR THE ROM** — scanner for
+`DMUB_FW_META_MAGIC` with a positive control in the same run: no hit in
+`680m-vbios.rom` (also dead by size, 44 544 B against ~100 KB) or `VFCT.aml`,
+and Apple's kext's only non-string hit is a `cmpl $0x444D5542, -0x40(%rsi)`
+**verifier**. The running image is the **pre-OS firmware's**, and nothing in
+macOS replaces it — which is exactly what `amdgpu` does do, loading
+`yellow_carp_dmcub.bin` and programming CW0/CW1 itself.
+**So the one mechanism Linux actually uses is the one thing never tried here:
+REPLACE THE DMCUB IMAGE.** `firmware/linux/` has ce/rlc/mec/mec2/pfp/me/toc and
+**no `_dmcub.bin`**, so this is **blocked on the network, not the hardware**. Do
+not start it until that file is in hand, and the first step is a **read** —
+whether a DMCUB reset drops the panel OTG0 is driving — which decides whether
+the sentinel hold (one boot, proven on 582/583/584) is a sufficient rescue.
 The things never attempted are a stream on a **trained** DIG2 link, a
 **surface** on pipe 1 and a second `IOFramebuffer`. 2F8 added a cost: `tps=3`
 **degrades the sink until a reboot**, which is what 2F7 spent a milestone
