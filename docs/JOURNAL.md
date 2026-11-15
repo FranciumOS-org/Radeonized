@@ -71100,3 +71100,120 @@ comment so the next reader cannot repeat it.
   speak to it: with zero writes, nothing was there to spin on.
 
 Plugin **89685357**, loaded. Hosttest: 0 FAIL, 0 `error:`.
+
+---
+
+## 3ret-e — the rescue plan for the Wrangler promotion, before the boot that needs it
+
+**2026-11-15.** Boot 581 established that the units question cannot be
+answered without `-rbgpudalfbreal`: the controller's `start()` makes zero
+register writes, so the policy is never offered anything to classify. That
+configuration panicked in 2pk, hung in 2pl and 2po, and is the leading
+candidate for the two crawling boots earlier the same night. The user chose to
+arm it **with a rescue plan first**, so the rescue was built before the boot.
+
+### The hole in the sentinel: a boot that fails SLOWLY
+
+The sentinel's contract is "a boot that does not survive 60 s makes the next
+one stock", and 3rgr tightened the clear to "still alive 15 s after the
+accelerator attached" after two cold boots wedged a fraction of a second past
+the old attach-time clear. Both are **survival signals with a deadline**, and
+both have the same hole: the failure mode measured on 2026-11-15 was neither a
+panic nor a hang. The progress bar crawled, for minutes, twice. A crawl
+outlives either deadline, so the latch is cleared while the boot is still
+dying, the next boot comes up armed, and it crawls again. **That is a loop the
+sentinel cannot break**, and it is exactly what the user hit.
+
+3rgr's own lesson is why this cannot be fixed by moving the deadline again: we
+cannot define "survived" from inside the boot. So a dangerous boot should not
+try.
+
+### The hold
+
+`rbgpu_sentinel_hold(const char *why)`. An experiment whose failure mode is a
+crawl holds the latch: **no clear fires that boot at all**, whatever happens,
+and the next boot comes up stock unconditionally. Both clear callers — 3rgr's
+attach grace and the 60 s backstop — funnel through
+`rbgpu_sentinel_clear_now()`, so one gate at its top covers both, verified by
+call graph rather than by reasoning.
+
+The hold **writes the latch itself** rather than only blocking clears, and the
+reason is a path that runs before it: `rbgpu_sentinel_begin()` clears
+`rbgpu-safe` outright if `thread_call_allocate` failed, on the sound argument
+that a latch nothing will ever clear makes every following boot stock. That
+runs at the top of the peer's `start()`; the hold runs ~190 lines later in the
+same function. Blocking clears alone would have left a promoted boot with **no
+latch at all and nothing to block**. Rule 43's question — who else writes this,
+and when — asked of our own key, in the same function where it caught 3ret-c's
+inert gate a few hours earlier.
+
+The write is **verified by read-back** and published as two distinct codes:
+`sentinel_hold 1` is a confirmed latch, `sentinel_hold 2` means clears are
+blocked but the latch could not be written, which is a weaker guarantee and
+must not read the same (rule 20 — publish the enabling field, not the attempt).
+Every refusal to clear publishes `sentinel_held` with the caller's id, because a
+held latch and a failed clear leave the same key value (rule 14).
+
+Cost: one command from a working desktop, `sudo nvram rbgpu-safe=0`. Cost of
+forgetting it: one stock boot, which is safe rather than broken.
+
+### The arm: the arg AND a one-shot key
+
+`docs/RULES.md` rule 9 has said this all along and it had not been applied
+here: **the feature needs the arg and the key, so without the arg a stuck key
+is inert.** Both halves now earn their place.
+
+- The **arg** `-rbgpudalfbreal` lives in OpenCore's `config.plist`, is durable,
+  and is removed with `tools/efi.sh bootarg remove`. It is what makes a key
+  that failed to consume harmless.
+- The **key** `rbgpu-dalfb=1` is a one-shot, consumed before the risky publish.
+  It is what makes a dead boot cost **one** boot: whatever happens, the key
+  reads 0 next time, independently of the latch.
+
+Published on every path: `dalfb_asked`, `dalfb_oneshot_why` and `dalfb_armed`,
+so "the arg was absent", "the key was absent", "the key was already consumed",
+"the key would not clear so we refused" and "it ran" are five distinct
+readings, not one bool.
+
+### The one-shot itself was broken, and it had been since 2sq
+
+`rbgpu_nvram_consume_oneshot()` consumed by **removal**, and 2sq measured that
+exact sequence surviving a reboot: `IODTNVRAMVariables::removeProperty`
+tail-jumps to `removePropertyWithGUIDAndName`, which calls **no sync at all**,
+so the read-back proved the in-memory registry and nothing about flash — and
+it reported `why = 0` on a key that was still armed. Six boots re-armed the
+framebuffer takeover that way and boot 196 had to be disarmed from Windows.
+
+2wj fixed it **in the framebuffer kext** by writing a literal `"0"`, because
+`setProperty` reaches `setPropertyWithGUIDAndName`, which does call
+`IODTNVRAM::syncInternal` — the single referrer of
+`IONVRAM-FORCESYNCNOW-PROPERTY` in the kernel. **The peer's copy was never
+fixed.** So `rbgpu-mcreg`, whose documented failure mode is a *hang*, has had
+an unreliable one-shot ever since. Rule 6: when a fix moves upstream, remove
+the downstream version in the same change — this is the same defect left
+sitting in a second copy, found only because something new needed to depend on
+it. It now consumes by overwrite, with the read-back checking for `"0"` rather
+than for absence.
+
+`"0"` is also exactly what `rbgpu_nvram_armed()` reads as a durable disarm, so
+a consumed key and a deliberate disarm are the same state and re-arming is
+`nvram <var>=1` either way (2xw's semantics, unchanged).
+
+### What is NOT established
+
+- **None of this has hosttest coverage.** The guards are kext-side NVRAM and
+  IOKit work with no `src/common` logic to drive from the host, so rule 48's
+  break-it sweep was not run on them and no claim of coverage is made. What was
+  verified is structural: both clear callers funnel through `clear_now`, the
+  arm is a conjunction of arg and one-shot, the overwrite replaces the removal,
+  and the hold is set in `start()` while the earliest clear fires at +60 s.
+- **Whether the hold is honoured on hardware is unmeasured**, and measuring it
+  directly means a boot that dies on purpose. It will be read as a side effect
+  of the promoted boot instead: `sentinel_hold` must be 1, and `nvram
+  rbgpu-safe` must read 1 from the desktop afterwards.
+- **Whether the promotion crawls again is the open question**, and the remap is
+  the candidate answer: writes that would have spun in `REG_WAIT` on dcn302
+  offsets now redirect to the dcn312 ones. That is a candidate, not a
+  prediction — 3dcn-d's crawl had two mechanisms and only one was found.
+
+Plugin **8A507195**, not yet installed.

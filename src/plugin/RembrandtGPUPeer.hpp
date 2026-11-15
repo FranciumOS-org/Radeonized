@@ -50,6 +50,12 @@ bool rbgpu_sentinel_begin(void);
 // It reads no NVRAM and clears nothing. The GATE is rbgpu_stock(), which the
 // sentinel already drives on a latched boot - see the comment on the body.
 int rbgpu_safe_latch_seen(void);
+// 3ret-e: hold the sentinel latch for the whole of a dangerous experiment, so
+// NO clear fires this boot and the next one comes up stock unconditionally.
+// Closes the hole the 60 s backstop and 3rgr's 15 s attach grace both have: a
+// boot that fails by CRAWLING outlives either deadline. Released by hand from
+// a working desktop with `sudo nvram rbgpu-safe=0`.
+void rbgpu_sentinel_hold(const char *why);
 
 bool rbgpu_nvram_consume_oneshot(const char *var, uint32_t *why);
 // 2ey: an independent 250 ms NVRAM heartbeat (`nvram rbgpu-beat`), so the

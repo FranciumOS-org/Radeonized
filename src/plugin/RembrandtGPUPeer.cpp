@@ -889,11 +889,60 @@ bool RembrandtGPUPeer::start(IOService *provider) {
     // 2pk: the PROMOTED Wrangler, which takes IOFramebuffer for real. Its
     // start() hook declines after letting DAL run, so IONDRVFramebuffer keeps
     // the panel - see the comment on hooked_wr_start_2pk.
-    if (!dalStock && checkKernelArgument("-rbgpudalfbreal")) {
-        pciDevice->setProperty("LoadDisplayWranglerFB", kOSBooleanTrue);
-        rbgpu_log("2pk: published LoadDisplayWranglerFB - Apple's framebuffer "
-                  "will contest IOFramebuffer, run DAL with every write "
-                  "dropped, then decline so the panel stays on IONDRV");
+    /* 3ret-e: THE WRANGLER PROMOTION NEEDS THE ARG **AND** A ONE-SHOT KEY.
+     *
+     * This is the configuration that panicked in 2pk, hung in 2pl and 2po, and
+     * is the leading candidate for the two crawling boots of 2026-11-15. It is
+     * also the ONLY configuration that offers register writes to the remap
+     * policy - boot 581 measured the controller's start() making zero writes,
+     * reproducing boot 140 - so the units question 3dcn-b depends on cannot be
+     * answered without it. Those two facts together are why it gets the
+     * strongest arm in the tree rather than being left out.
+     *
+     * `docs/RULES.md` rule 9, stated there and not applied here until now:
+     * **the feature needs the arg AND the key, so without the arg a stuck key
+     * is inert.** Both halves earn their place:
+     *
+     *   - the ARG (`-rbgpudalfbreal`) lives in OpenCore's config.plist, is
+     *     durable, and is removed with `tools/efi.sh bootarg remove`. It is
+     *     what makes a key that failed to consume harmless.
+     *   - the KEY (`rbgpu-dalfb=1`) is a one-shot, consumed by overwrite
+     *     before the risky publish. It is what makes a dead boot cost ONE
+     *     boot: whatever happens to this one, the key reads 0 next time.
+     *
+     * And the latch is HELD, which closes the hole neither half covers: a
+     * crawl that outlives the 60 s backstop and 3rgr's 15 s attach grace would
+     * otherwise clear the latch while the boot was still dying. With the hold,
+     * the next boot is stock unconditionally.
+     *
+     * Published on every path (rule 14): `dalfb_asked`, `dalfb_oneshot_why`
+     * and `dalfb_armed` say which of the two halves was missing, because "the
+     * arg was absent", "the key was absent", "the key would not clear so we
+     * refused" and "it ran" must not read the same. */
+    const bool dalfbArg = checkKernelArgument("-rbgpudalfbreal");
+    rbgpu_diag_set_num("dalfb_asked", dalfbArg ? 1 : 0);
+    if (!dalStock && dalfbArg) {
+        uint32_t osWhy = 0;
+        const bool oneshot = rbgpu_nvram_consume_oneshot("rbgpu-dalfb", &osWhy);
+        rbgpu_diag_set_num("dalfb_oneshot_why", osWhy);
+        rbgpu_diag_set_num("dalfb_armed", oneshot ? 1 : 0);
+        if (oneshot) {
+            rbgpu_sentinel_hold("the DAL Wrangler promotion (-rbgpudalfbreal "
+                                "plus rbgpu-dalfb)");
+            pciDevice->setProperty("LoadDisplayWranglerFB", kOSBooleanTrue);
+            rbgpu_log("2pk/3ret-e: published LoadDisplayWranglerFB - Apple's "
+                      "framebuffer will contest IOFramebuffer and run DAL with "
+                      "the dcn302->dcn312 remap in force. The one-shot is "
+                      "consumed, so the next boot does NOT do this again, and "
+                      "the sentinel latch is held, so the next boot is stock.");
+        } else {
+            rbgpu_log("3ret-e: -rbgpudalfbreal is set but the one-shot DECLINED "
+                      "(why %u: 1 /options unreachable, 2 rbgpu-dalfb absent, "
+                      "3 rbgpu-dalfb=0 already consumed or disarmed, 4 it "
+                      "would not clear so running it would arm the next boot "
+                      "too). NOT promoting the Wrangler. Arm it with "
+                      "`sudo nvram rbgpu-dalfb=1` and reboot.", osWhy);
+        }
     }
     if (!dalStock && checkKernelArgument("-rbgpudalfb")) {
         pciDevice->setProperty("LoadDisplayWrangler", kOSBooleanTrue);
@@ -2887,9 +2936,103 @@ static void rbgpu_sentinel_clear(thread_call_param_t, thread_call_param_t) {
     rbgpu_sentinel_clear_now("the 60000 ms timer expired", 1);
 }
 
+/* 3ret-e: THE LATCH IS HELD FOR THE WHOLE OF A DANGEROUS EXPERIMENT.
+ *
+ * The sentinel's contract is "a boot that does not survive 60 s makes the next
+ * one stock", and 3rgr tightened the clear to "still alive 15 s after the
+ * accelerator attached". Both are SURVIVAL signals with a deadline, and both
+ * have the same hole for an experiment that fails SLOWLY: boot 581's two
+ * predecessors did not panic and did not hang - the progress bar crawled, for
+ * minutes. A crawl outlives either deadline, so the latch is cleared while the
+ * boot is still dying, the next boot comes up armed, and it crawls again. That
+ * is a loop the sentinel cannot break, and it is what the user hit twice.
+ *
+ * So an experiment whose failure mode is a crawl HOLDS the latch: no clear
+ * fires this boot at all, whatever happens, and the next boot comes up stock
+ * unconditionally. The cost is one command from a working desktop -
+ * `sudo nvram rbgpu-safe=0` - and the cost of forgetting it is one stock boot,
+ * which is safe rather than broken. That is the right way round: 3rgr's lesson
+ * was that we cannot define "survived" from inside the boot, so a dangerous
+ * boot should not try.
+ *
+ * The hold is published (`sentinel_hold`), and so is every refusal to clear
+ * (`sentinel_held`), because a held latch and a failed clear leave the same
+ * key value and must not read the same (rule 14). */
+static int         g_rbSentinelHold    = 0;
+static const char *g_rbSentinelHoldWhy = nullptr;
+
+void rbgpu_sentinel_hold(const char *why) {
+    if (g_rbSentinelHold) {
+        return;
+    }
+    g_rbSentinelHold    = 1;
+    g_rbSentinelHoldWhy = why ? why : "an unnamed experiment";
+
+    /* The hold does not merely BLOCK clears, it writes the latch itself, and
+     * the reason is a path that runs before it: `rbgpu_sentinel_begin()`
+     * clears `rbgpu-safe` outright if `thread_call_allocate` failed, on the
+     * sound argument that a latch nothing will ever clear makes EVERY
+     * following boot stock. That runs at the top of the peer's start(), this
+     * runs ~190 lines later, so blocking clears alone would have left a
+     * promoted boot with no latch at all and nothing to block. Asking "who
+     * else writes this, and when" of our own key (rule 43) - the same question
+     * that caught 3ret-c's inert gate in the same function.
+     *
+     * So: set it, force the sync, and VERIFY the read-back, because a write we
+     * did not confirm is not protection (rule 20 - publish the enabling field,
+     * not the fact that we tried). `sentinel_hold` is 1 only on a confirmed
+     * latch; 2 means the hold is in force for clears but the latch could not
+     * be written, which is a weaker guarantee and must not read the same. */
+    uint32_t holdOk = 0;
+    IORegistryEntry *opts = g_rbgpuOptions;
+    if (!opts) {
+        opts = IORegistryEntry::fromPath("/options", gIODTPlane);
+        if (opts) { g_rbgpuOptions = opts; }
+    }
+    if (opts) {
+        if (auto one = OSString::withCString("1")) {
+            opts->setProperty("rbgpu-safe", one);
+            one->release();
+        }
+        if (auto sync = OSString::withCString("now")) {
+            opts->setProperty("IONVRAM-FORCESYNCNOW-PROPERTY", sync);
+            sync->release();
+        }
+        if (OSObject *v = opts->getProperty("rbgpu-safe")) {
+            if (auto d = OSDynamicCast(OSData, v)) {
+                if (d->getLength() >= 1 &&
+                    *static_cast<const char *>(d->getBytesNoCopy()) == '1') {
+                    holdOk = 1;
+                }
+            } else if (auto t = OSDynamicCast(OSString, v)) {
+                if (t->isEqualTo("1")) { holdOk = 1; }
+            }
+        }
+    }
+    rbgpu_diag_set_num("sentinel_hold", holdOk ? 1u : 2u);
+    rbgpu_log("3ret-e: HOLDING the sentinel latch for this boot because %s is "
+              "armed. No clear will fire, so the NEXT boot comes up stock "
+              "whatever happens to this one - including a slow crawl, which "
+              "is the failure mode the 60 s and 15 s deadlines cannot catch. "
+              "If this boot reaches a usable desktop, release it with "
+              "`sudo nvram rbgpu-safe=0`.%s", g_rbSentinelHoldWhy,
+              holdOk ? "" : " WARNING: the latch could not be written back as "
+                            "1, so clears are blocked but the next boot may "
+                            "come up armed - check `nvram rbgpu-safe` before "
+                            "rebooting.");
+}
+
 static void rbgpu_sentinel_clear_now(const char *why, uint32_t by) {
     if (g_rbSentinelCleared) {
         return;   /* whichever fired first already did it */
+    }
+    if (g_rbSentinelHold) {
+        rbgpu_diag_set_num("sentinel_held", by);
+        rbgpu_log("3ret-e: NOT clearing the sentinel, though %s would have: "
+                  "%s is holding it. The next boot comes up stock. Release it "
+                  "from a working desktop with `sudo nvram rbgpu-safe=0`.",
+                  why, g_rbSentinelHoldWhy);
+        return;
     }
     IORegistryEntry *options = g_rbgpuOptions;
     if (!options) {
@@ -3117,20 +3260,51 @@ bool rbgpu_nvram_consume_oneshot(const char *var, uint32_t *why) {
     // must refuse, not proceed and report. The retry is three rounds because
     // one forced sync may be coalesced with an earlier one in the same boot -
     // a hypothesis, not a measurement, and it is written here as such.
+    /* 3ret-e: CONSUMED BY OVERWRITE, NOT BY REMOVAL.
+     *
+     * This loop used `removeProperty` and then read the key back as absent -
+     * and 2sq measured that exact sequence SURVIVING A REBOOT, because
+     * `IODTNVRAMVariables::removeProperty` tail-jumps to
+     * `removePropertyWithGUIDAndName`, which calls no sync at all. The
+     * read-back therefore proved the in-memory registry and nothing about
+     * flash, and it reported `why = 0` on a key that was still armed. Six
+     * boots re-armed the framebuffer takeover that way and boot 196 had to be
+     * disarmed from Windows. 2wj fixed it in the framebuffer kext by writing a
+     * literal "0", because `setProperty` reaches `setPropertyWithGUIDAndName`,
+     * which DOES call `IODTNVRAM::syncInternal` - the single referrer of
+     * `IONVRAM-FORCESYNCNOW-PROPERTY` in the kernel. The peer's copy was never
+     * fixed, so `rbgpu-mcreg` - whose failure mode is a HANG - has had an
+     * unreliable one-shot this whole time. Rule 6: when a fix moves upstream,
+     * remove the downstream version in the same change; this is the same
+     * defect left in a second copy.
+     *
+     * "0" is also exactly what `rbgpu_nvram_armed()` reads as a durable
+     * disarm, so a consumed key and a user's deliberate disarm are the same
+     * state and re-arming is `nvram <var>=1` either way (2xw's semantics). */
     bool cleared = false;
     for (int attempt = 0; attempt < 3 && !cleared; attempt++) {
-        options->removeProperty(var);
+        if (auto zero = OSString::withCString("0")) {
+            options->setProperty(var, zero);
+            zero->release();
+        }
         if (auto sync = OSString::withCString("now")) {
             options->setProperty("IONVRAM-FORCESYNCNOW-PROPERTY", sync);
             sync->release();
         }
-        cleared = options->getProperty(var) == nullptr;
+        if (OSObject *v = options->getProperty(var)) {
+            if (auto d = OSDynamicCast(OSData, v)) {
+                cleared = d->getLength() >= 1 &&
+                          *static_cast<const char *>(d->getBytesNoCopy()) == '0';
+            } else if (auto t = OSDynamicCast(OSString, v)) {
+                cleared = t->isEqualTo("0");
+            }
+        }
     }
     rbgpu_log("Peer: one-shot `%s` %s", var,
               cleared ? "consumed; clear OK (next boot comes up normally)"
                       : "clear FAILED after 3 attempts - REFUSING to run, "
                         "because the next boot would be armed too. Clear it "
-                        "by hand: sudo nvram -d <var>");
+                        "by hand: sudo nvram <var>=0");
     out(cleared ? 0 : 4);
     // Fail closed: `why = 4` now means "armed, but we did NOT run".
     return cleared;
