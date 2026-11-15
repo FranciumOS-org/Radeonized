@@ -71578,3 +71578,110 @@ than inferred from seven separate booleans.
   that was expected to answer it eliminated.
 
 Plugin **EA9CA223**. Hosttest 0 FAIL, 0 `error:`; `nm -u` clean (3fxf).
+
+---
+
+## 3ret-j / boot 584 — THE PRIVATE CATEGORY WORKS, AND APPLE'S DAL WRITES NOTHING AT ALL
+
+**2026-11-15 03:09:53, boot 584.** Plugin **1D161B39**, boot-args
+`-rbgpuretirevbl -rbgpudal -rbgpudalpass rbgpudalenc=dword -rbgpudalremap
+-rbgpudalfb` — 2pi's **private-category** Wrangler, with `-rbgpudalfbreal`
+removed. Read in the armed boot, `armed 1` and `arm_why 0` **first** this time.
+
+### The display survived, which is the fix 3ret-i predicted
+
+```
+dalfbpriv_armed 1   dalfbpriv_oneshot_why 0   sentinel_hold 1
+dalfb_asked 0                                 -rbgpudalfbreal correctly absent
+RBAMDFramebuffer 1  AmdGpuWrangler 1          BOTH attached (control IOResources 1)
+```
+
+Apple's Wrangler started **and** `RBAMDFramebuffer` kept the panel, in the same
+boot, and the machine reached a desktop. Boot 583's displacement is understood
+and avoided: same provider, different match category. 2pi's design claim is
+measured rather than argued for the first time.
+
+`dalfb_asked 0` is also the **second** confirmation that
+`checkKernelArgument` is exact-token: `-rbgpudalfb` is a prefix of
+`-rbgpudalfbreal` and having the short token present did not make the long one
+read true. 3ret-i checked the converse on boot 583's capture (only
+`LoadDisplayWranglerFB` published, never `LoadDisplayWrangler`); both
+directions now hold on hardware, so rule 30's prefix hazard does not bite this
+pair.
+
+### The diag trail works, and it gives the whole path
+
+```
+dal_trail = "695 696 700 701 702 703 704 "    dal_mark 704   dal_trail_cap 0
+dal_wroutes 1  dal_srouted 1  dalfb_srouted 1  dalfb_grouted 1
+dal_start 1    dal_start_ret 1                 controller start RETURNED
+dalfb_start 1  dalfb_start_ret 1               Wrangler start RETURNED
+```
+
+Every mark, in order, with no cap hit: `processX6000FB` entered, write routes
+landed, all routes installed, controller start in and out, Wrangler start in and
+out. 3ret-h's move from the flash trail to the diag was correct, and the path
+is now read directly instead of inferred from seven booleans.
+
+### THE RESULT: ZERO WRITES, IN EVERY CONFIGURATION
+
+```
+dal_writes 0   dal_wrr 0   dal_blk 0   dal_untr 0   dal_rdr 0
+dal_r_hw 4     dal_reads 0
+```
+
+Three configurations have now been measured, with the whole DAL chain confirmed
+to execute in each:
+
+| boot | configuration | writes | reads |
+|---|---|---|---|
+| 581 | controller only | **0** | 4 |
+| 582, 583 | promoted Wrangler (took `IOFramebuffer`) | **0** | 4 |
+| 584 | private-category Wrangler (panel kept) | **0** | 4 |
+
+**Apple's DAL initialises on this chip with four register reads and not one
+write.** `dal_writes` is incremented in `rbgpu_dal_allow`, which both
+`writeReg32` overloads call, and `dal_wroutes 1` says those routes landed —
+while `dal_r_hw 4` proves the hook mechanism fires. So `writeReg32` is simply
+never called.
+
+That means **the entire remap line is built for traffic that does not exist.**
+3dcn-b derived the 198-offset table, 3dcn-c built the three-outcome policy,
+3dcn-d fixed its linear scan, and `dcn_addr_test.c` covers all of it — and the
+hardware has never offered it a single write to classify. `dal_untr 0` has now
+been vacuous in four consecutive boots, for three different reasons, and the
+units question it was meant to answer **cannot be answered this way at all.**
+
+### 2po's 46 BLOCKED DCHUBBUB WRITES ARE NOT REPRODUCED
+
+`CLAUDE.md` and the 2po entry record 46 blocked DCHUBBUB writes, and that
+figure is the whole basis for "the DCHUBBUB blocker is removable". Three
+configurations here produce zero. This does **not** establish that 2po was
+wrong — its configuration may have differed in some way these entries do not
+capture, and 2po predates several changes to the gating — but the claim now
+has a direct, three-configuration, in-boot contradiction and **must not be
+cited again until it is re-derived.** Flagged, not overturned (rule 39: say
+which configuration a reading came from).
+
+### What would have to be true for a write to happen
+
+Nothing in `start()` writes, on either half. So something downstream asks DAL
+to touch hardware, and the two obvious askers are now eliminated by
+measurement. What is left, untried: a **display mode set** or a real display
+configuration change driven through Apple's path, and the accelerator asking
+DAL directly. Both are downstream of a display path Apple's stack does not own
+on this machine, because `RBAMDFramebuffer` owns the panel — which is the
+configuration that makes the machine usable. That tension is the line's real
+problem and it is not a register question.
+
+### Not established
+
+- **Whether any configuration makes DAL write.** Three are eliminated.
+- **Whether 2po's 46 writes were real.** Flagged above.
+- **Whether the sentinel hold should apply to `-rbgpudalfb` at all.** It cost a
+  stock boot for a configuration now measured safe; relaxing it is a judgement
+  for later, and the latch is released by hand meanwhile.
+
+Plugin **1D161B39**, loaded. `rbgpu-safe` is **1** — the hold is in force, so
+the next boot comes up stock until it is released with
+`sudo nvram rbgpu-safe=0`.
