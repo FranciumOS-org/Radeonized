@@ -71352,3 +71352,112 @@ and has not been built.
   NVRAM and IOKit with no `src/common` logic to drive. No coverage is claimed.
 
 Plugin **088C9353**, not yet installed.
+
+---
+
+## 3ret-g / boot 583 — the instrument is exonerated, and my first mark was in the wrong place
+
+**2026-11-15 02:53:12, boot 583.** Plugin **088C9353**, the Wrangler promotion
+armed, the gate trail cleared to `cleared-before-583` beforehand so a stale
+read could not be mistaken for a fresh one (rule 11). It wedged. **SSH stayed
+up** — `wdt=-1` earning its place in the card as a diagnosis arg — and the
+user ran `plugin_check.sh` from the wedged boot before restarting.
+
+### My own error, first
+
+I read the gate trail before reading `armed`, concluded "I am in the wedged
+boot 583", and said so. `armed 0`, `arm_why 6`, `sentinel 4` and `safe_latch 1`
+were in the same output, three lines below the trail. The boot was the stock
+recovery boot that follows 583, and the user corrected me. That is rule 8 and
+rule 33 verbatim, and it is the warning printed at the top of `CLAUDE.md` in
+bold: **read `armed`/`arm_why` BEFORE concluding anything about a boot.**
+
+The readings themselves survive the error, because the trail is attributable
+independently: this boot is `armed 0` and the hwlibs gate arms only on an armed
+boot, the trail differs from 582's in both figures (`ms=6025 / t=6127` against
+`5875 / 5983`), and it overwrote the `cleared-before-583` marker. So it is
+583's, freshly written.
+
+### 583's record
+
+```
+600 601 602 | 602 hwlibs gate closed ok=1 ms=6025 regsvc=1 [w=3 f=0 t=6127 wx=5067]
+rbgpu-dalfb = 0        the one-shot was consumed
+rbgpu-safe  = 1 at boot -> stock boot read sentinel 4, safe_latch 1, arm_why 6
+rbgpu-diag-prev: 31 keys, 515 bytes, diag_used 0x1c6, last key mcp_kext_base
+```
+
+- **The promotion was reached.** `rbgpu-dalfb` consumed to 0, and the only
+  writer in the tree is the branch gated on `(!dalStock && dalfbArg)`.
+- **The rescue worked a second time**, now with two boots per side (rule 44):
+  582 and 583 both crawled, both cost exactly one boot.
+- **583 was healthy at 6.0 s** and our own accelerator published normally.
+- **No `dal_*` key again.** 31 keys and 515 bytes is the same cap 582 hit, so
+  absent-vs-capped is still not established and the capped table has now
+  failed the same question twice.
+
+### THE INSTRUMENT IS EXONERATED, and that is a real result
+
+`w=3` in boot 582 and `w=3` in boot 583. The five marks 3ret-f added produced
+**zero** extra flash commits, so they cannot have caused or worsened the crawl.
+2fo's suspicion — that synchronous NVRAM transactions inside `IOService::start`
+are what wedges this family — was tested here rather than argued about, and
+the test is the counter the trail already carried. `t=6127` at the last mark
+with the machine alive for two minutes afterwards also kills 2fk's other
+reading: the gates are not the crawl, because the thread ran six seconds of
+gates and then stopped for two minutes with none.
+
+### AND THE MARKS COULD NOT LOCATE ANYTHING, BECAUSE MINE WERE PLACED LATE
+
+3ret-f's first mark, 700, sits **after** the two `writeReg32` routes, the
+attribute route and the Wrangler route have all been installed. So "no 700"
+cannot separate **"`processX6000FB` was never called"** from **"it stopped
+partway through"**, and those are completely different findings — one puts the
+crawl upstream of the DAL experiment entirely, the other puts it inside our own
+route installation.
+
+Rule 14 in the shape it keeps taking here: **a mark that is absent says nothing
+unless an earlier mark is present to bracket it.** 3ret-f wrote five marks and
+not one of them was the function entry. The same error as the fabricated
+control two entries ago — an instrument that cannot distinguish the cases it
+was built to distinguish.
+
+### The fix: six marks, read as a bracket
+
+```
+695  processX6000FB ENTERED            (before the sentinel gate, before every return)
+696  writeReg32 routes LANDED/FAILED
+700  DAL routes installed
+701  AmdRadeonControllerNavi2::start ENTERED
+702  AmdRadeonControllerNavi2::start RETURNED
+703  AmdGpuWrangler::start ENTERED
+704  AmdGpuWrangler::start RETURNED
+```
+
+A six-way answer from the next boot:
+
+| trail | conclusion |
+|---|---|
+| no 695 | Apple's FB kext never loaded; the crawl is upstream of the DAL experiment entirely |
+| 695, no 696 | stopped inside `routeMultiple` on the two `writeReg32` overloads |
+| 696, no 700 | stopped between the write routes and the controller route (the attribute and Wrangler routes are in that span) |
+| 700, no 701 | routes all installed, nothing ever started |
+| 701, no 702 | the crawl is inside `AmdRadeonControllerNavi2::start` |
+| 703, no 704 | the crawl is inside `AmdGpuWrangler::start` — where 2pl and 2po put it by inference and nothing has put it by measurement |
+
+The write path still carries **no** mark, for 2fo's reason, unchanged.
+
+### Not established
+
+- **Where the crawl is.** 583 did not answer it and the reason was my mark
+  placement, not the hardware.
+- **Whether the dal counters would say anything**, because the capped diag
+  table has now swallowed them twice. A dedicated small periodic NVRAM key is
+  still the real answer to rule 10 and is still not built; the marks route
+  around it for the location question only, and the units question remains
+  unanswered since 3dcn-b.
+- The added commit budget: six marks that fire take `w` from 3 to 9. The trail
+  reports `w`, `f`, `t` and `wx`, which is how this was checked the first time
+  and how it should be checked again.
+
+Plugin **BCC84867**, built and verified against `dwarfdump --uuid`; hosttest 0 FAIL, 0 `error:`.

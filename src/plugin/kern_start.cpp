@@ -10153,6 +10153,48 @@ static IOReturn hooked_wr_attr_2pl(void *self, uint32_t sel, unsigned long *a,
 __attribute__((noinline))
 void RGPU::processX6000FB(KernelPatcher &patcher, size_t id,
                           mach_vm_address_t address, size_t size) {
+    /* 3ret-g: THE FIRST MARK IS THE FUNCTION ENTRY, AND 3ret-f'S WAS NOT.
+     *
+     * Boot 583 wedged with the promotion armed and REACHED (`rbgpu-dalfb`
+     * consumed to 0, and only the promotion branch writes that key), and its
+     * trail read `600 601 602 | 602 hwlibs gate closed ok=1 ms=6025 [w=3 f=0
+     * t=6127 wx=5067]` - healthy at 6.0 s, then no 700-series mark at all.
+     *
+     * That exonerates the instrument cleanly: `w=3` in 582 and `w=3` in 583,
+     * so the five marks 3ret-f added produced ZERO extra flash commits and
+     * cannot be the crawl (2fo's suspicion, tested rather than argued).
+     *
+     * But it could not locate anything, because 3ret-f put its first mark
+     * LATE - after the write routes, the attribute route and the Wrangler
+     * route had all been installed. So "no 700" could not separate "this
+     * function never ran" from "it stopped partway through", which are
+     * completely different findings. Rule 14 in the shape it keeps taking: a
+     * mark that is absent says nothing unless an EARLIER mark is present to
+     * bracket it.
+     *
+     * 695 is the function entry, before the sentinel gate and before every
+     * early return. 696 is placed the moment the write routes land. With both,
+     * the trail reads as a bracket rather than a single endpoint:
+     *
+     *   no 695          Apple's AMDRadeonX6000Framebuffer never loaded, so
+     *                   processX6000FB was never called and the crawl is
+     *                   upstream of the DAL experiment entirely
+     *   695, no 696     it stopped inside routeMultiple on the two
+     *                   writeReg32 overloads
+     *   696, no 700     it stopped between the write routes and the
+     *                   controller route - the attribute and Wrangler routes
+     *                   are in that span
+     *   700, no 701     routes all installed; nothing ever started
+     *   701, no 702     the crawl is inside AmdRadeonControllerNavi2::start
+     *   703, no 704     the crawl is inside AmdGpuWrangler::start, which is
+     *                   where 2pl and 2po put it by INFERENCE and where
+     *                   nothing has ever put it by measurement
+     *
+     * Six marks for a six-way answer, each one a flash commit on the calling
+     * thread so it survives the wedge (2eo-2fg). The write path still carries
+     * NO mark - see the comment in `rbgpu_dal_allow` and 2fo. */
+    rbgpu_gate_2en(695, "processX6000FB ENTERED - Apple's FB kext loaded");
+
     /* 3ret-d: THE SENTINEL GATE, AT THE POINT OF USE.
      *
      * Reached on kext load, so `/options` has long been up and the peer has
@@ -10221,6 +10263,8 @@ void RGPU::processX6000FB(KernelPatcher &patcher, size_t id,
          hooked_dal_biosw_2pj, orig_dal_biosw_2pj},
     };
     g_dal_safe = patcher.routeMultiple(id, w, arrsize(w), address, size);
+    rbgpu_gate_2en(696, g_dal_safe ? "writeReg32 routes LANDED"
+                                   : "writeReg32 routes FAILED");
     if (!g_dal_safe) {
         patcher.clearError();
         rbgpu_log("2ph: FAILED to route writeReg32 - the interlock will refuse "
