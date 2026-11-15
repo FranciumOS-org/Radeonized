@@ -72334,3 +72334,215 @@ Expected outcome of the promoted boot is a **dark panel and a boot that does not
 complete** — that is 582 and 583, already paid for, and the 3ret-e sentinel hold
 makes the following boot come up stock, so it costs one boot and no recovery
 trip. `rbgpu-safe` was cleared to 0 at the end of 586.
+
+---
+
+## 3ext-c / boot 588 — the unmeasured cell is measured, both paths are dead, and the one creator of an Apple framebuffer is a byte
+
+Tags: `3ext-c`, `3ext-b`, `3ext`, `3rmb`, `3ret-e`, `3ret-i`
+
+### The boot
+
+Three reboots happened inside seven minutes and only the middle one is the
+experiment, which is worth recording before anything else because the two
+flanking it both read `armed 0 / arm_why 6 / sentinel 4`:
+
+```
+reboot 15:51  shutdown 15:50   boot 587, STOCK (sentinel latch from short 586)
+reboot 15:56  shutdown 15:56   boot 588, ARMED - the experiment, ~60 s
+reboot 15:58                   current, STOCK, counter NOT incremented
+```
+
+`rbgpu-boot` reads 588 in the current boot because a stock boot does not
+increment it (rule 8), so the number belongs to the 15:56 boot and the capture
+that belongs with it is `logs/20261115-155724-plugin`, taken 31 s in. Boot 587
+was lost to the latch exactly as the top of `CLAUDE.md` warns: rebooting to read
+a result is itself a short boot. The arm in boot 588 is confirmed from the
+capture's own diag table before anything else was read:
+
+```
+armed 1   arm_why 0   dalfb_asked 1   dalfb_armed 1   dalfb_oneshot_why 0
+dalfb_start 1   dalfb_start_ret 1   dalfb_grouted 1   dalfb_srouted 1
+fdb_routed 1    fdb_calls 0
+sentinel 1      sentinel_hold 1      sentinel_held 2
+dal_start 1     dal_start_ret 1      dal_mark 702     dal_trail 695 696 700 703 704 701 702
+dal_reads 0     dal_writes 0         dal_r_hw 4
+```
+
+So the promoted Wrangler genuinely ran under the **real** `IOFramebuffer` match
+category, which is the configuration 3ext-b identified as the one unmeasured
+cell of the table and the one that decides the whole architectural fork.
+
+### The reading
+
+`tools/plugin_check.sh`'s class-wide counts, added in 3ext-b for precisely this
+boot:
+
+```
+AMDRadeonX6000_AmdGpuWrangler              1
+AMDRadeonX6000_AmdRadeonFramebuffer        0
+RBAMDFramebuffer                           0
+IOResources                                1      <- the control
+```
+
+The control is non-zero, so the zeroes are readings and not a dead instrument.
+The naming and the mechanism have a positive control in the same boot as well,
+which matters because a misspelled class name produces a zero that looks
+identical (rule 26): the Wrangler's own node came back as
+
+```
++-o AMDRadeonX6000_AmdGpuWrangler  <class AMDRadeonX6000_AmdGpuWrangler,
+   id 0x100000543, registered, matched, active, busy 0 (60 ms), retain 6>
+   "CFBundleIdentifier" = "com.apple.kext.AMDRadeonX6000Framebuffer"
+```
+
+— same `AMDRadeonX6000_Amd*` prefix, same kext, same `ioreg -rl -c` call, found.
+`RBAMDFramebuffer` 0 confirms ours was displaced, which is what boot 583
+measured and is expected in this configuration.
+
+**So the real `IOFramebuffer` category creates no framebuffers either.** The
+match category was never the variable. 3ext's table is now complete on both
+rows, and the inference 3ext-b refused to make has been replaced by a
+measurement that goes the way that kills the remaining path: Path A — rewriting
+so that Apple's framebuffer owns the panel, trading away brightness, the DRR
+ladder and 91-140 fps — hits the same wall after the rewrite, because there is
+nothing in either category that creates a framebuffer for `extbind`'s method to
+be called on. `fdb_calls 0` reproduces in a second configuration, and it is a
+consequence rather than a finding of its own.
+
+### Apple's own instruments agree, and one of them was a red herring
+
+Two further readings came out of the same capture, both from subsystems with no
+connection to ours.
+
+**WindowServer, independently:**
+
+```
+CGXMappedDisplayStart: FB: 0 of 0 opened, succeeded 1 times, failed 0 times
+[ERROR] CGXMappedDisplayStart: can't open any framebuffer
+[ERROR] CGXDisplayDriverInitialize: No Display drivers loaded
+GPUWrangler is disabled due to no MappedDisplay
+```
+
+`FB: 0 of 0` is CoreDisplay counting the same zero through a completely
+different path, and it is what the dark panel *is* — rule 45's requirement that
+a human-observed deliverable get its own instrument, satisfied by Apple's.
+
+**kernelmanagerd, which looked like the cause and is not:**
+
+```
+E kernelmanagerd Error occurred while handling request
+  LoadRequest(arguments: ["CFBundleIdentifier": com.apple.kext.AMDRadeonX6000Framebuffer]):
+  Could not find: Extension with identifier 'com.apple.kext.AMDRadeonX6000Framebuffer' not found
+```
+
+This line is **absent** from a stock boot, so it is specific to the promoted
+configuration and not log noise — but it cannot be the cause, and the reason is
+structural rather than a judgement call. The `AmdGpuWrangler` instance that is
+running *is a class from that very bundle*, matched and active, so the binary is
+resident; a loader database miss cannot explain a missing child of a parent that
+is executing out of the same Mach-O. The bundle is present on disk at
+`/System/Library/Extensions/AMDRadeonX6000Framebuffer.kext` with its
+`CFBundleIdentifier` matching the request byte for byte, it carries no
+`Contents/MacOS` (normal in a KC boot, the same fact `acpivb_kinfo 0xffffffff`
+records for AppleACPIPlatform), and it is present in
+`SystemKernelExtensions.kc` and absent from Boot and Auxiliary. kernelmanagerd's
+database tracks staged bundles, so a system-KC kext is legitimately "not found"
+by it. The request is most likely raised on our account, because the promoted
+configuration publishes a personality carrying that identifier — rule 16 with
+the configuration as the suspect rather than the instrument.
+
+The stock-boot control was taken with the instrument proven live first, after it
+had already lied once: `log show --start` without `--info --debug` returned zero
+WindowServer lines for a boot with 8485 of them (rule 36 — a capture has a
+level, and all three of level, predicate and window silently drop the answer).
+An earlier attempt was worse, reading 15:56 timestamps out of a `--last 10m`
+window that spanned the reboot and nearly attributing the previous boot's lines
+to this one (rule 28). With the window correct and the level set:
+
+| | stock boot (current) | armed boot 588 |
+|---|---|---|
+| panel owner | `IONDRVFramebuffer` 1 | nothing |
+| `AmdRadeonFramebuffer` | — | 0 |
+| `RBAMDFramebuffer` | — | 0 |
+| CoreDisplay | opens a framebuffer | `FB: 0 of 0 opened` |
+| kernelmanagerd LoadRequest | 0 lines | identifier `not found` |
+
+`IONDRVFramebuffer` owning the panel is why a stock boot has a desktop at all,
+and it is the fourth distinct framebuffer story this project has now measured on
+one machine.
+
+### Where an Apple framebuffer actually comes from — a byte, and no boots spent
+
+The measurement says the category is not the variable; the next question is what
+is, and this disk answers it. Apple's `AMDRadeonX6000Framebuffer.kext` declares
+six `IOKitPersonalities` — `AMDGPUWrangler` plus five `AmdRadeonController*`
+variants, Navi 10/12/14/21/23 — and **not one of them has `IOClass =
+AMDRadeonX6000_AmdRadeonFramebuffer`.** The framebuffer is never produced by
+matching, in any category, so no personality, property or probe score could ever
+have produced one. It is constructed in code, and there is exactly one site in
+the entire 9.5 MB binary that does it:
+
+```
+__ZN34AMDRadeonX6000_AmdRadeonController13createFbStubsEh:   # createFbStubs(unsigned char)
+  0xbf9ffce  testb  %r15b, %r15b           # the count
+  0xbf9ffd1  je     0xbfa010e              # zero -> skip the whole loop
+  0xbf9ffec  movl   $0x9328, %edi
+  0xbf9fff1  callq  AmdRadeonFramebuffer::operator new(unsigned long)
+  0xbf9fffc  callq  AmdRadeonFramebuffer::AmdRadeonFramebuffer()
+  0xbfa0001  movq   %r13, 0xc0(%rbx,%r14,8)      # the array
+  0xbfa000f  callq  AmdRadeonFramebuffer::initWithInfo(FbInitInfo&)
+```
+
+and exactly one caller:
+
+```
+__ZN34AMDRadeonX6000_AmdRadeonController5startEP9IOService:
+  0xbf9fafe  movzbl 0x120(%rbx), %esi      # <- the count
+  0xbf9fb08  callq  AmdRadeonController::createFbStubs(unsigned char)
+  0xbf9fb0d  testl  %eax, %eax
+  0xbf9fb0f  je     ...                    # failure path
+```
+
+So the object layout is: **a 12-slot framebuffer array at `controller + 0xc0`
+and its count as a single byte at `controller + 0x120`**, the two confirmed
+against each other by `initializeInternals`, which clears `0xc0` through `0x118`
+and then `movb $0x0, 0x120(%rdi)` in the same run of zero-initialisers. An
+instance is `0x9328` bytes.
+
+**Nothing in this kext ever writes that byte non-zero.** A whole-file sweep for
+byte stores to `0x120(%reg)` returns two hits and no more: the zeroing in
+`initializeInternals`, and one in `AmdDalHelper::instantiateDalInterface` which
+is **not** this field — its base is `-0x158(%rbp)`, a stack-local DAL init
+struct, and conflating the two would be rule 46's mistake in its plainest form.
+The five wider `movl %eax, 0x120(...)` stores are all inside
+`AmdAgdcServices::setSPINotificationsState`, a different object again. There is
+no setter-shaped symbol on the class either: `nm -m` filtered for the controller
+and any of fbstub/numfb/numdisp/connector/getnumber/setnumber/enumerate returns
+`createFbStubs` and nothing else.
+
+### What this leaves
+
+The external-display question and the no-framebuffer question have converged on
+one object. The line is no longer "which PHY register" or "which match
+category" but **who writes `AmdRadeonController + 0x120`, and why it is zero on
+this chip** — a single byte, in an object we already hook, in a class whose
+`start()` we have routed. The candidates are another kext writing into the
+controller (`AMDSupport` is in IGPU's children and is not yet extracted), a
+subclass path, or a wider/structure-copy store this sweep's addressing forms
+missed.
+
+Three things are deliberately **not** claimed. The controller's own `start()`
+return has never been measured — `dal_start_ret 1` and `dalfb_start_ret 1` are
+our names for DAL's and the Wrangler's starts, not the controller's — and since
+`createFbStubs` returns through `movl %r14d, %eax` where `%r14d` is the loop
+index on the taken path, a zero count may well make the controller's `start()`
+fail, which would be a sharper statement than the one made here and is not yet
+evidence. Whether `+0x120` is a connector count, a display count or something
+else is named only by its use. And nothing here shows that a non-zero byte
+would produce a lit panel; it shows where the only code that could ever create
+an Apple framebuffer on this machine reads its one input.
+
+`extbind` is not portable here, for a reason now measured rather than inferred:
+660m-Metal's hook is on a method of an object that this machine never
+constructs.

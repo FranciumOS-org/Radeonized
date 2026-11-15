@@ -1170,24 +1170,58 @@ called** — with `dalfb_start_ret 1` and `dal_trail ...703 704`, so the Wrangle
 children, so there is no object for `extbind`'s method to be called on.** Two
 independent instruments, same boot; `fdb_calls` is seeded 0 at route time so the
 zero is a reading (rule 14). Apple's kext logged **nothing** against 293 of our
-own lines in the same window (rule 36 controlled). **ONE CELL OF THAT TABLE IS NOT MEASURED, AND IT
-DECIDES THE WHOLE FORK (3ext-b).** Measured: the private category **coexists and
-creates none** (584, 586, class-wide `ioreg -rl -c`). **NOT measured: whether
-the real `IOFramebuffer` category creates any either.** Boots 582/583 never
-completed and nobody counted; boot 583's `igpu-children.txt` is **one level deep
-and lists IGPU's DIRECT children only**, so `AmdRadeonFramebuffer` being absent
-from it says nothing — those objects hang off the Wrangler or the controller
-(rule 14). So "the category is the variable" is an **inference**, and the two
-worlds diverge completely: if the real category DOES create framebuffers, Path B
-is dead and Path A is the route; if it creates **none either**, the category is
-not the variable, something else blocks creation outright, and **Path A hits the
-same wall after a rewrite.** Do not commit to Path A until this is read. This sharpens 3ret-j: it is not only that nothing asks the private
+own lines in the same window (rule 36 controlled).
+**3ext-c / BOOT 588: THE LAST CELL IS MEASURED AND BOTH PATHS ARE DEAD. THE
+MATCH CATEGORY WAS NEVER THE VARIABLE.** The promoted **real** `IOFramebuffer`
+category, genuinely armed (`armed 1`, `arm_why 0`, `dalfb_armed 1`,
+`dalfb_oneshot_why 0`), creates **ZERO** framebuffers too:
+`AmdRadeonFramebuffer` **0**, `RBAMDFramebuffer` 0, with `AmdGpuWrangler` 1 and
+`IOResources` 1 as controls and the Wrangler's own node
+(`registered, matched, active`, `CFBundleIdentifier
+com.apple.kext.AMDRadeonX6000Framebuffer`) as the positive control for the class
+name and the `ioreg -rl -c` mechanism in the same boot. **Apple's own
+instruments agree independently**: `CGXMappedDisplayStart: FB: 0 of 0 opened`,
+`CGXDisplayDriverInitialize: No Display drivers loaded`, `GPUWrangler is
+disabled due to no MappedDisplay`. So Path A — rewriting so Apple's framebuffer
+owns the panel — **hits the same wall after the rewrite**, and `extbind` is not
+portable here because the object its method hangs off is never constructed.
+`fdb_calls 0` reproduced in a second configuration. A stock boot's panel is
+`IONDRVFramebuffer`'s. **The kernelmanagerd `'com.apple.kext.AMDRadeonX6000Framebuffer'
+not found` error is NOT the cause** though it is absent on a stock boot: the
+running Wrangler is a class out of that same Mach-O, so the binary is resident;
+the bundle is on disk with a byte-identical id, in `SystemKernelExtensions.kc`,
+and kernelmanagerd only tracks staged bundles. Rule 36 bit twice getting the
+control — `log show` without `--info --debug` returned 0 of 8485 WindowServer
+lines, and a `--last 10m` window spanned the reboot (rule 28).
+This sharpens 3ret-j: it is not only that nothing asks the private
 Wrangler for a mode — **there is nothing to ask**, which is the single cause of
-`dal_writes 0` across four boots in three configurations. **So `extbind` is NOT
-portable here**, and the fork collapses to Apple's framebuffer owning the panel
-too, which trades away brightness, the DRR ladder and 91-140 fps for a path that
-has never lit this panel. n: `fdb_calls 0` is **one boot** (the Wrangler-runs
-half has two, with 584).
+`dal_writes 0` across five boots in four configurations.
+
+**AND 3ext-c FOUND WHERE AN APPLE FRAMEBUFFER COMES FROM, WITH NO BOOTS — IT IS
+A BYTE.** Apple's `AMDRadeonX6000Framebuffer.kext` declares **six**
+personalities (`AMDGPUWrangler` + five `AmdRadeonController*`) and **not one has
+`IOClass = AMDRadeonX6000_AmdRadeonFramebuffer`** — it is never produced by
+matching, in any category, so no personality or probe score could have. One
+construction site exists in the whole 9.5 MB binary:
+**`AmdRadeonController::createFbStubs(unsigned char)`** (`0xbf9fef0`), whose
+`testb %r15b,%r15b / je` **skips the entire loop on a zero count**, with one
+caller, `AmdRadeonController::start`, passing **`movzbl 0x120(%rbx)`**. Layout:
+a **12-slot framebuffer array at `controller + 0xc0`, count byte at
+`controller + 0x120`**, instance `0x9328` bytes, the two confirmed against each
+other by `initializeInternals` clearing `0xc0..0x118` then `movb $0x0, 0x120`.
+**Nothing in this kext writes that byte non-zero** — a whole-file byte-store
+sweep returns only that zeroing plus one in `AmdDalHelper::instantiateDalInterface`
+that is **a stack local at `-0x158(%rbp)`, not this field** (rule 46), and the
+five `movl` stores are all `AmdAgdcServices::setSPINotificationsState`'s. No
+setter symbol exists. **So the line is now: who writes `AmdRadeonController +
+0x120`, and why is it zero on this chip** — one byte, in an object we already
+hook, in a class whose `start()` we have routed. Suspects: `AMDSupport` (in
+IGPU's children, **not yet extracted**), a subclass path, a structure copy.
+**Not claimed:** the controller's own `start()` return has never been measured
+(`dal_start_ret` / `dalfb_start_ret` are DAL's and the Wrangler's), and
+`createFbStubs` returns `%r14d` = the loop index, so a zero count may make it
+fail — sharper than anything above and not yet evidence; nor does anything show
+a non-zero byte would light a panel.
 **Two read-side hazards from their source, before any more RDPCS
 work:** undefined offsets in `seg2 0x2928..0x2d8e` **wedge the RDPCS bus**
 (their `phyvalid.hpp` is a generated bitmap of the defined ones), and UNIPHY1-4
