@@ -69713,3 +69713,207 @@ So: the pitch gate is fixed and the fix is tested, their `h=6` is explained and
 it is our defect, and the stall is **not** claimed fixed. Whether removing
 `h=6` also removes the stall is unknown, because nothing here has been run on
 that machine.
+
+---
+
+## 3rmb (2026-11-14) — 660m-Metal: the external display WORKS on this silicon, and the PHY line was looking in the wrong place
+
+The user brought `https://github.com/rthh21/660m-Metal` (**GPL-2.0**, no AI-reading
+restriction — licence checked before the code, per the standing rule for
+sibling projects). Created 2026-11-11, last pushed 2026-11-15, 8 stars. It is
+the first external evidence this project has had on the external-display line,
+and `CLAUDE.md` named exactly this as one of only two remaining routes after
+310d: *"evidence from a machine where this PHY has been brought up"*.
+
+**The machine is the same silicon.** Radeon 660M, `1002:1681`, Rembrandt, GC
+10.3.3 / DCN 3.1.2 / PSP 13 / SMU 13 — their own words, matching our card line
+for line. Ryzen 5 6600HS, Lenovo 82TL, 3072x1920 120 Hz panel, macOS **26.7
+build 25G229**, OpenCore 1.0.8. Not the GPD Win Max 2 project; they credit
+`RembrandtGfx` (680M, GPL-2.0) and `macos-kvm-680m` as what theirs started
+from.
+
+Everything below is read from their README and their source. **None of it is
+measured on our board**, and the distinction matters in several places where
+their claims and our readings do not agree.
+
+### THEY HAVE THE EXTERNAL DISPLAY, AND IT IS NOT A PHY FIX
+
+Their status table says: *"External monitor through a USB-C hub — Works — DP
+alt mode → HDMI, 1920x1080 @ 120 Hz extended, plugged at boot or later"*. Same
+port class as ours, same active-converter topology 2FB established we have been
+running in all along (DP alt mode into an HDMI converter), same chip.
+
+Their fix touches no PHY register. From their own section: under the `iMac20,1`
+SMBIOS `displaypolicyd` never commits a link to a framebuffer, so the hub's
+monitor was **detected but never given a framebuffer**. `extbind` hooks
+`AmdRadeonFramebuffer::initializeFixedDisplayBinding` and binds the connected
+external DP link to **FB:1** the way the original code binds the panel to FB:0,
+marking the link fixed so plug and unplug go through the driver's own
+connection-change path. Hot plug is pre-bound to USB-C link 1 with the display
+marked disconnected; the port's HPD then drives redetection.
+
+So the reason their PHY comes out of reset is that **Apple's own
+`AMDRadeonX6000Framebuffer` performs the link enable**, with their plugin
+remapping DCN 3.1.2 registers underneath it. That is the architectural
+difference between the two projects, and it is the whole answer to 300-310:
+
+- They patch Apple's framebuffer so Apple's DAL and DMUB drive DIG2.
+- We **replace** Apple's framebuffer with `RBAMDFramebuffer` and drive DIG2
+  ourselves, from `rb_strprog`, `rb_dptx`, `rb_phyfsm` and the atom
+  transmitter command.
+
+310d's conclusion — the driver has no PHY bringup on DCN31, the VBIOS table is
+the only mechanism, `ran` is only a mailbox ack — was derived from **Linux's**
+`dc`, and it is correct about Linux. It is not a statement about Apple's
+driver, which is a separate codebase with its own link-enable sequence, and on
+this evidence that sequence does release the PHY. We were not missing a
+register or a command. We were missing a code path we had deliberately
+replaced.
+
+### AND OUR OWN INSTRUMENT IS NOW A NAMED SUSPECT
+
+Their `display.cpp` and `phyvalid.hpp` state two read-side hazards in the
+RDPCS block that nothing in this project knew about.
+
+**One: undefined offsets in `seg2 0x2928..0x2d8e` wedge the RDPCS bus.**
+`phyvalid.hpp` is a 36-word bitmap, generated from the Linux `dpcs_4_2_0` and
+`dcn_3_1_2` offset headers, of which offsets in that range are defined; its
+header comment is *"Undefined offsets in this PHY range wedge the RDPCS bus."*
+Their worked example is `DPCSTX_DEBUG_CONFIG 0x292e`, a `dpcs_3_0_0` offset
+that does not exist on DCN 3.1.2: Navi23 DAL reads it, *"RDPCSTX0 dies on that
+read and its block then reads 0 / drops writes"*.
+
+**We are clean on this one, and it is worth having checked.** All nine offsets
+this project reads in that block — `RDPCSTX_CNTL 0x2930`, `CLOCK_CNTL 0x2931`,
+`INTERRUPT_CONTROL 0x2932`, `RDPCS_TX_SRAM_CNTL 0x2936`, `CNTL2 0x2939`,
+`DMCU_DPALT_DIS_BLOCK 0x293c`, `PHY_CNTL0 0x2940`, `DMCU_DPALT_PHY_CNTL6
+0x2955`, `DPALT_CONTROL_REG 0x2956` — evaluate as **DEFINED** against their
+bitmap, as do `SCRATCH 0x2ae7` and `DEBUG_CONFIG 0x2aed` from 310's list. 309's
+insistence that all 45 offsets be script-verified against
+`dpcs_4_2_0_offset.h` is what bought that, and this is the first independent
+confirmation it was worth doing.
+
+**Two: UNIPHY1-4 do not answer the CPU at all.** Their comment, verbatim:
+*"UNIPHY1-4 (PHY B-E, seg2 0x2a00-0x2d8e) don't answer the CPU at all, even on
+bare-metal Linux while HDMI is lit: every read takes a 33 us bus timeout and
+returns 0. Our CPU reads there ... left PHY B dead for DMUB too: its PHY B
+steps ran 10-40x slower than Linux and SRAM_INIT_DONE never came."* They treat
+the entire range as a hole, returning `0xdead` from `phyRead()` instead of
+touching it, behind `-rmbphybcpu`.
+
+Our instance stride is `0xd8`, derived in `rb_dpcsphy.h:60` from two header
+offsets, so the five bases are `0x2930`, `0x2a08`, `0x2ae0`, `0x2bb8`,
+`0x2c90`. **PHY2 — the port, the subject of 306 through 310 — is at `0x2ae0`,
+and instances 1 through 4 are all inside the range they call CPU-dead.** Every
+reading this project has about PHY2 comes from there, and so does every
+"four-instance control" that 307, 309, 309b and 310d used as their negative
+control.
+
+If that claim holds on our board it reframes the three failed surveys exactly:
+309's headline finding that PHY2 and PHY3 are byte-identical across all five
+registers is what two addresses in a dead range would look like, and the fact
+that **the only instrument that ever separated PHY2 from PHY3 is
+`QUERY_DP_ALT`** — a DMUB mailbox command, not a CPU register read — stops
+being a curiosity and becomes the signature. Rule 16, the instrument is a
+suspect, arriving from outside the project after we had written "three surveys
+of this block have now failed the same way" and not asked whether the block can
+be read at all.
+
+**IT DOES NOT CLEANLY HOLD, AND THAT IS RECORDED HERE RATHER THAN SMOOTHED
+OVER.** Their claim is that reads there return 0 after a bus timeout. Ours do
+not: boot 481 read PHY2 and PHY3 as `0x008f00f0`, `0x001019f0`, `0`,
+`0x03100000`, `0x10100605` — structured, varied, and not zero, with
+`SRAM_INIT_DONE` set on four of five instances. So either the hazard is
+specific to their board or to the state their machine was in, or our values are
+genuine reads. Our readings cannot settle it, and they also cannot refute the
+second half of their claim, which is the dangerous half: that **CPU reads in
+that range damaged DMUB's own ability to bring the PHY up**. That is a claim
+about side effects, and a non-zero return value says nothing about it.
+
+### THE SYMPTOM WE HAVE BEEN CHASING, WITH A CAUSE ATTACHED
+
+Three of their comments describe our exact failure from the other side:
+
+- *"Navi23 DAL writes `RDPCSTX_CNTL = 0x400000` and `DPCSTX_DEBUG_CONFIG`
+  during link-encoder init, which resets PHY A. Drop those."*
+- *"Navi23 DAL does [send `DMUB_CMD__VBIOS_ENABLE_DISP_POWER_GATING`], and
+  RDPCSTX0 dies right after. Turn those commands into `DMUB_CMD__NULL` before
+  the firmware sees them."*
+- On Navi23 DAL powering down every COMBO-PHY PLL when a stream goes away:
+  *"afterwards RDPCSTX0 reads 0 and the firmware hangs in the next transmitter
+  ENABLE."*
+
+The last is the closest thing to a mechanism this line has ever had for 307 and
+310d. Our transmitter ENABLE gets `refusal 0`, `ran 2`, a drained ring — and
+moves nothing; our `SET_PHY_FSM` gets a reply slot returned bit-for-bit as we
+left it. "The firmware hangs in the next transmitter ENABLE, after something
+already killed the block" is a candidate that fits all of it, and it is the
+first candidate not on our side of the mailbox that is also not DMCUB's image
+as an opaque blob. **It is a candidate and nothing more**: nobody has shown
+that anything killed the block on our machine, their PLL power-down is Navi23
+DAL's doing and we do not run Navi23 DAL's framebuffer, and turning two
+projects' numbers into a mechanism is rule 17.
+
+They are also further along than us on the same instance by name: `gUsbcLog`
+traces **DIG2/DP2** writes and AUX transactions against bare-metal Linux logs
+(`logs/linux-usbc-{dpcd,replug}.txt`), with findings on lane count
+(`-rmbusbc4lane`, their hub being 2 lanes like our sink), HBR vs HBR2
+(`-rmbusbchbr`), and `DP_SEC_CNTL GSP3_ENABLE` differing from Linux
+(`-rmbusbcsdp`). 2F9's whole-chain boot and 305b's stream split were asking
+questions this tree answers with Linux logs beside them.
+
+### OTHER THINGS IN IT THAT BEAR ON OPEN QUESTIONS HERE
+
+- **`pipeBankXor` forced to 0** in the AMD user-mode driver (`umdpatch`,
+  `-rmbumd`) is what makes their text and icons render. Our card says of the
+  swizzle defect: *"The `_X` family is the swizzle defect; why is still not
+  established."* The `_X` suffix in AddrLib **is** the XOR swizzle, and
+  `pipeBankXor` is its parameter. This is a direct candidate answer to a
+  question 3mip, 311, 312 and the whole cave line left open, and it is a
+  different lever from ours — we remap the mode, they neutralise the XOR term.
+- **`xhciintr`: xHCI interrupter 1 on a single MSI**, fixing 2 s cursor steps.
+  Independent arrival at 2xv's fix.
+- **VBIOS from ACPI VFCT through the ACPI platform expert**, with the PSP
+  directory and `vram_info` table **added in memory** and `ATY,bin_image` set
+  only if the result matches a verified image. We do the VFCT read (3vb-e,
+  `vbios_src 3`); the augmentation is new to us.
+- **A 6.3 s DAL SMU mailbox timeout removed** to reach the desktop fast.
+  Compare our `hwlibs_gate_ms` of 5700-10875 — the same order, and worth
+  knowing a sibling found a named 6.3 s timeout in that window.
+- **`wlanfix`** turns off 10-bit tags on an MT7922's root port *before macOS
+  first reads it*. Different card from our rtw89, but a Wi-Fi-root-port fix on
+  this chip class, in a boot that otherwise fails — noted against 3rgr-i's
+  still-open Wi-Fi candidate, with no claim of a connection.
+- `tgfix` for `Invalid TG (-1)` and late flips; `edidfix` repairing a bad EDID
+  DisplayID block over AUX; `gfxclk` holding the clock under the PMFW current
+  limiter's trip point and raising FCLK to 1600 MHz; VCN 3.1 H.264/HEVC decode
+  working; sleep reaching only DarkWake.
+
+### WHAT IS NOT USABLE DIRECTLY
+
+Their kext is pinned to **macOS 26.7 build 25G229** by a static RVA manifest —
+*"any other build (including a minor update) needs a new symbol manifest"*.
+This machine runs **26.7.3 (25G342)**, so it will not load here as built, and
+`extbind` hooks a method of Apple's framebuffer class that our design does not
+instantiate. Nothing here is a drop-in. What transfers is the knowledge, and
+the knowledge is substantial.
+
+### WHAT THIS CHANGES FOR THIS PROJECT
+
+The external-display line's open question is no longer "which register or
+command releases PHY2". On this evidence it is:
+
+1. Can PHY2 be read at all from the CPU, or has every reading from `0x2ae0`
+   onward been an artefact? Cheap to attack: their bitmap says our offsets are
+   defined, so the test is whether the **range** is live, and their `phyRead`
+   hole plus a 33 µs timing signature is a measurement we can make.
+2. Is something killing the block before we get there — and if so, is it one of
+   the three things they name, none of which we run?
+3. And the strategic one: Apple's framebuffer brings this PHY up on the same
+   silicon. Our framebuffer exists because 2sl needed a panel macOS would not
+   give us. Those two facts can coexist, but the external display may not be
+   reachable from our side of that choice at all.
+
+Nothing was built, installed or booted for this entry. It is a reading of
+another project's published work, and every claim in it belongs to them until
+this machine says otherwise.
