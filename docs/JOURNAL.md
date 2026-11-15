@@ -71685,3 +71685,70 @@ problem and it is not a register question.
 Plugin **1D161B39**, loaded. `rbgpu-safe` is **1** — the hold is in force, so
 the next boot comes up stock until it is released with
 `sudo nvram rbgpu-safe=0`.
+
+---
+
+## 3ret-k — the four reads are named at last, and they kill my own hypothesis
+
+**Static, no boot.** The four register reads Apple's DAL performs on this chip
+have been known since 2pn (`0xd31`, `0xde3`, `0xde7`, `0xde8`, BASE_IDX 2
+dword offsets) and were never identified. They are the hosttest's hardware
+anchor and the only DAL traffic that has ever existed here. Resolved against
+`third_party/linux-ref/dcn_3_0_2_offset.h` and `dcn_3_1_2_offset.h`:
+
+| offset | register | dcn302 -> dcn312 |
+|---|---|---|
+| `0x0d31` | `CM0_CM_GAMUT_REMAP_C21_C22` | same offset, same BASE_IDX |
+| `0x0de3` | `CM0_CM_SHAPER_RAMA_END_CNTL_B` | same |
+| `0x0de7` | `CM0_CM_SHAPER_RAMA_REGION_2_3` | same |
+| `0x0de8` | `CM0_CM_SHAPER_RAMA_REGION_4_5` | same |
+
+All four are **CM0 — colour management on pipe 0**: one gamut-remap
+coefficient pair and three shaper-LUT registers. All four are **byte-identical
+between the two generations**, which independently confirms what the 198-entry
+table claims and what `dcn_addr_test.c`'s anchor asserts, and is why boot 584
+read `dal_rdr 0`.
+
+**This kills the hypothesis I formed one message earlier**, that four reads
+followed by zero writes looked like a driver reading a version or capability
+register, disliking the value, and bailing — which would have made the whole
+remap unnecessary and the fix a single constant. There is no version register
+among them. Nothing structural, no DCHUBBUB, no DCN revision. They are
+colour-pipeline reads, which is a *late* path, not early hardware init.
+
+### Instrument defects, both mine, both caught by their own controls
+
+- The 3.1.2 header parsed **0 registers** on the first run while 3.0.2 parsed
+  6941, because DCN 3.1.x headers use a `reg` prefix where 3.0.2 uses `mm`.
+  The script printed "(none at BASE_IDX 2)" for every 3.1.2 lookup, which reads
+  exactly like the finding "these registers do not exist in 3.1.2" — the
+  strongest possible claim, manufactured by a broken parse. The control line
+  (`both must be thousands`) caught it before it was written down, and the
+  rerun asserts `len > 1000` rather than printing it. Rule 26, and the reason
+  the rule says to check a search against a known-present case.
+- An earlier grep for the offsets in the headers returned nothing for all four
+  while the file held 13882 `#define mm` lines — my pattern, not a finding.
+
+### So what does Apple's DAL actually do on this chip
+
+Across boots 581 (controller only), 582 and 583 (promoted Wrangler) and 584
+(private-category Wrangler), with the full chain confirmed executing in each:
+**four pipe-0 colour-management reads, and not one register write.** That is
+not a driver bringing up a display. It is a driver that is constructed, reads a
+little colour state, and is never asked to do anything.
+
+The reason is now plain, and it is circular rather than technical. A display
+driver writes registers when something asks it for a **mode**. Nothing asks the
+private-category Wrangler, because it deliberately does not own
+`IOFramebuffer`. The promoted Wrangler *does* own it — and boot 583 showed that
+owning it displaces `RBAMDFramebuffer`, after which nothing drives the panel,
+the boot never completes, WindowServer never asks for a mode, and so DAL still
+writes nothing. **DAL would have to write to light the panel, and nothing asks
+it to write until the panel is lit.**
+
+Both halves of that circle are now measured, which is the result. Breaking it
+would need Apple's stack to own the display *and* bring it up, and 2po's
+DCHUBBUB claim — the one piece of evidence that it ever got close — does not
+reproduce (3ret-j).
+
+Plugin **1D161B39**, boot 584 still up.
