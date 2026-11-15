@@ -70097,3 +70097,137 @@ that apply the translation, the PHY write and read suppression 3rmb enumerated
 treating UNIPHY1-4 as a hole), the VBIOS augmentation Apple's driver needs, and
 `extbind`. Each is its own milestone. Nothing here changes what boots today:
 no personality is declared yet and `RBAMDFramebuffer` is untouched.
+
+---
+
+## 3dcn-b (2026-11-14) — 3dcn's table was in the WRONG UNITS, and the corrected one overturns 2po's blocker
+
+3dcn committed `src/common/rb_dcn_remap.h` keyed on **absolute** dword
+addresses and validated it against 660m-Metal's independently generated table,
+298 entries for 298, none in only one. The arithmetic was right and the key was
+wrong, and this project had already measured why — three milestones before I
+arrived at it.
+
+### The correction
+
+**2pn, boot 143.** Four accesses through
+`AmdRegisterAccess::hwReadReg32(uint)`: `0xd31`, `0xde3`, `0xde7`, `0xde8`.
+Re-tested here against both readings and this chip's own DMU bases:
+
+| observed | as raw dword offset (dcn302) | as absolute in base1 |
+|---|---|---|
+| `0xd31` | `CM0_CM_GAMUT_REMAP_C21_C22`, BASE_IDX 2 | nothing |
+| `0xde3` | `CM0_CM_SHAPER_RAMA_END_CNTL_B`, BASE_IDX 2 | nothing |
+| `0xde7` | `CM0_CM_SHAPER_RAMA_REGION_2_3`, BASE_IDX 2 | nothing |
+| `0xde8` | `CM0_CM_SHAPER_RAMA_REGION_4_5`, BASE_IDX 2 | nothing |
+
+Four for four one way, zero for four the other, exactly as 2pn concluded. That
+accessor takes **one argument**, so no base is passed at all: the base is
+applied inside. An absolute table cannot be applied where the argument is an
+offset, so the generator gained `--key offset --base-idx N` and
+`rb_dcn_remap.h` is now **198 BASE_IDX-2 offsets**. Absolute mode survives as
+the cross-check only, and still reproduces 298/298.
+
+Why the two projects can disagree at all: 660m-Metal's `isDisplayReg()` accepts
+`[0xc0, 0x1260)` and `[0x34c0, 0x8000)`, which is an absolute reading, and they
+run **25G229 with Apple's Navi 23** controller while we run **25G342 with Navi
+21**. Both observations can be true of different builds and different
+controller classes. Ours is the one measured on this machine. Rule 41's shape,
+applied to an ABI rather than to a constant — and a reminder that agreeing with
+another project's table is not the same as agreeing with its hook point.
+
+### Which is also why the existing deny list was already in the right units
+
+`src/common/rb_dcn_deny.h` has said `BASE_IDX 2 dcn302 dword offsets` at the
+top since 2pn rebuilt it. I generated a parallel table in a different key
+without reading the one already in the tree. The recurring error's first
+variant — read the evidence already in hand before designing the next
+experiment — and the cost was one wasted generator mode, caught by the
+measurement rather than after a boot.
+
+### THE RESULT THAT MATTERS: 2po's NEGATIVE IS NOT THE LAST WORD
+
+2po (boot 145) is recorded as: *"Apple's dcn302 DAL cannot bring up DCN 3.1.2
+by filtering writes. DCHUBBUB is why."* Blocking the moved registers blocks
+**46 DCHUBBUB** writes, and DCN has no hub without them, so the machine hung
+with no framebuffer. That conclusion is correct **about filtering**, which is
+the only thing 2pm and 2po could do, because neither had a destination to send
+a write to.
+
+Redirecting is a third option and it changes that term:
+
+| | denied | redirectable |
+|---|---|---|
+| **DCHUBBUB** | 46 | **46** |
+| DC\* (perfmon etc.) | 73 | 63 |
+| SURFACE | 8 | 8 |
+| MMHUBBUB | 5 | 5 |
+| WBIF | 4 | 4 |
+| VTG | 5 | 4 |
+| DOMAIN | 11 | **0** |
+| DIG | 5 | 0 |
+| LVTMA / BL | 2 | 0 |
+
+**Every one of the 46 DCHUBBUB registers has a destination in dcn312.** The
+specific mechanism 2po named as fatal is removable. That is not a claim that
+the display will come up — it is the removal of one named blocker, and 2po's
+own entry lists others.
+
+The 29 that cannot be redirected are mostly `DOMAIN4..9_PG_*`, and those are
+genuinely absent from this chip, which has `DOMAIN16..18` instead. They must
+still be **blocked**, because the old offset lands on a real but different
+register: `0x089` is `DOMAIN4_PG_STATUS` to Apple's DAL and
+`DOMAIN16_PG_CONFIG` here, so a status read becomes a power-gate config write
+for the wrong domain. `0x0a1` REDIRECTS **to** `0x089` while `0x089` itself is
+BLOCKED; the two are the two halves of one rename, not a conflict.
+
+A further **67** offsets are redirectable without being dangerous: they moved,
+but nothing real sits at the old offset here, so today they are writes into a
+hole. Those are not harmless — they are writes the DAL believes it made.
+
+So the policy is three-valued, in order: REDIRECT (198), else BLOCK (29 of the
+160 dangerous), else PASS. `rb_dcn_dal_action()` in `src/common/rb_dcn_addr.h`,
+which writes `*out` on **every** outcome including BLOCK so a trace can say
+what was refused and not merely that something was (rule 14).
+
+### Coverage
+
+The hardware anchor is the four offsets 2pn actually observed: all four come
+out **PASS**, unchanged, because none of them moved — which is consistent with
+boots 142 and 143 passing reads through and leaving the display intact. The
+arithmetic anchor is the 298/298 absolute cross-check. Then: the 131/29 split
+asserted as counts, a dangerous offset never allowed to PASS, three named
+DCHUBBUB redirects, every table entry findable and redirecting and never
+mapping to itself, both search boundaries, the optional out-pointers, the three
+action values pairwise distinct, and the double-application hazard.
+
+**The hazard has a concrete instance, and the test found it by failing.** My
+first draft asserted `0x077f` passes through unmoved, calling it
+`HUBP0_SURFACE_PITCH`. It is not: `0x077f` is `RB_HUBP_EXPECT_PITCH`, a pitch
+**value** of 1919, while HUBP0's pitch **register** is offset `0x0607`
+(`rb_hubp.h:100`). As an offset, `0x077f` is
+`DC_PERFMON7_PERFMON_CVALUE_LOW`, which moves to `0x06a3` — and `0x085b` moves
+**to** `0x077f`. So a double application sends `0x085b` to `0x06a3`. The
+conflation was mine, the test caught it, and the pair is now pinned as the
+sharpest illustration of why this translation must be applied exactly once.
+
+Seven break-it checks, one per guard, **all seven fired**: search direction
+(612 FAIL), upper bound (6), the danger term (33), the redirect branch (212),
+`*out` on a BLOCK (6), duplicate detection (2) and the zero-count refusal (2).
+Two of them needed re-running in a narrowed form because deleting the guard
+outright tripped **`-Werror`** — its tenth and eleventh appearances.
+
+### Still not wired, and the next restart cannot be promised a display
+
+Nothing in this entry is connected to the hooks yet. `rbgpu_dal_allow()` still
+calls `rb_dcn_is_denied()` and still drops every write by default. The code
+change to make `rb_dcn_dal_action()` the policy — and to actually perform a
+redirect by calling the original accessor with the new offset — is the next
+milestone, together with promoting the Wrangler into `IOFramebuffer`, which is
+the configuration that panicked in 2pk and hung in 2pl and 2po.
+
+So the honest statement of where this stands: one of the named reasons that
+configuration could not work has been removed, the policy that removes it is
+built and tested on the host, and whether the display comes up is unknown.
+2po's entry lists more than DCHUBBUB, and 3rmb lists the PHY writes and the
+VBIOS augmentation that 660m-Metal needed on top of a remap.
