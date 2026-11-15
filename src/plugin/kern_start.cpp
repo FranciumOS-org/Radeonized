@@ -9772,8 +9772,10 @@ static bool rbgpu_dal_allow(uint32_t reg, uint32_t *reg_out) {
             if (g_dal_wrr <= 16)
                 rbgpu_log("3dcn-c: REDIRECT write %#x -> %#x (dword %#x)",
                           reg, use, dw);
-            if (g_dal_wrr == 1 || (g_dal_wrr & 0xff) == 0)
-                rbgpu_diag_set_num("dal_wrr", g_dal_wrr);
+            /* 3dcn-d: NO diag publish from here. rbgpu_diag_set_num() takes a
+             * lock, this runs per register access, and the periodic refresh
+             * already publishes dal_wrr - rule 31 applied to our own
+             * instrument, which is what 2sv/2xm paid for. */
             return true;
         }
         if (act == RB_DCN_ACT_BLOCK) {
@@ -9782,7 +9784,6 @@ static bool rbgpu_dal_allow(uint32_t reg, uint32_t *reg_out) {
                 rbgpu_log("3dcn-c: BLOCK write dword %#x - no 3.1.2 "
                           "destination and the offset is a different "
                           "register here", dw);
-            rbgpu_diag_set_num("dal_blk", g_dal_blk);
             return false;
         }
         if (act == RB_DCN_ACT_UNTRANSLATABLE) {
@@ -9835,8 +9836,7 @@ static uint32_t rbgpu_dal_rd_off(uint32_t reg) {
     g_dal_rdr++;
     if (g_dal_rdr <= 16)
         rbgpu_log("3dcn-c: REDIRECT read %#x -> %#x", reg, use);
-    if (g_dal_rdr == 1 || (g_dal_rdr & 0xff) == 0)
-        rbgpu_diag_set_num("dal_rdr", g_dal_rdr);
+    /* 3dcn-d: no diag publish on the read path - see the write path above. */
     return use;
 }
 

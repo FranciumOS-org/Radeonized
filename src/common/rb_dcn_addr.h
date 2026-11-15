@@ -100,12 +100,26 @@ static inline uint32_t rb_dcn_off_312(uint32_t off302, int *moved)
  * distinguishable in the caller and in a trace. */
 static inline int rb_dcn_off_dangerous(uint32_t off)
 {
-    uint32_t i;
-
-    for (i = 0; i < (uint32_t)RB_DCN_DENY_COUNT; i++) {
-        if (rb_dcn_deny[i] == off) { return 1; }
-    }
-    return 0;
+    /* 3dcn-d: THIS WAS A 160-ENTRY LINEAR SCAN AND IT CRAWLED THE BOOT.
+     *
+     * `rb_dcn_deny.h:175` states the invariant one line above the function it
+     * belongs to - "Sorted ascending, so a binary search is the lookup" - and
+     * `rb_dcn_is_denied()` right below it IS that binary search. 3dcn-c
+     * included the header, ignored both, and wrote a second linear
+     * implementation of the identical lookup.
+     *
+     * It is on the hottest path in the kernel. `rbgpu_dal_rd_off()` calls this
+     * for every DAL register access that does NOT redirect, which is almost
+     * all of them - 198 offsets move out of thousands - so a display bringup
+     * paid 160 compares per read instead of 8. Boots 2 and 3 of 2026-11-15
+     * never finished: the progress bar advanced and kept slowing, twice, with
+     * no panic and no hang.
+     *
+     * The recurring error in its purest form, and the same one 3dcn-b records
+     * one file over: read the evidence already in hand before writing the next
+     * thing. The correct lookup was not merely available, it was in the header
+     * this file includes, under a comment naming the invariant. */
+    return rb_dcn_is_denied(off);
 }
 
 /* The decision for one access. `out`, when given, receives the offset to use

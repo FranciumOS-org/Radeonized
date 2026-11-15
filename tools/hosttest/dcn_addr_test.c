@@ -245,6 +245,55 @@ int dcn_addr_tests(void)
       == RB_DCN_ACT_PASS);
     A(out == 0xffffffffu);
 
+    /* 10c. 3dcn-d: THE DANGER LOOKUP AGREES WITH THE ONE THAT ALREADY
+     * EXISTED, over every offset either could be asked about.
+     *
+     * 3dcn-c wrote a 160-entry LINEAR scan here while `rb_dcn_deny.h` already
+     * carried `rb_dcn_is_denied()`, a binary search, under a comment stating
+     * the list is sorted. On the DAL read path that cost 160 compares per
+     * register access instead of 8, and two boots never finished - the
+     * progress bar advancing and slowing, no panic, no hang.
+     *
+     * Swapping one implementation for another is not something to do on
+     * assertion-free faith, so this sweeps the whole offset range both
+     * functions are defined over and requires them to agree everywhere, plus
+     * every deny entry by name and both neighbours of each. The independent
+     * reference is a direct linear scan written HERE, in the test, where its
+     * cost does not matter - so the fast path in the header is checked against
+     * the slow one rather than against itself. */
+    {
+        uint32_t i, off, mismatches = 0, found = 0;
+        for (off = 0; off <= 0x3000u; off++) {
+            uint32_t ref = 0;
+            for (i = 0; i < (uint32_t)RB_DCN_DENY_COUNT; i++) {
+                if (rb_dcn_deny[i] == off) { ref = 1; break; }
+            }
+            if ((uint32_t)rb_dcn_off_dangerous(off) != ref) { mismatches++; }
+            if (ref) { found++; }
+        }
+        A(mismatches == 0);
+        /* Non-vacuous: the sweep has to have actually hit dangerous offsets,
+         * or "they agree" would only mean both said no every time (rule 48 -
+         * a conjunction can be correct while one term carries no
+         * information). */
+        A(found > 100u);
+        /* Every entry by name, and its neighbours, which an off-by-one in
+         * either bound would miss while the sweep still passed. */
+        for (i = 0; i < (uint32_t)RB_DCN_DENY_COUNT; i++) {
+            const uint32_t d = rb_dcn_deny[i];
+            A(rb_dcn_off_dangerous(d) == 1);
+            if (d > 0u && !rb_dcn_is_denied(d - 1u)) {
+                A(rb_dcn_off_dangerous(d - 1u) == 0);
+            }
+            if (!rb_dcn_is_denied(d + 1u)) {
+                A(rb_dcn_off_dangerous(d + 1u) == 0);
+            }
+        }
+        /* And the two extremes, where a binary search's bounds live. */
+        A(rb_dcn_off_dangerous(0u) == rb_dcn_is_denied(0u));
+        A(rb_dcn_off_dangerous(0xffffffffu) == 0);
+    }
+
     /* 11. The three actions are distinct values, so a trace that records one
      * number identifies the decision. */
     A(RB_DCN_ACT_PASS != RB_DCN_ACT_REDIRECT);

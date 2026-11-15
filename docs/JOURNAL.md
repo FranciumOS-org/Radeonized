@@ -70713,3 +70713,119 @@ not carry dword offsets and 3dcn-b's table is being misapplied.
 
 Plugin **C46965DB**, installed. Latch read `0` going in, so the next boot runs
 the experiment; if it dies, the boot after it declines.
+
+---
+
+## 3dcn-d (boots 2 and 3 of 2026-11-15) — THE BRING-UP CRAWLED, AND THE CAUSE WAS A LINEAR SCAN I PUT ON THE READ PATH
+
+The DAL bring-up was armed as 3ret-c describes and the user ran it. **Two
+boots, neither finished.** The report: *"it wouldn't boot, no panic or hang,
+the bar would just never fill up, it would just keep going slowly and slowly,
+tried 2 times."*
+
+That symptom is its own evidence and it is NOT 2pl/2po's. Those hung. This
+advanced and decelerated, with no panic and no watchdog, which is the shape of
+work being done far too slowly rather than work not completing.
+
+### What the recovery boot shows, and a correction
+
+The third boot came up on `-rbgpuoff`, which the user added — the documented
+rescue, doing exactly its job. Rule 27: `-rbgpuoff` stops `init()` entirely, so
+there is no peer, no accelerator, and `VRAM (Total): 7 MB`.
+
+**A correction to my own reading of it.** I read the framebuffer's log line —
+*"-rbgpuoff or -rbgpustock is in boot-args, so the accelerator is not armed
+either; declining"* — and said neither token was present. They were: the whole
+token `-rbgpuoff` was at the end of `kern.bootargs`, and `tools/dalread.sh`
+did not test for it, so I asserted an absence my own instrument had never
+looked for. Rule 26, in a script written one commit earlier to avoid exactly
+that. `dalread.sh` now checks both rescue tokens first.
+
+Also worth recording: `ioreg -c <class>` **does not filter** when nothing
+matches — it printed the whole 973-line tree for a class that was absent and
+for one that was present alike. That is already in rule 26's list and it
+still cost a reading here. The usable form is grepping `+-o <Class>` out of
+`ioreg -l`, with a nonsense class as the control, which is how
+`RembrandtGPUPeer = 0` was finally established.
+
+### The cause
+
+`rb_dcn_off_dangerous()`, written in 3dcn-c:
+
+```c
+for (i = 0; i < RB_DCN_DENY_COUNT; i++) {
+    if (rb_dcn_deny[i] == off) { return 1; }
+}
+```
+
+160 entries, scanned linearly, and `rbgpu_dal_rd_off()` calls it for **every
+DAL register access that does not redirect** — which is nearly all of them,
+since 198 offsets move out of thousands. A display bring-up pays it per read.
+
+`src/common/rb_dcn_deny.h:175`, one line above the function it belongs to:
+
+```
+/* Sorted ascending, so a binary search is the lookup. */
+static inline int rb_dcn_is_denied(uint32_t dword_offset) { ... }
+```
+
+**The correct lookup already existed, in the header this file includes, under a
+comment stating the invariant that makes it possible.** 3dcn-c included the
+header, used `rb_dcn_is_denied()` nowhere, and wrote a second linear
+implementation of the identical question: 160 compares where 8 would do.
+
+This is the recurring error in its purest form, and it is the **second** time
+in three milestones on the same table: 3dcn-b records keying the remap in units
+this tree had already measured as wrong, and this records re-implementing a
+lookup this tree had already written correctly, one file over. Both were
+available to a reader. Neither needed a boot. This one cost two.
+
+### The fix, and what it does not settle
+
+`rb_dcn_off_dangerous()` is now `return rb_dcn_is_denied(off);`.
+
+Swapping one implementation for another on faith is not a check, so the
+hosttest sweeps **every offset in 0..0x3000** and requires the header's
+function to agree with a linear scan written *in the test*, where the cost does
+not matter — the fast path validated against the slow one rather than against
+itself. Non-vacuous by assertion (`found > 100`), since "they agree" would
+otherwise be satisfied by both answering no every time (rule 48: a conjunction
+can be correct while one term carries no information). Plus every deny entry by
+name with both neighbours, and both bounds. Three break-it checks, all three
+fired — 195, 70 and 72 FAILs — **after the first two reported 1 hit each and
+were inconclusive**, because `return 0;` leaves the parameter unused and
+`-Werror` killed the build instead of a test failing. The `-Werror` trap, its
+twelfth and thirteenth appearances.
+
+Also removed: `rbgpu_diag_set_num()` from the two hot paths. It takes a lock,
+it ran once per 256 register accesses, and the peer's periodic refresh already
+publishes all four counters. Rule 31 applied to our own instrument.
+
+**What this does NOT settle is whether the crawl is gone.** Two mechanisms were
+available and only one is now eliminated:
+
+1. the linear scan — a defect on any reading, fixed here; and
+2. Apple's DAL, with the remap live, now genuinely reaching DCN 3.1.2
+   registers and spinning in its own `REG_WAIT` timeouts. That is not a bug,
+   it is the experiment doing something, and it would also present as a boot
+   that advances and slows.
+
+Rule 17: two numbers are not a mechanism, and I am not entitled to call (1)
+the cause because I found it. It is the cause of *a* large slowdown; whether
+it was *the* slowdown the next attempt decides.
+
+### The next attempt is the one that was skipped
+
+3dcn-c proposed two boots and the risky one was run first. The cheap one is
+still unrun and still the right next step:
+
+**`-rbgpudal -rbgpudalpass rbgpudalenc=dword -rbgpudalremap`, with NO
+`-rbgpudalfbreal`.** Without the Wrangler promotion nothing drives DAL far
+enough to bring up a display — boot 143 produced four reads — so it **cannot**
+crawl, and it answers the one question that would invalidate the whole table:
+`dal_untr` must read 0, or `writeReg32` does not carry dword offsets and
+3dcn-b's units correction was itself wrong. A bring-up boot spent before that
+question is answered is a boot spent on an unvalidated premise, which is what
+these two were.
+
+Plugin **18447BB8**, not installed.
