@@ -70314,3 +70314,118 @@ And the honest limit: 2po's entry names more than DCHUBBUB, and 3rmb lists the
 PHY write suppression and the VBIOS augmentation 660m-Metal needed on top of a
 remap, none of which is built. One named blocker has been removed. Whether
 anything else stands behind it is unknown.
+
+---
+
+## 3ret (2026-11-15) — THE FRAME-DELIVERY REGRESSION IS A MISSING BOOT-ARG, measured on the live boot
+
+The user reported, unprompted: *"the framerate delivery is worse now, it wasnt
+like this, 144hz doesnt have smooth cursors anymore... iMessage is lower
+framerate... idk what changed."* Diagnosed entirely on the running machine with
+no reboot and no rebuild.
+
+### What the live boot reads
+
+Boot of 2026-11-15 01:07:01, macOS 26.7.3 (25G342). Loaded artifacts checked
+first (rule 15): plugin `638F142D`, framebuffer `F6EE3DB6`, Lilu 1.7.3.
+
+| key | live value | meaning |
+|---|---|---|
+| `vbl_mhz` | 143833 | the panel IS at native 143.833 Hz |
+| `agdc_otg_mhz` | 143706 | and AGDC agrees, so the DRR ladder is not down at 60 |
+| `tick_us` | 6944 | 2zc's two-sided optimum, correct for native |
+| `vblret_armed` | **0** | the vblank-driven retire is NOT armed |
+| `vblret_src` | **0** | so the source is not `RB_RETIRE_SRC_VBL` |
+| `vblret_sub` | **1** | interior retire occasions OFF |
+| `vblret_vbl` | **0** | no retire has ever been driven by a vblank |
+| `vblret_timer` | 51114 | every retire came from the 6944 µs timer |
+| `vblret_autodrv` | **0** | 2D5's derivation has NEVER RUN this boot |
+| `vblret_subnamed` | 0 | and nothing named a value either |
+
+The first reading matters because it kills the obvious suspect before any
+other work: the panel is **not** parked at 60 Hz by the DRR ladder, which is
+what 2FB misread once already. The refresh is right and the delivery is wrong.
+
+### The mechanism, from source, with nothing inferred from the numbers
+
+`vblret_autodrv = 0` is the load-bearing one. `rbgpu_retire_auto_2D5()` is
+called **unconditionally** at the top of `rbgpu_retire_from_vbl_2zd()`, before
+any armed check, so a zero there does not mean "not armed" — it means
+**`rbgpu_retire_from_vbl_2zd()` was never called at all** this boot. That
+function is the framebuffer's vblank entry point into the peer.
+
+`kern_start.cpp:15771` is why:
+
+```c
+rb_retire_reset(&g_rb_2zd, rbgpu_arg("-rbgpuretirevbl") ? 1u : 0u);
+```
+
+`-rbgpuretirevbl` is **not** in `rb_default_on_tokens[]` — 54 tokens, checked
+by name — so `rbgpu_arg()` falls straight through to `checkKernelArgument()`
+and the feature is opt-in, exactly as 2zd's own comment says it should be for
+its first boot.
+
+And the arm is absent. Read off the **kernel's own parsed copy**, not NVRAM's,
+because rule 43 says NVRAM's `boot-args` is overwritten from OpenCore's
+config.plist and reads back stale:
+
+```
+$ sysctl -n kern.bootargs | tr ' ' '\n' | grep -c rbgpu
+0
+```
+
+**Zero `rbgpu` tokens parsed this boot.** Not one.
+
+So the chain is: no arm → `g_rb_2zd.armed = 0` → the framebuffer never offers
+the vblank → 2D5 never derives → `sub` stays at its literal default of 1 →
+retire runs off the timer at one occasion per period.
+
+### Why the runtime dial cannot rescue it
+
+`RBGPURetireSub` is a `setProperties` dial and needs no boot, so it looked like
+a free fix. It is **inert in this configuration**, and that is in the source,
+not a guess (`rb_retire.h:436`):
+
+```c
+static inline int rb_retire_sub_active(const struct rb_retire *r)
+{
+    if (!r) { return 0; }
+    if (!r->armed) { return 0; }
+    if (r->src != RB_RETIRE_SRC_VBL) { return 0; }
+    ...
+```
+
+`armed` is 0 and `src` is 0, so both of the first two terms refuse. Dialling
+`subret` to 4 would change the published number and nothing else — rule 31's
+trap in its purest form, and worth recording because it is the dial CLAUDE.md
+calls "the win".
+
+### Why this is a REGRESSION and not a default that was always there
+
+Because the journal says the arm used to be present. 2zl, boot 271: *"Boot-args
+unchanged from boot 268, so `-rbgpuretirevbl` is armed and the 60 Hz mode..."*
+Boots 266, 268 and 271 all carried it. The measured win is recorded against
+that configuration: first paint 13.9 → 3.5 ms and **+94 % rate, interleaved**,
+with the hold ON — and CLAUDE.md notes it reproduced and controlled *the user's
+own lag report*. The same lag report, by the same user, is what reopened this.
+
+How the token left boot-args is **not** established. One candidate is dead from
+source: `tools/efi.sh defaults` cannot have removed it, because
+`bootarg_strip()` removes **exactly** `rb_default_on_tokens[]` read from the
+header, and `-rbgpuretirevbl` is not in that table — the function's own
+docstring names "tunables with a value" and "every DISARM" as the classes it
+must not touch, and an opt-in positive falls on the keep side too. So the
+cleanup is eliminated, and an OpenCore config edit or restore is unexamined.
+
+### What is NOT claimed
+
+That arming it will restore the user's subjective smoothness. That is a human
+observation and rule 45 applies: it needs its own instrument, a control and a
+repeat. What is established is that the configuration the +94 % was measured in
+is **not** the configuration running today, that the gap is one token, and that
+the token has booted cleanly many times (266, 268, 271 and after), so arming it
+is a known-good boot and not an experiment.
+
+The arm is `-rbgpuretirevbl` and the instrument afterwards is
+`vblret_vbl` climbing and `vblret_autodrv` becoming non-zero — both monotonic
+(rule 31), neither a snapshot of the dialled value.
