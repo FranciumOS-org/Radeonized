@@ -71461,3 +71461,120 @@ The write path still carries **no** mark, for 2fo's reason, unchanged.
   and how it should be checked again.
 
 Plugin **BCC84867**, built and verified against `dwarfdump --uuid`; hosttest 0 FAIL, 0 `error:`.
+
+---
+
+## 3ret-h / boot 583 read properly — THE PROMOTION COMPLETES AND WRITES NOTHING, and my six marks were inert
+
+**The capture that answered it was the user's, not mine.** They ran
+`plugin_check.sh` over SSH from inside the wedged boot 583 — SSH stayed up,
+which is `wdt=-1` doing the one job the card claims for it — and I did not
+look at the report until asked. `logs/20261115-025146-plugin/` is a capture
+taken at 02:51:46 from a boot that started **02:49:02**, so ~2m 44s into the
+wedge. Rule 10's prescription, executed, and then nearly wasted.
+
+### What boot 583 actually did
+
+From `peer.plist`, the live uncapped diag table:
+
+```
+dal_stock 0   dal_latch 0                   the gate passed; the experiment ran
+dal_on 1      dal_pass 1    dal_remap 1     all three arms live
+dal_wroutes 1 dal_srouted 1                 the write routes and the controller route installed
+dalfb_srouted 1  dalfb_grouted 1            the Wrangler routes installed
+dalfb_asked 1 dalfb_armed 1  dalfb_oneshot_why 0
+sentinel_hold 1                             the hold confirmed its own latch write
+dal_start 1     dal_start_ret 1             AmdRadeonControllerNavi2::start RETURNED TRUE
+dalfb_start 1   dalfb_start_ret 1           AmdGpuWrangler::start RETURNED TRUE
+dal_writes 0  dal_wrr 0  dal_blk 0  dal_untr 0  dal_rdr 0
+dal_r_hw 4    dal_tr_n 4   dal_reads 0
+gate_stage 156    stamp_calls 6   stamp_ret 1   stamp_ticks 9959
+diag_used 643 / diag_max 768
+```
+
+**Every stage of the promotion completed, and DAL performed zero register
+writes.** Two things die here:
+
+- **2pl and 2po put the hang inside `AmdGpuWrangler::start` by inference. It
+  returned true.** `dalfb_start_ret 1` is the first measurement this line has
+  of that function completing, and three milestones have reasoned from the
+  opposite.
+- **"DAL reaches DCN 3.1.2 registers and spins in `REG_WAIT`" is refuted as the
+  crawl's mechanism**, because there were no writes to spin on. `dal_writes 0`
+  with the promotion fully up also makes `dal_untr 0` **vacuous for the second
+  time** — boot 581 had the same shape for a different reason. The units
+  question 3dcn-b depends on is still unanswered, and the Wrangler promotion
+  was the configuration that was supposed to answer it. It does not. Something
+  other than the controller and the Wrangler's `start()` has to ask DAL to
+  touch hardware, and nothing in 300-310 has named it.
+
+`gate_stage 156` is `150 + g_rb_2cx_stamp_calls` from `kern_start.cpp:5016` —
+`waitForHwStamp` call 6 **returning success**, consistent with `stamp_calls 6`
+and `stamp_ret 1`. It is a success exit, not a hang point. I first attributed
+156 to line 4627's `100 + stamp_calls` entry gate, which would have required
+`stamp_calls` 56 against a measured 6; one grep, one match, taken. Rule 18.
+
+So the last instrumented point of boot 583 succeeded, and the crawl is in
+territory with no instrumentation after it. `diag_used 643` against the
+~520-byte NVRAM cap is also the direct confirmation of why `rbgpu-diag-prev`
+carried no `dal_*` key in either 582 or 583 while ioreg carried all of them.
+
+### MY SIX MARKS WERE INERT, ALL OF THEM
+
+`rbgpu_gate_2en` opens with
+
+```c
+if (nogate < 0) { nogate = rbgpu_arg("-rbgpunogates") ? 1 : 0; }
+if (nogate) { rbgpu_diag_set_num("gate_stage", stage); return; }
+```
+
+and **`-rbgpunogates` is in the default-on table** (`rb_defaults.h:46`), where
+2fo put it deliberately: the trail's own synchronous flash commits were the
+leading suspect for that family's 24 wedged boots. The trail is therefore OFF
+by default. The `600 601 602` in `rbgpu-gate` came from the peer's HWLibs
+gate, which calls `rbgpu_gate_nvram` **directly** at
+`RembrandtGPUPeer.cpp:2362` and never passes through the nogate check.
+
+I tested `-rbgpunogates` for presence in `kern.bootargs` as a whole token —
+the right test, for the wrong question — and wrote "so the 700-series trail is
+live (rule 34)" in the handover. Rule 34 is exactly what was violated: an
+experiment's arm is part of the experiment, and a **default-on** token is part
+of the arm. The card's own instruction is to read `rb_defaults.h` rather than a
+copy of it.
+
+It also means 3ret-g's "the instrument is exonerated, `w=3` in both boots" was
+**right for the wrong reason**: `w` stayed at 3 because the marks never wrote
+anything, not because they were cheap. The conclusion that the marks did not
+cause the crawl still holds — more strongly, since they did nothing at all —
+but the stated reasoning was wrong and 2fo's question remains exactly as open
+as it was.
+
+### The fix: the marks go where the instrument that worked lives
+
+`rbgpu_dal_mark()` publishes to the **diag table** — `dal_mark` (the last mark)
+and `dal_trail` (the ordered list, 96 bytes, `dal_trail_cap` reported rather
+than truncating silently). No flash commit, so 2fo's suspicion is untouched and
+the default stays as 2fo set it. The diag is the instrument that demonstrably
+worked on this boot: `plugin_check.sh` over SSH, uncapped, inside the wedge.
+
+Marks: 695 `processX6000FB` entered, 696/697 write routes landed/failed, 700
+all routes installed, 701/702 controller start in/out, 703/704 Wrangler start
+in/out. For boot 583 the diag flags already imply `695 696 700 701 702 703
+704`; the trail makes the ORDER and any skipped stage readable directly rather
+than inferred from seven separate booleans.
+
+### Not established
+
+- **Where the crawl is.** It is downstream of the whole promotion and after
+  `waitForHwStamp` #6 returned successfully. Nothing instrumented follows.
+- **Why the promotion correlates with the crawl at all.** 581 without it
+  reached a desktop; 582 and 583 with it both crawled. The promoted Wrangler
+  takes `IOFramebuffer`, so our own framebuffer should decline the panel (rule
+  38's mechanism) — a **candidate**, with no measurement behind it. The panel
+  ownership question could not be answered from this capture because
+  `ioreg.txt` holds only the `RembrandtGPU` subtree; `ioreg-raw.txt` is in the
+  same directory and has not been read.
+- The units question, unanswered since 3dcn-b, now with the one configuration
+  that was expected to answer it eliminated.
+
+Plugin **EA9CA223**. Hosttest 0 FAIL, 0 `error:`; `nm -u` clean (3fxf).

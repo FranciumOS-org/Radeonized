@@ -9973,8 +9973,12 @@ static uint32_t hooked_dal_r3_2pi(void *self, uint32_t reg, uint32_t a, uint8_t 
     return v;
 }
 
+/* 3ret-h: defined below, beside processX6000FB; the DAL path's marks go to
+ * the diag table rather than the flash trail - see the comment there. */
+static void rbgpu_dal_mark(uint32_t mark);
+
 static bool hooked_ctl_start_2ph(void *self, void *provider) {
-    rbgpu_gate_2en(701, "AmdRadeonControllerNavi2::start ENTERED");
+    rbgpu_dal_mark(701);   /* AmdRadeonControllerNavi2::start entered */
     if (!g_dal_safe) {
         // Rule 14: refuse loudly. This is the interlock, and it firing is a
         // GOOD outcome - it means the boot is intact and we learned the
@@ -9990,7 +9994,7 @@ static bool hooked_ctl_start_2ph(void *self, void *provider) {
               (unsigned long long)g_dal_writes);
     rbgpu_diag_set_num("dal_start", 1);
     bool ret = orig_ctl_start_2ph(self, provider);
-    rbgpu_gate_2en(702, "AmdRadeonControllerNavi2::start RETURNED");
+    rbgpu_dal_mark(702);   /* AmdRadeonControllerNavi2::start returned */
     rbgpu_log("2ph: controller start() returned %d after %llu dropped writes "
               "- DAL got as far as it could with no hardware behind it",
               ret, (unsigned long long)g_dal_writes);
@@ -10070,9 +10074,9 @@ static bool hooked_wr_start_2pk(void *self, void *provider) {
      * it by inference and nothing has ever put it by measurement. 704 present
      * moves the crawl downstream of the promotion entirely, which would be a
      * different problem from the one three milestones have assumed. */
-    rbgpu_gate_2en(703, "AmdGpuWrangler::start ENTERED - DAL is about to run");
+    rbgpu_dal_mark(703);   /* AmdGpuWrangler::start entered */
     bool ret = orig_wr_start_2pk(self, provider);
-    rbgpu_gate_2en(704, "AmdGpuWrangler::start RETURNED");
+    rbgpu_dal_mark(704);   /* AmdGpuWrangler::start returned */
     rbgpu_log("2pk: AmdGpuWrangler::start returned %d after %llu dropped "
               "writes and %llu reads (hw %llu atom %llu bios %llu)",
               ret, (unsigned long long)g_dal_writes,
@@ -10150,6 +10154,56 @@ static IOReturn hooked_wr_attr_2pl(void *self, uint32_t sel, unsigned long *a,
     return orig_wr_attr_2pl(self, sel, a, b, c, d, args);
 }
 
+
+/* 3ret-h: THE DAL TRAIL LIVES IN THE DIAG, NOT IN FLASH.
+ *
+ * 3ret-f and 3ret-g put six marks on the DAL path through `rbgpu_gate_2en`
+ * and ALL SIX WERE INERT. `rbgpu_gate_2en` opens with
+ *
+ *     if (nogate < 0) { nogate = rbgpu_arg("-rbgpunogates") ? 1 : 0; }
+ *     if (nogate) { rbgpu_diag_set_num("gate_stage", stage); return; }
+ *
+ * and **`-rbgpunogates` is in the default-on table** (`rb_defaults.h`), where
+ * 2fo put it deliberately: the trail's own synchronous flash commits were the
+ * leading suspect for that family's 24 wedged boots. So the trail is OFF
+ * unless its negative is passed, and the `600 601 602` in `rbgpu-gate` came
+ * from the peer's HWLibs gate, which calls `rbgpu_gate_nvram` DIRECTLY
+ * (`RembrandtGPUPeer.cpp:2362`) and never passes through the nogate check.
+ *
+ * I verified `-rbgpunogates` was absent from boot-args as a whole token - the
+ * right test for the wrong question - and declared the trail live. Rule 34:
+ * an experiment's arm is part of the experiment, and a default-on token is
+ * part of the arm. The card says to read `rb_defaults.h` rather than a copy of
+ * it, and this is what reading a copy costs.
+ *
+ * The marks move to the diag table, which is the instrument that actually
+ * worked on boot 583: `plugin_check.sh` ran over SSH inside the wedge and
+ * `peer.plist` carried the whole table at `diag_used 643`, uncapped, while
+ * the ~520-byte NVRAM copy had cut every `dal_*` key. No flash commit, so
+ * 2fo's suspicion is untouched and the default stays as 2fo set it.
+ *
+ * `dal_mark` is the last mark reached and `dal_trail` is the ordered list, so
+ * an endpoint and a path are both readable (rule 14 - an endpoint alone cannot
+ * say whether an earlier stage was skipped). */
+static char     g_dal_trail[96];
+static size_t   g_dal_trail_len = 0;
+static uint32_t g_dal_trail_cap = 0;
+
+static void rbgpu_dal_mark(uint32_t mark) {
+    char one[8];
+    const int n = snprintf(one, sizeof(one), "%u ", mark);
+    if (n > 0 && g_dal_trail_len + (size_t)n + 1 < sizeof(g_dal_trail)) {
+        memcpy(g_dal_trail + g_dal_trail_len, one, (size_t)n);
+        g_dal_trail_len += (size_t)n;
+        g_dal_trail[g_dal_trail_len] = '\0';
+    } else {
+        g_dal_trail_cap = 1;   /* reported, never silently truncated */
+    }
+    rbgpu_diag_set_num("dal_mark", mark);
+    rbgpu_diag_set_num("dal_trail_cap", g_dal_trail_cap);
+    rbgpu_diag_set_str("dal_trail", g_dal_trail);
+}
+
 __attribute__((noinline))
 void RGPU::processX6000FB(KernelPatcher &patcher, size_t id,
                           mach_vm_address_t address, size_t size) {
@@ -10193,7 +10247,7 @@ void RGPU::processX6000FB(KernelPatcher &patcher, size_t id,
      * Six marks for a six-way answer, each one a flash commit on the calling
      * thread so it survives the wedge (2eo-2fg). The write path still carries
      * NO mark - see the comment in `rbgpu_dal_allow` and 2fo. */
-    rbgpu_gate_2en(695, "processX6000FB ENTERED - Apple's FB kext loaded");
+    rbgpu_dal_mark(695);   /* processX6000FB entered - Apple's FB kext loaded */
 
     /* 3ret-d: THE SENTINEL GATE, AT THE POINT OF USE.
      *
@@ -10263,8 +10317,7 @@ void RGPU::processX6000FB(KernelPatcher &patcher, size_t id,
          hooked_dal_biosw_2pj, orig_dal_biosw_2pj},
     };
     g_dal_safe = patcher.routeMultiple(id, w, arrsize(w), address, size);
-    rbgpu_gate_2en(696, g_dal_safe ? "writeReg32 routes LANDED"
-                                   : "writeReg32 routes FAILED");
+    rbgpu_dal_mark(g_dal_safe ? 696u : 697u);  /* 696 routes landed, 697 FAILED */
     if (!g_dal_safe) {
         patcher.clearError();
         rbgpu_log("2ph: FAILED to route writeReg32 - the interlock will refuse "
@@ -10300,7 +10353,7 @@ void RGPU::processX6000FB(KernelPatcher &patcher, size_t id,
         rbgpu_diag_set_num("dalfb_srouted", 0);
     }
 
-    rbgpu_gate_2en(700, "DAL routes installed - the remap is in force");
+    rbgpu_dal_mark(700);   /* every DAL route installed; the remap is in force */
     KernelPatcher::RouteRequest st(
         "__ZN39AMDRadeonX6000_AmdRadeonControllerNavi25startEP9IOService",
         hooked_ctl_start_2ph, orig_ctl_start_2ph);
