@@ -1157,7 +1157,32 @@ than fighting it: Apple's DAL has **no DPCS file at all**, so Apple's release
 cannot come from DPCS code — it comes from the VBIOS/DMCUB transmitter path its
 `dcn20_link_encoder` + `bios_parser2` + `AmdDalDmcubService` invoke, which means
 the atom transmitter command CAN move this PHY when issued inside the full
-sequence.) **Two read-side hazards from their source, before any more RDPCS
+sequence.) **3ext / BOOT 586: THE HYBRID IS DEAD, MEASURED, AND THE REASON IS
+STRUCTURAL.** The obvious cheap route — keep `RBAMDFramebuffer` on the panel and
+let Apple's Wrangler run under 2pi's **private** category, then `extbind` its
+FB:1 — **does not exist.** Boot 586 (armed, `dalfbpriv_armed 1` / `why 0`, so
+the arm was genuinely in force unlike 585 where the one-shot was spent):
+`fdb_routed 1`, **`fdb_calls 0`** — `initializeFixedDisplayBinding` is **never
+called** — with `dalfb_start_ret 1` and `dal_trail ...703 704`, so the Wrangler
+**started, completed and returned true**, and
+**`AmdRadeonFramebuffer` 0 instances** (`AmdGpuWrangler` 1, `RBAMDFramebuffer`
+1, control `IOResources` 1). **Apple's Wrangler creates ZERO framebuffer
+children, so there is no object for `extbind`'s method to be called on.** Two
+independent instruments, same boot; `fdb_calls` is seeded 0 at route time so the
+zero is a reading (rule 14). Apple's kext logged **nothing** against 293 of our
+own lines in the same window (rule 36 controlled). **The conflict is through the
+ONE IOKit mechanism:** the real `IOFramebuffer` category creates framebuffers
+**and displaces our panel** (582, 583 — dark, boot never completes); the private
+category **coexists and creates none** (584, 586). The property that allows
+coexistence is the property that prevents ownership, and there is nothing in
+between. This sharpens 3ret-j: it is not only that nothing asks the private
+Wrangler for a mode — **there is nothing to ask**, which is the single cause of
+`dal_writes 0` across four boots in three configurations. **So `extbind` is NOT
+portable here**, and the fork collapses to Apple's framebuffer owning the panel
+too, which trades away brightness, the DRR ladder and 91-140 fps for a path that
+has never lit this panel. n: `fdb_calls 0` is **one boot** (the Wrangler-runs
+half has two, with 584).
+**Two read-side hazards from their source, before any more RDPCS
 work:** undefined offsets in `seg2 0x2928..0x2d8e` **wedge the RDPCS bus**
 (their `phyvalid.hpp` is a generated bitmap of the defined ones), and UNIPHY1-4
 (`0x2a00-0x2d8e`, where our PHY1-4 live) reportedly **never answer the CPU** —

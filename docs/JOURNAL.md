@@ -72148,3 +72148,105 @@ Two entries' worth of work that was not needed to answer the question, against
 one genuine finding (the DAL inventory, reinterpreted) and one genuine
 correction (the version). No boots, no hardware. The avoidable part was one
 grep of the previous day's journal entry.
+
+## 3ext / boot 586 — PATH B IS DEAD, AND THE REASON IS STRUCTURAL: THE PRIVATE CATEGORY IS WHY THERE ARE NO FRAMEBUFFERS
+
+Boot 586, armed, `arm_why 0`, hwlibs gate ok, `-rbgpudalfb` in the boot-args and
+`rbgpu-dalfb` consumed to 0 this boot, so `dalfbpriv_armed 1` /
+`dalfbpriv_oneshot_why 0` — the private-category arm was genuinely in force,
+unlike boot 585 where the arg was present and the one-shot was spent (rule 9).
+`-rbgpudalfbreal` absent, so this is 2pi's private category and not the
+promotion that wedged boots 582 and 583.
+
+### The reading
+
+```
+fdb_routed            1      the instrument was installed
+fdb_calls             0      initializeFixedDisplayBinding was NEVER CALLED
+dalfb_start           1      Apple's AmdGpuWrangler::start was entered
+dalfb_start_ret       1      ...and returned true
+dal_trail   695 696 700 701 702 703 704    entered (703) AND completed (704)
+dal_writes            0      DAL wrote no registers, as in 582/583/584
+dal_r_hw              4      the same four pipe-0 colour reads as 582/583/584
+
+AMDRadeonX6000_AmdGpuWrangler          1 instance
+AMDRadeonX6000_AmdRadeonFramebuffer    0 instances
+RBAMDFramebuffer                       1 instance   (the panel kept)
+IOResources                            1            (control)
+```
+
+**Apple's Wrangler starts, runs to completion, returns true, and creates ZERO
+`AmdRadeonFramebuffer` children.** So there is no object for
+`initializeFixedDisplayBinding` to be a method of, and it is never called.
+
+The zero is a reading and not an absence, which is the whole reason the
+instrument was built the way it was. `fdb_calls` is seeded to 0 at route time,
+so a successful route that is never called through is distinguishable from a
+failed route and from this build not being loaded — rule 14, and a missing ioreg
+key would have read as `0xffffffff`. And the conclusion does not rest on the
+hook at all: **the instance count is an independent second instrument in the
+same boot**, with `IOResources 1` as its control, and it says the same thing for
+a different reason. Two instruments, one answer.
+
+The log is controlled too and adds nothing: Apple's framebuffer kext emits **no
+lines at all** this boot, against 293 of our own in the same window at the same
+level, so the capture works (rule 36). The only relevant lines are IOPCIFamily's
+`child AMDRadeonX6000_AmdGpuWrangler(0x100000552) published` and four
+`gpu 0xfbc7 gpuc 0x100000552 /AMDRadeonX6000_AmdGpuWrangler` rows — so the
+Wrangler **is** published and **is** enumerated by something, and still makes no
+framebuffer.
+
+### Why this kills the hybrid rather than needing tuning
+
+The two things Path B needs are in direct conflict **through the same IOKit
+mechanism**, and both sides are now measured:
+
+| Wrangler's `IOMatchCategory` | coexists with `RBAMDFramebuffer`? | creates framebuffers? |
+|---|---|---|
+| `IOFramebuffer` (promoted, `-rbgpudalfbreal`) | **no** — displaces it, panel dark, boot never completes (582, 583) | yes (by inference: it is the category that owns displays) |
+| private (2pi, `-rbgpudalfb`) | **yes** — both attached (584, 586) | **no — zero, measured (586)** |
+
+The property that lets Apple's Wrangler coexist with our framebuffer is the same
+property that stops it creating any. There is no setting between the two: the
+match category is what the contest is fought over, and winning it is what owning
+displays means.
+
+This also sharpens 3ret-j rather than contradicting it. 3ret-j found the circle
+"nothing asks the private-category Wrangler for a mode, because it deliberately
+does not own `IOFramebuffer`". 3ext makes it one step more concrete and one step
+worse: it is not only that nothing asks — **there is nothing to ask.** No
+framebuffer object is ever constructed, so the question of whether anything would
+request a mode from it never arises, and `dal_writes 0` across four boots in
+three configurations has the same single cause throughout.
+
+### What survives, and what it costs
+
+`extbind` is not portable to our architecture, and that is now measured rather
+than argued. It hooks a method of Apple's per-display framebuffer; we have none
+of those and cannot have one without surrendering the category that `RBAMDFrame
+buffer` holds the panel with.
+
+So the fork collapses to the one path 3rmb describes: **Apple's framebuffer owns
+the panel too**, with our DCN 3.1.2 remap underneath it, which is what
+660m-Metal does and what boots 582 and 583 touched the first moments of. That is
+not a tuning change. It trades a panel path that works today — brightness, the
+derived refresh ladder, 91-140 fps — for one that has never once lit this panel,
+and 660m-Metal needed `dmub`, `firmware`, `golden`, `psp_compat`,
+`smu_powerplay` and `gfxclk` support to get there. The circle to break is the one
+3ret-j named: Apple's DAL must write to light the panel, and nothing asks it to
+write until the panel is lit.
+
+Honest sample count: `fdb_calls 0` is **n=1 boot**. The instance count agrees in
+the same boot and boot 584 independently recorded the Wrangler starting and
+returning true, so the Wrangler-runs half has two boots; the zero-children half
+has one. It is a presence/absence with two instruments rather than a variance
+claim, so rule 44's two-boots-per-side is weaker here than it would be for a
+rate — but it is one boot, and that is what the entry claims.
+
+Cost: one boot, one plugin build, and it answered the question it was built for
+on the first try. The instrument was inert as designed — it bound nothing, read
+nothing it could not reach, and the boot came up accelerated and complete.
+
+`rbgpu-safe` reads **1** at the end of this boot: the 3ret-e hold is in force by
+design, so the NEXT boot comes up stock until `sudo nvram rbgpu-safe=0` clears
+it. That is the rescue working, not a fault.
