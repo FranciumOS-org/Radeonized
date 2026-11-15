@@ -127,6 +127,32 @@ static const char *const rb_default_on_tokens[] = {
      * while each was unbooted; the standard this table asks for is a measured
      * boot, and they now have four between them. */
     "-rbgpufbbacklight", "-rbgpufbbuiltin", "-rbgpufbblparm",
+    /* 3ret: THE VBLANK-DRIVEN RETIRE, and the regression that earned it this
+     * line. It was opt-in "for its first boot" because 2zd's failure mode -
+     * the vblank stops offering and the watchdog is wrong - is 2xe's
+     * one-frame-per-ten-seconds desktop. It has since had boots 266, 268, 271
+     * and the boot of 2026-11-15 01:29, which read `vblret_armed 1`,
+     * `vblret_src 1`, a 2D5-DERIVED `vblret_sub 4` off a 6952507 ns period,
+     * `vblret_vbl` 10855, `subret/vbl` exactly 3.00 = sub-1, `sublate` 1 and
+     * `subskip` 0. That is the standard this table asks for.
+     *
+     * Rule 38 is satisfied by construction rather than by comment. The half
+     * that offers is the framebuffer's; a framebuffer that never offers, or
+     * stops, is reclaimed by `rb_retire_timer_should()`, which flips `src`
+     * back to the timer and counts a `takeback`, while
+     * `rb_retire_timer_period_us()` keeps the timer firing at `watch_us`
+     * precisely so a dead vblank is caught inside one quiet window. So the
+     * worst case of this default is the PRE-2zd behaviour, which is what an
+     * unarmed boot runs today - strictly no worse, for any panel.
+     *
+     * And the reason it is default-on rather than documented: opt-in meant one
+     * token's absence silently returned the machine to the configuration the
+     * +94 % was measured AGAINST, with every published number still looking
+     * reasonable. It took a user report to notice, and the runtime dial could
+     * not fix it because `rb_retire_sub_active()` needs `armed` first. A win
+     * that a reboot can lose is not a win. Disarm: `-rbgpunoretirevbl`,
+     * checked collision-free against all 128 tokens in the tree (rule 30). */
+    "-rbgpuretirevbl",
     /* instruments. They cost diag-table slots and nothing else, and they are
      * part of the measured configuration, so they stay on: a boot that reads
      * differently from boot 231 should differ in the hardware, not in what we

@@ -44,10 +44,28 @@ int defaults_tests(void)
      * number is asserted so the table cannot drift by accident - a token
      * arriving or leaving should cost a line in a journal entry, not go
      * unnoticed, and this assertion is what made 2z4 say so. */
-    CHECK(RB_DEFAULT_ON_COUNT == 53,
+    CHECK(RB_DEFAULT_ON_COUNT == 54,
           "the table holds boot 231's 45 tokens, 2y2's three brightness "
           "tokens, 2z4's -rbgpunopg, 2CA's -rbgpufbgpuname, 2CE's "
-          "-rbgpumtlname and 3rgr-f's -rbgpufbmodes");
+          "-rbgpumtlname, 3rgr-f's -rbgpufbmodes and 3ret's "
+          "-rbgpuretirevbl");
+
+    /* 3ret: the vblank-driven retire. Pinned by VALUE as well as by the
+     * count, for the same reason -rbgpumtlname is: the count alone cannot
+     * tell this token arriving from some other one arriving, and this is the
+     * token whose ABSENCE was the regression. An opt-in default returned the
+     * machine to the configuration the +94 % was measured against while every
+     * published number still looked reasonable, and it took a user report to
+     * find. The derived negative is asserted too, because that is the only
+     * way back out from the machine itself (rule 37). */
+    {
+        char o[64];
+        CHECK(rb_default_on("-rbgpuretirevbl") &&
+              rb_off_token("-rbgpuretirevbl", o, sizeof(o)) &&
+              strcmp(o, "-rbgpunoretirevbl") == 0,
+              "-rbgpuretirevbl is default-on and disarmed by "
+              "-rbgpunoretirevbl (3ret)");
+    }
 
     /* 2CE: the Metal name, promoted on two measured boots (417, 418). Pinned
      * by value as well as by the count, because this is the token that

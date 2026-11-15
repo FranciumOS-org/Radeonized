@@ -70527,3 +70527,80 @@ Two independent configuration differences are now on the table for one
 complaint: 3ret's missing `-rbgpuretirevbl`, and this. They are not
 alternatives; both are checkable, and 3ret's is the one with a measured +94 %
 behind it.
+
+---
+
+## 3ret-b (boot of 2026-11-15 01:29) — CONFIRMED ON HARDWARE, and the arm is now DEFAULT-ON
+
+3ret diagnosed the frame-delivery regression as the absence of one boot-arg.
+The boot that followed carried it. The user's report came first and unprompted:
+*"yeah its back to 144hz now the display"* — and every counter agrees, which is
+what rule 45 asks for when the deliverable is something a human observes.
+
+Artifacts checked before anything was read (rule 15): plugin **C2B6FF33**'s
+predecessor `9D896396`, framebuffer **E0245179**, and the arm present as a
+whole token in `kern.bootargs` rather than NVRAM's stale copy (rule 43).
+
+| key | before (3ret) | this boot |
+|---|---|---|
+| `vblret_armed` | 0 | **1** |
+| `vblret_src` | 0 | **1** (`RB_RETIRE_SRC_VBL`) |
+| `vblret_sub` | 1 | **4** |
+| `vblret_subnamed` | 0 | **0** — so 2D5 DERIVED it |
+| `vblret_autodrv` | 0 | **1** |
+| `vblret_autons` | 0 | **6952507** |
+| `vblret_vbl` | **0** | **10855** |
+| `vblret_timer` | 51114 | 1066 |
+| `vblret_subret` | — | 32559 |
+| `vblret_sublate` | — | 1 |
+| `vblret_subskip` | — | 0 |
+
+The derivation is self-consistent, which is the part worth keeping: 6952507 ns
+is 143.833 Hz to three figures, `ceil(6952507 / 2084000) = 4`, and
+`vblret_subnamed 0` says nothing named it — so 2D5's one constant produced the
+native default on its own, exactly as its own entry claims. And
+`subret / vbl = 32559 / 10855 = 3.00` is precisely `sub - 1`, the design: the
+vblank is the first of the four occasions and the run holds the other three.
+
+**`vblret_subfull` 10851 is the HEALTHY reading, not a fault**, and 2D0 is the
+reason that is knowable. `RB_SUB_ARM_FULL` is *"the run is complete — the next
+one is the VBLANK"*, so it fires once per vblank by construction. 2CF shipped
+that case merged into `subLate`, boot 424 read `vblret_sublate` climbing at
+146/s — once per vblank — and the misnamed counter became the headline suspect
+for a defect that was in the tool. With the codes split, `sublate` reads **1**
+for the whole boot and `subskip` **0**: one real miss, nothing starved.
+
+### The arm is default-on now, and rule 38 is satisfied by construction
+
+Added to `rb_default_on_tokens[]`, 53 → **54**.
+
+The standard this table asks for is a measured boot, and the token has four:
+266, 268, 271 and this one. What made it opt-in was 2zd's failure mode — the
+vblank stops offering and the watchdog is wrong, giving 2xe's
+one-frame-per-ten-seconds desktop. That is answered by code already in the
+tree, not by a promise: `rb_retire_timer_should()` flips `src` back to
+`RB_RETIRE_SRC_TIMER` and counts a `takeback` when the gap since the last
+vblank exceeds `quiet`, and `rb_retire_timer_period_us()` keeps the timer
+firing at `watch_us` **while the vblank drives**, for the express purpose of
+catching a dead vblank inside one quiet window. So the worst case of this
+default is the pre-2zd behaviour, which is what an unarmed boot runs today —
+**strictly no worse, for any panel**, which is what makes it safe to ship to
+machines whose framebuffer is not this one.
+
+And the argument for flipping it rather than documenting it: **a win a reboot
+can lose is not a win.** One token's absence returned the machine to the
+configuration the +94 % was measured *against*, while `vbl_mhz` still read
+143833 and `tick_us` still read its correct 6944 — every published number
+looked reasonable. It took a user report to notice, and the runtime dial could
+not fix it, because `rb_retire_sub_active()` tests `armed` before it tests
+anything else. Disarm is `-rbgpunoretirevbl`, checked collision-free against
+all 128 tokens in the tree (rule 30).
+
+Coverage: the count assertion in `defaults_test.c` **caught the change on the
+first run**, which is the guard working as 2z4 intended. Pinned by value as
+well as count, with its derived negative, for the same reason
+`-rbgpumtlname` is: a count cannot tell this token arriving from another one
+arriving, and this is the token whose absence *was* the regression. Two
+break-it checks, both fired (2 and 1 FAILs) — and a third, removing the token
+while leaving the old count, fired nothing, because that restores the asserted
+state rather than breaking a guard. Plugin **C2B6FF33**, not installed.
