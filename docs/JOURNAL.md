@@ -69917,3 +69917,183 @@ command releases PHY2". On this evidence it is:
 Nothing was built, installed or booted for this entry. It is a reading of
 another project's published work, and every claim in it belongs to them until
 this machine says otherwise.
+
+---
+
+## 3dcn (2026-11-14) — the decision to drive Apple's framebuffer, and the address table it needs
+
+After 3rmb the user chose the architecture: **let Apple's
+`AMDRadeonX6000Framebuffer` drive the display, with this plugin remapping DCN
+3.1.2 underneath it**, rather than continuing to drive DIG2 from
+`RBAMDFramebuffer`. This entry is the first milestone of that decision. No
+boot, no install; everything in it is static, and every number is checked
+twice.
+
+### The route was ours already, and 2lj had written it down
+
+2li injected `device-id = 0x73A0` so `AMDRadeonNavi21Controller` would match,
+and 2lj recorded why it failed: every accelerator patch this plugin has
+**keys on 0x1681** (`kern_start.cpp:977`, `:6452`, `:6568`), so lying about
+the device id left Apple's stack asking about a device our patches had never
+prepared. It cost the accelerator and bought no framebuffer.
+
+2lj then named the right shape and left it untested:
+
+> *"A personality declared by THIS kext with the same `IOClass` and
+> `IOPCIMatch 0x16811002` would instantiate Apple's controller against our
+> device with the device id untouched."*
+>
+> *"Unexamined, and required before trying it: whether the controller class is
+> reachable from another kext's personality (it needs `OSBundleLibraries` on
+> `com.apple.kext.AMDRadeonX6000Framebuffer`, which lives in
+> SystemKernelExtensions.kc, not the boot collection"*
+
+**660m-Metal answers that question yes, and answers it better than the
+question was asked:** no such library dependency is needed at all. Their
+`Info.plist` lists only Lilu, IOPCIFamily and the KPIs, and declares four of
+Apple's classes by name — `AMDRadeonX6000_AMDRadeonHWServicesNavi` (score
+65056), `AMDRadeonX6000_AmdGpuWrangler` (65055, `IOMatchCategory
+IOFramebuffer`), `AMDRadeonX6000_AmdRadeonControllerNavi23` (65054,
+`ATIFramebuffer`) and `AMDRadeonX6000_AMDNavi23GraphicsAccelerator`
+(65051) — all on `IOPCIMatch 0x16811002 0x73FF1002`, scored above Apple's own
+60000. IOKit resolves an `IOClass` by name and pulls the providing kext in;
+the device id is never touched, so 2lj's failure mode is avoided by
+construction.
+
+Note **Navi23, not Navi21**. Navi 23 is Dimgrey Cavefish, DCN **3.0.2**, and
+the remap below is a 3.0.2 table. Our own accelerator currently comes up as
+`AMDNavi21GraphicsAccelerator`; whether the two halves can disagree about
+which Navi they are is not yet established and is the first thing the
+personalities will tell us.
+
+### Every hook target verified on THIS OS build
+
+`AMDRadeonX6000Framebuffer.kext` is present in `/System/Library/Extensions`
+and **not loaded** (`kextstat` shows AMDSupport, X6000HWServices, X6800HWLibs
+and X6000 only), which is the state 2kx first measured and the reason the panel
+has always been on `IONDRVFramebuffer` without our own framebuffer. Extracted
+from `SystemKernelExtensions.kc` at vmaddr `0x00000bf54000`, 9 560 360 bytes.
+
+Rule 1 — never route a name unless `nm -m` shows it defined there. Thirteen
+targets checked against **25G342**, the build this machine actually runs; all
+thirteen are `(__TEXT,__text) external`:
+
+| symbol | addr |
+|---|---|
+| `AmdDalHelper::dalAtomReadRegister32` | `0xbf9e22e` |
+| `AmdDalHelper::dalAtomWriteRegister32` | `0xbf9e244` |
+| `AmdDalHelper::dalAtomExecCmdTable` | `0xbf9e202` |
+| `AmdRegisterAccess::hwReadReg32` | `0xbf70c4e` |
+| `AmdRegisterAccess::readValidateReg32` | `0xbf70cc8` |
+| `AmdRegisterAccess::writeReg32` | `0xbf70bda` |
+| `AmdRadeonControllerNavi2::start` | `0xbf57e30` |
+| `AmdRadeonControllerNavi23::probe` | `0xbf89690` |
+| `AmdGpuWrangler::probe` | `0xbf985ae` |
+| `AmdLink::detectLink` | `0xbf99830` |
+| `AmdRadeonController::detectDisplayOnLink` | `0xbfa251e` |
+| `AmdRadeonController::establishBootDisplay` | `0xbfa1e20` |
+| `AmdRadeonFramebuffer::open` | `0xbf68d4c` |
+
+**Rule 5 fired immediately**: `AmdGpuWrangler::probe` is `__ZN29…`, not
+`__ZN30…`. 660m-Metal carries three fallback spellings for that one symbol and
+the 29-character form is the one that exists here. A hand-written mangled name
+with the wrong length prefix silently unscopes the fix, which is the whole of
+rule 5, and it was waiting in the first symbol list copied across.
+
+Rule 2 — refuse a target whose first five bytes hold a rel8/rel32 branch,
+because Lilu copies displaced instructions byte for byte. All thirteen
+disassemble to a plain frame setup (`55 / 48 89 e5` then `41 57`, `53`, or a
+`movq` off `%rdi`); none has a relative branch in reach. `AmdRadeonController`
+and `AmdRadeonControllerNavi21`/`Navi23` are all registered OSMetaClasses here,
+as are `AmdDalHelper`, `AmdRegisterAccess`, `AmdLink` and
+`AmdRadeonFramebuffer`, so the personalities have classes to name.
+
+### The register table, and it is validated two independent ways
+
+Navi 23's DAL computes addresses from `dcn_3_0_2_offset.h`; this chip is DCN
+3.1.2. Most registers kept their address and **298 moved**. Left untranslated,
+DAL reads and writes the wrong dword for those — journal 22855's *"or worse,
+program a 3.0 register layout into a 3.1.2 chip"*, which is the stated reason
+this project built its own framebuffer. So the personalities **cannot** ship
+before the translation: they are one change, in this order.
+
+`tools/re/dcn_remap_gen.py` generates `src/common/rb_dcn_remap.h` from the two
+upstream headers and nothing else. An address is `base[BASE_IDX] + offset`;
+3.0.2 spells the defines `mm`, 3.1.2 spells them `reg`, same meaning.
+
+**The bases are read off this chip, not inferred.** `build/out/rbdump
+tests/data/rembrandt-680m-tufa15.bin` prints the DMU row as
+`271 0 3.1.3.0  0x12 0xc0 0x34c0 0x9000 0x2403c00`. `base[1] = 0xc0` and
+`base[2] = 0x34c0` are the two CLAUDE.md already recorded from 2EF; **`base[3]
+= 0x9000` is read here for the first time**, and it is what makes the 47
+registers that *change BASE_IDX* between the generations mappable at all. A
+first draft of the generator refused those 47, on the honest grounds that
+resolving them needed a base it did not have.
+
+That number matters for a second reason. 660m-Metal's table implies the same
+`0x9000` (`0x98c7 - 0x08c7`), and **taking it from them would have made the
+cross-check circular for exactly the entries that needed it.** Reading it from
+the chip keeps the two sources independent.
+
+**The control: 298 against 298, every `to` identical, nothing present in only
+one table.** Two generators, two codebases, the same public headers, one
+reading its bases off the discovery table and the other resolving against a
+constant. The worked example that validates the arithmetic end to end is
+`DOMAIN16_PG_CONFIG`: `0x00a1` in 3.0.2 and `0x0089` in 3.1.2, both BASE_IDX 2,
+giving `0x3561 -> 0x3549`, which is their table's first row.
+
+The headers are fetched, not committed: `tools/fetch_linux_ref.sh` now takes a
+list and pins **both** DCN headers to **v6.6** by sha256 alongside the SMU one.
+A first pass fetched them from `master` into the wrong directory, which would
+have made a register address depend on whatever upstream said that day —
+corrected before anything was generated from it. Re-generating from the pinned
+v6.6 copies reproduces 298/298.
+
+`src/common/rb_dcn_addr.h` is the hand-written half: `rb_dcn_addr_312()`, a
+binary search returning an unmoved address unchanged and reporting through
+`moved` which path it took, so a caller cannot confuse "not in the table" with
+"maps to itself" (rule 14). The generator refuses duplicate `from` values
+outright, so the ordering the search needs is established where the data is
+produced; the hosttest re-checks it on the compiled-in table anyway, because a
+generator's promise is not evidence about the file that got compiled.
+
+### Coverage, including a guard that had none
+
+`tools/hosttest/dcn_addr_test.c`: the count, sortedness, three spot checks
+agreed by both generators, the BASE_IDX-change case with its arithmetic spelled
+out, unmoved passthrough (the majority case — the table holds 298 out of
+thousands), `moved` reported both ways, a NULL `moved`, the first and last
+entries, and a loop over **all 298** asserting each is findable and that no
+entry maps to itself. Plus the hazard that matters for the caller: translation
+is **not** an involution — at least one `to` is itself a `from` — so applying
+it twice corrupts the address.
+
+Six break-it checks. Five fired at once: search direction (608 FAIL), upper
+bound off by one (5), `moved` on a hit (305), passthrough on a miss (5), and
+the zero-count refusal (1).
+
+**The sixth FIRED NOTHING, and that is the finding.**
+`rb_dcn_addr_table_ok()` read the global table directly, so breaking its
+comparison changed nothing — the only table it could ever see is the real one,
+the real one is sorted, and it returned 1 either way. The check had no
+coverage. This is the same "the term carries no information" defect this
+project has now written into its own guards four times, and the sweep is the
+only reason it was caught. Fixed by making `rb_dcn_addr_sorted(tbl, count)`
+take the table, so the test can feed it an unsorted fixture, a duplicated one
+and both degenerate inputs; the break then fails three assertions. Breaking the
+degenerate refusal by deleting it tripped **`-Werror` for the tenth time** and
+was re-run as a narrowed break that compiles, where it fired.
+
+### Where this leaves the architecture
+
+Done: the decision, the route confirmed against a working machine, every hook
+target verified present and patchable on 25G342, and the address table built
+and double-validated.
+
+Not done, and not started: the personalities themselves, the accessor hooks
+that apply the translation, the PHY write and read suppression 3rmb enumerated
+(the `RDPCSTX_CNTL = 0x400000` and `DPCSTX_DEBUG_CONFIG` writes, the
+`ENABLE_DISP_POWER_GATING` command, the COMBO-PHY PLL power-downs, and
+treating UNIPHY1-4 as a hole), the VBIOS augmentation Apple's driver needs, and
+`extbind`. Each is its own milestone. Nothing here changes what boots today:
+no personality is declared yet and `RBAMDFramebuffer` is untouched.
