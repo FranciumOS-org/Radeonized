@@ -1242,17 +1242,50 @@ eliminated — it never names `AmdRadeonController` (control: 5373 symbols).
 UNIPHY_A, paths 1-4 DP on UNIPHY_B..E (**path 2 = UNIPHY_C = phyid 2 =
 `DP_IS_USB_C 1`**, 300-310's port), path 5 generic. **Six paths against Apple's
 seed of exactly 6.** So a well-formed table containing the panel's own eDP path
-yields zero links. **Four readings are open and NONE is established:**
-`createLinks` may never be called (the **controller's** `start()` return has
-never been measured — `dal_start_ret`/`dalfb_start_ret` are DAL's and the
-Wrangler's, and `createFbStubs` returns `%r14d` = the loop index); the parser
-may lack the image (`createBiosParser` non-NULL is not `readAtomBios` OK);
-`getConnectorList` may filter on `supporteddevices`, a device tag or a revision;
-or `createLink` may be what fails. **Next: two instruments, ONE boot** — route
-`createLinks` and publish the in/out count either side of the `*0x190` call,
-plus `+0x120` and `getConnectorCount()` — with a **seeded call counter** like
-`fdb_calls`, or a zero is unreadable (rule 14). Nothing shows a non-zero count
-lights a panel.
+yields zero links. **3ext-e KILLED TWO OF THOSE FOUR WITH NO BOOTS, AND BOTH WERE ERRORS IN THIS
+CARD.** (1) **The controller's `start()` return HAS been measured since 2ph** —
+`hooked_ctl_start_2ph` routes `AmdRadeonControllerNavi2::start` and publishes
+**`dal_start_ret`, which boot 588 read as 1**; the counter was in the very
+sample the claim was written beside. (2) **0 is `kIOReturnSuccess` on this
+path**: `%r14d` is zeroed at `0xbf9ff18` **before** the count test, and `start`
+does `testl %eax,%eax / je 0xbf9fb80` **into** `setupHwServices` /
+`copyEFIPropertiesToStubs` / `reportBrandingInformation`, with the fall-through
+logging `!!! Could NOT Create`. `createLinks` is the same shape — success 0,
+`createLink` failure **`0xE00002BC`** — and its caller is
+`createControllerServices()` under `start`, so **`dal_start_ret 1` also
+eliminates "createLink failed"**. The whole chain **SUCCEEDS and creates
+nothing**. **ONE candidate is left: `getConnectorList` wrote back n = 0** —
+either the parser has no image (`createBiosParser` non-NULL is not
+`readAtomBios` OK) or it filters on `supporteddevices` / a device tag / a
+revision.
+
+**THE INSTRUMENT IS BUILT AND NOT YET RUN (3ext-e).**
+`src/common/rb_fbstubs.h` (read-only, no setter) + two routes in
+`processX6000FB`, installed in **every** configuration the kext loads in (rule
+39): `createLinks` -> `clk_*`, `createFbStubs` -> `cfs_*`, both counters
+**seeded at route time**, both targets checked against rules 1/2/3 first.
+Verdict is **three things** — ran / what the parser said / did a link survive —
+with `V_NOT_RUN` and `V_UNREADABLE` and **`V_CONTAMINATED`** checked before any
+positive finding: `getConnectorCount()` (slot `0x188`) is the **in-sample
+control** for `getConnectorList()` (slot `0x190`), and one non-zero beside the
+other's zero outranks either. Both getters are `const` and called **after** the
+original (rule 16). `rb_fbstubs_text_ok()` is bounded **above** by the kalloc
+floor — accepting anything above the heap floor as a function pointer is how a
+wild vtable slot gets called. 16 break-it guards, all firing; **two found
+defects in MY OWN checks** — `0xd8/0x20` is also 6 under integer division
+(restated as the product), and no case had `calls 0` **and** an unreadable
+`why`, which is exactly what a boot where `createLinks` never runs produces.
+UUID **F0058BB3**, hosttest ok, `nm -u` 0, 2oz 0.
+**THE ARM IS `-rbgpudalfb` (PRIVATE) PLUS `sudo nvram rbgpu-dalfb=1`** —
+Apple's framebuffer kext does **not load on a normal armed boot** (the
+controller exists only when the Wrangler does, which publishes
+`LoadController`), and the private category keeps `RBAMDFramebuffer` on the
+panel so the machine stays usable. **Whether the controller starts in the
+private category has never been measured**, so `clk_routed 1` with
+`clk_calls 0` is itself the finding and the promoted arm is the fallback at the
+cost of a dark boot. Prediction recorded before the boot: `clk_ret 0`,
+`cfs_count 0`, `clk_links 0`, **`clk_verdict 4 V_NO_CONNECTOR`** with
+`clk_conncount 0` agreeing.
 **Two read-side hazards from their source, before any more RDPCS
 work:** undefined offsets in `seg2 0x2928..0x2d8e` **wedge the RDPCS bus**
 (their `phyvalid.hpp` is a generated bitmap of the defined ones), and UNIPHY1-4

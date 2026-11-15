@@ -25,6 +25,7 @@
 #include "rb_atombios.h" /* 3vb-c: is this buffer an ATOM VBIOS?            */
 #include "rb_vfct.h"     /* 3vb-c: find our image inside the ACPI VFCT     */
 #include "rb_osver.h"    /* 3vb-e: RB_OSD_KEXTOFF gates the 0x150 offset   */
+#include "rb_fbstubs.h"  /* 3ext-e: why there is no Apple framebuffer       */
 
 #ifndef RB_HWID_MP1
 #define RB_HWID_MP1 1
@@ -10354,6 +10355,140 @@ static uint32_t hooked_fdb_3ext(void *self) {
     return ret;
 }
 
+/* 3ext-e: THE CONNECTOR COUNT, WHICH IS WHERE THE DARK PANEL COMES FROM.
+ *
+ * Two routes, both read-only, both on functions `nm -m` shows DEFINED in this
+ * kext (rule 1) and whose first five bytes are `pushq %rbp / movq %rsp,%rbp /
+ * pushq %r15` with no rel8 or rel32 branch (rule 2), and neither of which is
+ * routed anywhere else in this tree (rule 3):
+ *
+ *   AmdRadeonController::createLinks()          0xbfa0602
+ *   AmdRadeonController::createFbStubs(uint8_t) 0xbf9fef0
+ *
+ * The second exists so that "createLinks never ran" and "start never got as far
+ * as the stubs" are different readings. Both counters are seeded at route time,
+ * because every value of interest on this path is legitimately zero (rule 14).
+ *
+ * The two virtual calls we make ourselves are `const` getters on an object
+ * Apple has already finished constructing, and they are made AFTER the original
+ * has returned, so our instrument cannot sit inside the sequence it measures
+ * (rule 16). getConnectorCount is the in-sample control for getConnectorList:
+ * one answering non-zero while the other answers zero is a disagreement, and
+ * rb_fbstubs_verdict reports that in preference to any conclusion drawn from
+ * either - both are also published raw, because a verdict term that carries no
+ * information is rule 48's trap.
+ *
+ * Every pointer is floor-checked before it is dereferenced and every refusal
+ * publishes the value it refused (rule 19), and the offsets are gated on
+ * RB_OSD_KEXTOFF so an unmeasured OS declines rather than reading a wrong
+ * address (rule 41).
+ */
+using t_rbClk  = uint32_t (*)(void *);
+using t_rbCfs  = uint32_t (*)(void *, uint8_t);
+using t_rbCCnt = uint32_t (*)(void *);
+using t_rbCLst = uint32_t (*)(void *, uint32_t *, void *);
+
+static t_rbClk  orig_clk_3exte = nullptr;
+static t_rbCfs  orig_cfs_3exte = nullptr;
+static uint32_t g_clk_calls    = 0;
+static uint32_t g_cfs_calls    = 0;
+
+static void rbgpu_fbstubs_probe(uintptr_t self, int osOk) {
+    const int selfOk = rb_fbstubs_obj_ok(static_cast<uint64_t>(self));
+
+    uint64_t biosp = 0, vtable = 0, fnCount = 0, fnList = 0;
+    if (selfOk && osOk) {
+        biosp = *reinterpret_cast<volatile uintptr_t *>(self + RB_FBSTUBS_OFF_BIOSP);
+        if (rb_fbstubs_obj_ok(biosp)) {
+            vtable = *reinterpret_cast<volatile uintptr_t *>(biosp);
+            if (rb_fbstubs_obj_ok(vtable)) {
+                fnCount = *reinterpret_cast<volatile uintptr_t *>(
+                    vtable + RB_FBSTUBS_VT_CONNCOUNT);
+                fnList = *reinterpret_cast<volatile uintptr_t *>(
+                    vtable + RB_FBSTUBS_VT_CONNLIST);
+            }
+        }
+    }
+
+    const uint32_t why = rb_fbstubs_why(selfOk, osOk, biosp, vtable,
+                                        fnCount, fnList);
+    rbgpu_diag_set_num("clk_why",   why);
+    rbgpu_diag_set_num("clk_biosp", biosp);   /* rule 19: publish the value */
+    if (why == RB_FBSTUBS_W_VTABLE || why == RB_FBSTUBS_W_SLOTS) {
+        rbgpu_diag_set_num("clk_vt",   vtable);
+        rbgpu_diag_set_num("clk_fncc", fnCount);
+        rbgpu_diag_set_num("clk_fncl", fnList);
+    }
+
+    uint32_t links = 0;
+    if (selfOk && osOk) {
+        links = *reinterpret_cast<volatile uint8_t *>(self + RB_FBSTUBS_OFF_LINKCNT);
+        rbgpu_diag_set_num("clk_links", links);
+        uint32_t mask = 0;
+        for (uint32_t i = 0; i < RB_FBSTUBS_SEED; i++) {
+            const uintptr_t slot = *reinterpret_cast<volatile uintptr_t *>(
+                self + RB_FBSTUBS_OFF_LINKARR + i * 8u);
+            if (slot != 0) { mask |= (1u << i); }
+        }
+        rbgpu_diag_set_num("clk_linkmask", mask);
+    }
+
+    uint32_t connCount = 0, listRet = RB_FBSTUBS_IORET_OK, listN = 0;
+    if (why == RB_FBSTUBS_W_OK) {
+        void *parser = reinterpret_cast<void *>(biosp);
+
+        connCount = reinterpret_cast<t_rbCCnt>(fnCount)(parser);
+        rbgpu_diag_set_num("clk_conncount", connCount);
+
+        uint8_t buf[RB_FBSTUBS_BUFSZ];
+        for (uint32_t i = 0; i < RB_FBSTUBS_BUFSZ; i++) { buf[i] = 0; }
+        uint32_t n = rb_fbstubs_seed();
+        listRet = reinterpret_cast<t_rbCLst>(fnList)(parser, &n, buf);
+        listN   = n;
+        rbgpu_diag_set_num("clk_listret", listRet);
+        rbgpu_diag_set_num("clk_listn",   listN);
+        rbgpu_diag_set_num("clk_nsane",   rb_fbstubs_n_sane(listN) ? 1 : 0);
+
+        /* The first descriptor's head, only when the count says it was written
+         * and the claim fits our buffer. A descriptor we did not establish was
+         * filled is not evidence of anything. */
+        if (listN > 0 && rb_fbstubs_n_sane(listN)) {
+            const uint32_t *d = reinterpret_cast<const uint32_t *>(buf);
+            rbgpu_diag_set_num("clk_d0w0", d[0]);
+            rbgpu_diag_set_num("clk_d0w1", d[1]);
+            rbgpu_diag_set_num("clk_d0w2", d[2]);
+        }
+    }
+
+    rbgpu_diag_set_num("clk_verdict",
+                       rb_fbstubs_verdict(g_clk_calls, why, connCount,
+                                          listRet, listN, links));
+}
+
+static uint32_t hooked_createlinks_3exte(void *self) {
+    rbgpu_diag_set_num("clk_calls", ++g_clk_calls);
+    const int       major = getKernelVersion();
+    const int       osOk  = rb_os_derived(major, RB_OSD_KEXTOFF) != 0;
+    const uintptr_t s     = reinterpret_cast<uintptr_t>(self);
+    if (!osOk) { rbgpu_diag_set_num("clk_osmajor", static_cast<uint64_t>(major)); }
+
+    const uint32_t ret = orig_clk_3exte(self);
+    rbgpu_diag_set_num("clk_ret", ret);
+    rbgpu_diag_set_num("clk_ok",  (ret == RB_FBSTUBS_IORET_OK) ? 1 : 0);
+
+    rbgpu_fbstubs_probe(s, osOk);
+    return ret;
+}
+
+static uint32_t hooked_createfbstubs_3exte(void *self, uint8_t count) {
+    rbgpu_diag_set_num("cfs_calls", ++g_cfs_calls);
+    rbgpu_diag_set_num("cfs_count", count);
+    const uint32_t ret = orig_cfs_3exte(self, count);
+    rbgpu_diag_set_num("cfs_ret", ret);
+    rbgpu_diag_set_num("cfs_ok",  (ret == RB_FBSTUBS_IORET_OK) ? 1 : 0);
+    return ret;
+}
+
 __attribute__((noinline))
 void RGPU::processX6000FB(KernelPatcher &patcher, size_t id,
                           mach_vm_address_t address, size_t size) {
@@ -10525,6 +10660,33 @@ void RGPU::processX6000FB(KernelPatcher &patcher, size_t id,
                   "hybrid-path prerequisite CANNOT be read this boot. Nothing "
                   "is broken by this; the measurement is simply absent.");
         rbgpu_diag_set_num("fdb_routed", 0);
+    }
+
+    /* 3ext-e: the connector count. Installed in EVERY configuration where this
+     * kext loads, for the same reason the fdb route is: "it was never reached"
+     * is only a reading if the instrument was present in the configuration that
+     * would have reached it (rule 39). Both counters are seeded HERE so a boot
+     * that routes and never calls through is distinguishable from one where the
+     * route failed and from one where this build was not loaded (rule 14). */
+    KernelPatcher::RouteRequest clk[] = {
+        { "__ZN34AMDRadeonX6000_AmdRadeonController11createLinksEv",
+          hooked_createlinks_3exte, orig_clk_3exte },
+        { "__ZN34AMDRadeonX6000_AmdRadeonController13createFbStubsEh",
+          hooked_createfbstubs_3exte, orig_cfs_3exte },
+    };
+    if (patcher.routeMultiple(id, clk, 2, address, size)) {
+        rbgpu_diag_set_num("clk_routed", 1);
+        rbgpu_diag_set_num("clk_calls",  0);
+        rbgpu_diag_set_num("cfs_calls",  0);
+        rbgpu_log("3ext-e: routed createLinks and createFbStubs - the connector "
+                  "count that decides whether any Apple framebuffer is ever "
+                  "constructed is readable this boot");
+    } else {
+        patcher.clearError();
+        rbgpu_log("3ext-e: FAILED to route createLinks/createFbStubs - the "
+                  "connector count CANNOT be read this boot. Nothing is broken "
+                  "by this; the measurement is simply absent.");
+        rbgpu_diag_set_num("clk_routed", 0);
     }
 
     rbgpu_dal_mark(700);   /* every DAL route installed; the remap is in force */

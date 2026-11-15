@@ -72677,3 +72677,141 @@ be unreadable.
 Nothing here shows that a non-zero count lights a panel. It shows that the
 single input to the only code that can create an Apple framebuffer on this
 machine is a connector list, and that the table behind it is present and sane.
+
+---
+
+## 3ext-e — the connector-count instrument, and two of 3ext-d's four candidates killed with no boots
+
+Tags: `3ext-e`, `3ext-d`, `3ext-c`, `2ph`
+
+### Two corrections to 3ext-d, both material
+
+3ext-d closed with four candidate explanations for `getConnectorList` yielding
+no links and said none was established. Two of them were already answered by
+evidence in hand, and the entry was wrong to list them. The card carried the
+same two errors and has been corrected in place.
+
+**1. The controller's `start()` return HAS been measured, since 2ph.**
+`hooked_ctl_start_2ph` routes `AmdRadeonControllerNavi2::start` and publishes
+`dal_start_ret`. Boot 588 read **1**. So "createLinks may never be called
+because the controller's start failed earlier" is not open: start ran to
+completion and returned true. 3ext-c's and 3ext-d's claim that this had never
+been measured was a failure to read our own diag table, which is the recurring
+error in its plainest form — the counter was in the very sample both entries
+quoted.
+
+**2. A zero count does NOT make `createFbStubs` fail, and 0 is SUCCESS on this
+path.** `%r14d` is zeroed at `0xbf9ff18`, **before** the `testb %r15b,%r15b`
+count test, so the skip path returns 0. And `start` does
+`testl %eax,%eax / je 0xbf9fb80`, where `0xbf9fb80` is
+`setupHwServices` / `copyEFIPropertiesToStubs` / `reportBrandingInformation` —
+the **continue** path — while the fall-through logs
+`!!! Could NOT Create ...`. These are `IOReturn` codes: **0 is
+`kIOReturnSuccess`**. `createLinks` is the same shape: the no-connector path
+does `xorl %eax,%eax` and returns success, and its failure path logs
+`!!! [Link:%u] Failed to create link.` and returns **`0xE00002BC`**.
+
+Its caller is `AmdRadeonControllerNavi21::createControllerServices()`, under
+`start`. So `dal_start_ret 1` also eliminates the fourth candidate: if
+`createLink` had failed, `createLinks` would have returned `0xE00002BC` and
+start would have taken its error path.
+
+**So the whole chain SUCCEEDS and creates nothing**, which is exactly what
+"started, returned true, created nothing" has meant in every boot of this line
+since 582. One candidate is left standing: `getConnectorList` wrote back
+**n = 0**.
+
+### The instrument
+
+`src/common/rb_fbstubs.h` (read-only, no setter) plus two routes in
+`processX6000FB`, installed in every configuration where Apple's framebuffer
+kext loads — rule 39, since "it was never reached" is only a reading if the
+instrument was present in the configuration that would have reached it.
+
+Targets, both checked against rules 1, 2 and 3 before a line was written:
+`nm -m` shows each **defined** in this kext; each prologue is
+`pushq %rbp / movq %rsp,%rbp / pushq %r15` with no rel8 or rel32 in the first
+five bytes; and neither appears anywhere else in the tree.
+
+```
+AmdRadeonController::createLinks()            0xbfa0602   -> clk_*
+AmdRadeonController::createFbStubs(uint8_t)   0xbf9fef0   -> cfs_*
+```
+
+The second route exists so that "createLinks never ran" and "start never got as
+far as the stubs" are different readings rather than one silence.
+
+**The verdict is three things, never one number** (310's lesson): did
+`createLinks` run, what did the parser say, and did any link survive.
+`rb_fbstubs_verdict()` checks its controls **before** any positive finding —
+`V_NOT_RUN` outranks everything, then `V_UNREADABLE`, then
+**`V_CONTAMINATED`**, which is the case that matters most: we call
+`getConnectorCount()` (slot `0x188`) as well as `getConnectorList()` (slot
+`0x190`), and one answering non-zero beside the other's zero is a disagreement
+that outranks any conclusion drawn from either. Both are published raw as well,
+because a verdict term that carries no information is rule 48's trap and this
+project has met it three times.
+
+Both getters are `const` and are called **after** the original has returned, so
+the instrument cannot sit inside the sequence it measures (rule 16). Every
+pointer is floor-checked against rule 19's two floors before it is
+dereferenced — and `rb_fbstubs_text_ok()` is bounded **above** by the kalloc
+floor, because accepting any address above the heap floor as a function pointer
+is how a wild vtable slot gets called. Refusals are codes with the refused
+value published beside them, and the offsets are gated on `RB_OSD_KEXTOFF` so
+an unmeasured OS declines rather than reading a wrong address (rule 41).
+
+The in/out count is seeded with **Apple's** seed of 6, not our buffer's 8
+slots, so the call behaves as the real one does; the two extra slots are slack
+against a parser that ignores the seed, never a larger ask.
+`rb_fbstubs_n_sane()` bounds the returned count against **our** capacity, and
+the first descriptor is read only when the count says it was written.
+
+### Break-it sweep: 16 guards, all fire, and two found defects in my own checks
+
+Rule 48, one break per guard, grepping `error:` as well as `FAIL`.
+
+- **`stride wrong` FIRED NOTHING** first time. The case asserted
+  `0xd8 / 0x24 == 6`, and `0xd8 / 0x20` is **also 6** under integer division,
+  so a wrong stride passed it. Restated as the product,
+  `RB_FBSTUBS_DESC_STRIDE * RB_FBSTUBS_SEED == 0xd8`, which is the actual
+  relationship. A check that passes for the wrong reason is not coverage, and
+  only the sweep found it.
+- **`verdict: calls check last` FIRED NOTHING** first time, and this was a
+  coverage gap rather than a weak assertion: every case had either `calls == 0`
+  **or** an unreadable `why`, never both — yet both together is precisely what
+  a boot where `createLinks` never runs produces, because nothing was read.
+  Added a case pinning that `calls 0` with `W_BIOSP` is still `V_NOT_RUN`.
+
+The other fourteen fired on the first attempt, including the one that matters
+most: a `connlist` slot holding a **heap** address is refused, which is the case
+the upper bound on the text floor exists for. `-Werror` did not fire this time.
+
+### Build
+
+`fbstubs: ok`; `make plugin` clean of new warnings; UUID **F0058BB3**;
+`kmutil libraries -p` resolves **0** from `SystemKernelExtensions.kc` (the 2oz
+trap); `grep -c IOGraphicsFamily src/plugin/Info.plist` **0**; `nm -u` shows
+**0** undefined symbols of ours (3fxf's guard).
+
+### The arm, and why this costs a boot with the panel alive
+
+Apple's framebuffer kext is **not loaded at all** on a normal armed boot — the
+controller only exists when the Wrangler does, since the Wrangler publishes
+`LoadController` and the five controller personalities match on it in the
+`ATIFramebuffer` category. So one of the `-rbgpudalfb*` arms is required.
+
+The **private** category (`-rbgpudalfb`, 2pi's variant) is the one to use: it
+does not contest `IOFramebuffer`, so `RBAMDFramebuffer` keeps the panel and the
+machine stays usable, and 3ext/584/586 measured that the Wrangler still starts
+there — which is what publishes `LoadController`. Whether the controller
+actually starts in that configuration has **never been measured** (no
+private-category capture with `igpu-children.txt` survives in the last forty),
+so `clk_calls 0` with `clk_routed 1` would itself be the finding, and the
+promoted arm is the fallback at the cost of a dark boot.
+
+Prediction, recorded before the boot: `clk_routed 1`, `clk_calls 1`,
+`clk_ret 0`, `cfs_count 0`, `clk_links 0`, `clk_verdict 4
+V_NO_CONNECTOR`, with `clk_conncount 0` agreeing. A `V_CONTAMINATED` or a
+non-zero `clk_conncount` would be the more interesting outcome and is why the
+second getter is in there.

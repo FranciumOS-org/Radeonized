@@ -50,6 +50,7 @@ int strenc_tests(void);
 int strprog_tests(void);
 int phy_tests(void);
 int phyfsm_tests(void);
+int fbstubs_tests(void);
 int retire_tests(void);
 int gpuname_tests(void);   /* 2C9 */
 int backlight_tests(void);
@@ -901,6 +902,7 @@ int main(int argc, char **argv)
     failures += strprog_tests();
     failures += phy_tests();
     failures += phyfsm_tests();
+    failures += fbstubs_tests();
     failures += retire_tests();
     failures += gpuname_tests();
     failures += backlight_tests();
