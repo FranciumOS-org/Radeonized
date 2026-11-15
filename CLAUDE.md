@@ -437,13 +437,21 @@ documented in files already in the tree).
   `V_BLANK_START_END` 1311820 (start 1100, end 20) is why V_TOTAL can change
   without touching the active raster. OTG0 runs (`OTG0_CONTROL 0x00011201`),
   OTG1-3 at 0x300 = off, **DMCUB version word `0x04001547`** (`SCRATCH7`, boots
-  276/433). **THE DOTTED FORMS ARE BOTH UNFOUNDED (3dmc)**: `4.0.15.47` is that
-  word's bytes as hex digits, `4.0.21.71` is them as decimal and is what
-  `dmubbl.m:211` actually prints, boot 276 retired the decimal form and boot 433
-  reinstated it, and **Apple's own DAL prints this field `%08x`** with no split.
-  No header in the tree attests a layout, so use the word. Nothing depended on
-  it: `QUERY_DP_ALT` is measured working on four boots. Measure refresh by
-  latching both
+  276/433). **EVERY DOTTED FORM IS RETIRED, AND THE WORD IS
+  ANOMALOUS (3dmc, 3dmc-b)**: `4.0.15.47` is its bytes as hex digits (the card's
+  old claim), `4.0.21.71` as decimal (what `dmubbl.m:211` prints), boot 276
+  retired the decimal form and boot 433 reinstated it. **Three sources say the
+  word is the fact**: Apple's DAL prints it `%08x`; `amdgpu_dm.c:533` switches on
+  **whole 32-bit values** documented by *linux-firmware git hash*; and the
+  `DMUB_FW_VERSION(maj,min,rev)` macro **does not exist in mainline** — I recalled
+  it, `dmub_cmd.h` has no such thing. **And two shipped images are the control**:
+  linux-firmware 20250917 `ucode_version 0x04000045` and main `0x04000050` — low
+  16 a small revision (69, 80), meta `fw_version` low byte **`0x00`** on both.
+  **Ours matches neither shape** (revision 5447; low byte `0x47`), so the running
+  firmware **is not either image linux-firmware ships for this chip**. That is
+  consistent with the pre-OS-image hypothesis and is **not proof of it** (rule
+  17). Nothing depended on the version: `QUERY_DP_ALT` is measured working on
+  four boots. Measure refresh by latching both
   endpoints on an `OTG0_FRAME_COUNT` edge, never over a fixed window.
 - A Transfer TRB's dword 2 is
   `length[16:0] | TD-size[21:17] | interrupter[31:22]` — the USB fix's basis.
@@ -1174,11 +1182,25 @@ and Apple's kext's only non-string hit is a `cmpl $0x444D5542, -0x40(%rsi)`
 macOS replaces it — which is exactly what `amdgpu` does do, loading
 `yellow_carp_dmcub.bin` and programming CW0/CW1 itself.
 **So the one mechanism Linux actually uses is the one thing never tried here:
-REPLACE THE DMCUB IMAGE.** `firmware/linux/` has ce/rlc/mec/mec2/pfp/me/toc and
-**no `_dmcub.bin`**, so this is **blocked on the network, not the hardware**. Do
-not start it until that file is in hand, and the first step is a **read** —
-whether a DMCUB reset drops the panel OTG0 is driving — which decides whether
-the sentinel hold (one boot, proven on 582/583/584) is a sufficient rescue.
+REPLACE THE DMCUB IMAGE.** **3dmc-b HAS THE IMAGE** —
+**`sh tools/fetch_dmcub.sh`**, pinned to linux-firmware tag `20250917`, digest
+`e758135298cc...be3f`, into the **gitignored** `firmware/linux/`. It is a
+SEPARATE script from `fetch_linux_ref.sh` on purpose: **LICENSE.amdgpu, not
+GPL** (never commit it, never hand it out — as with this board's VBIOS, 3fw),
+nothing in the build needs it, and it is **not reproducible from a branch**
+(main is a different build, `0x04000050` vs `0x04000045`). Both break-it guards
+fire; `?h=20251010` served a **3006-byte HTML error page** and only the size
+check caught it. Validated, with the meta field order confirmed against
+`dmub_cmd.h:1042`: **`ip_version 3.1`**, **`dal_fw 1`**, `inst_const` **234512**
+bytes, `bss_data` **0**, `fw_region_size` **31552**, `trace_buffer_size`
+**65552** — the allocations CW0/CW1 and the region windows need. Load entry
+points: `dmub_srv_hw_init` (`dmub_srv.c:802`), `hw_reset` (:971),
+`wait_for_auto_load` (:1075). The meta magic is **not** at `end-0x24` but 328
+bytes before the end of `inst_const`, and occurs **exactly once** in the file.
+**The first step is still a READ, not a boot** — whether a DMCUB reset drops the
+panel OTG0 is driving — which decides whether the sentinel hold (one boot,
+proven on 582/583/584) is a sufficient rescue. Nothing here shows a shipped
+image would make the PHY move.
 The things never attempted are a stream on a **trained** DIG2 link, a
 **surface** on pipe 1 and a second `IOFramebuffer`. 2F8 added a cost: `tps=3`
 **degrades the sink until a reboot**, which is what 2F7 spent a milestone

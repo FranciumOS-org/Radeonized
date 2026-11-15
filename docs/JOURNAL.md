@@ -71933,3 +71933,144 @@ boot, proven on boots 582, 583 and 584) or something stronger.
 
 Cost of this milestone: no boots, no reboots, no hardware. Four readings that
 were already paid for, put next to each other for the first time.
+
+## 3dmc-b — the network came back, the DMCUB image is in hand, and TWO ATTESTED IMAGES retire the version question
+
+The push that 3dmc recorded as impossible went through minutes later:
+`04efc7b..7165c09  main -> main`, seven commits, and GitHub has been reachable
+since. 3dmc's network paragraph stands as a record of what was true when it was
+written, and the lesson is the mundane one — a connection is not a finding. (My
+`rc=$?` after a pipeline read `tail`'s status and printed `rc=0` for a push whose
+real evidence was the ref line; the same mistake recurred twice more below. It is
+`echo rc=$?` placed after a pipe, every time.)
+
+### The image is fetched, pinned and validated
+
+`yellow_carp_dmcub.bin` — the file 3dmc named as the single remaining mechanism
+and could not obtain. `tools/fetch_dmcub.sh` now fetches it to the **gitignored**
+`firmware/linux/`, pinned to linux-firmware tag `20250917` and verified by
+sha256 `e758135298cc...be3f`. It is deliberately a separate script from
+`fetch_linux_ref.sh` for three reasons, each of which would otherwise be quietly
+wrong: the licence is **LICENSE.amdgpu, not GPL-2.0**, and this repository
+neither carries nor grants it, so the blob is never committed and never handed
+out, exactly as this board's VBIOS is not (3fw); nothing in the build requires
+it, unlike the headers, so a clone that ignores this line never runs it; and it
+is **not reproducible from a branch**, because two different builds were measured
+live in the course of writing this (see below).
+
+Both break-it checks fire. Corrupting a byte of the installed blob makes the
+script re-fetch rather than report `HAVE`; substituting a wrong expected digest
+makes it print the digest and size it actually got and **leave no file behind**,
+so a bad blob cannot be installed. That second guard earned itself during this
+work: `?h=20251010` returned a **3006-byte HTML error page**, and only the size
+check distinguished it from an image.
+
+The header parses clean and self-consistently:
+
+```
+common_firmware_header        size_bytes 234768 == file length
+                              header_size 40, header_version 1.0
+                              ip_version 3.1            <- DCN 3.1, our family
+                              ucode_version 0x04000045
+                              ucode_size 234512 (0x39410), offset 256 (0x100)
+dmcub_firmware_header_v1_0    inst_const_bytes 234512 (0x39410)
+                              bss_data_bytes   0
+dmub_fw_meta_info @ 0x394c8   magic_value 0x444d5542
+                              fw_region_size    31552 (0x7b40)
+                              trace_buffer_size 65552 (0x10010)
+                              fw_version 0x04004500
+                              dal_fw 1                  <- it IS a DAL image
+```
+
+The meta struct's field order was **confirmed against the fetched
+`dmub_cmd.h:1042`**, not assumed: `magic_value`, `fw_region_size`,
+`trace_buffer_size`, `fw_version`, `dal_fw`, `reserved[3]`. (Upstream has since
+appended `shared_state_size`, `shared_state_features` and `feature_bits`, none of
+which this image's five leading fields depend on.) The magic occurs **exactly
+once** in the whole file, which is what makes finding it at a derived offset an
+identification rather than one coincidence among many. It is **not** at
+`end - 0x24` as I first assumed; it sits 328 bytes before the end of
+`inst_const`, because the file is the AMD wrapper and the meta is at the end of
+the *payload*, not the file. My first parse looked for it at the file end, got
+`0x3229afbf`, and printed "does NOT match" — which, had I not also scanned the
+whole file, reads exactly like "this is not a DMUB image".
+
+**This gives the image-replacement work its numbers**, which it did not have:
+235 KB of `inst_const`, no `bss_data`, a 31 552-byte firmware state region and a
+65 552-byte trace buffer. Those are the allocations CW0/CW1 and the region
+windows need, and `dmub_srv.c`'s entry points are `dmub_srv_hw_init` (:802),
+`dmub_srv_hw_reset` (:971) and `dmub_srv_wait_for_auto_load` (:1075).
+
+### The version question is closed, with two controls instead of an argument
+
+3dmc concluded "use the word `0x04001547`" from one source — Apple printing the
+field `%08x`. There are now three sources and two attested images, and they agree.
+
+**Upstream treats it as an opaque word.** `amdgpu_dm.c:533` is
+`switch (adev->dm.dmcub_fw_version)` whose cases are **whole 32-bit values**
+(`0`, `0x1`, `0x01000000`) documented by *linux-firmware git hash* — `/* linux-
+firmware.git hash 6d9f399 */`. No dotted form appears. And the
+`DMUB_FW_VERSION(major, minor, revision)` macro I was about to reason from
+**does not exist in mainline at all**; I had recalled it, and grepping the
+fetched `dmub_cmd.h` for it returns nothing. That is rule 26 applied to my own
+memory: the macro was going to be the authority for a three-field layout, and
+there is no such authority.
+
+**Two real images give the family, and ours is in neither.** Measured, not
+argued — linux-firmware tag 20250917 and current main, parsed the same way:
+
+| | `ucode_version` | low 16 | meta `fw_version` | low byte |
+|---|---|---|---|---|
+| linux-firmware 20250917 | `0x04000045` | 0x0045 = 69 | `0x04004500` | `0x00` |
+| linux-firmware main | `0x04000050` | 0x0050 = 80 | `0x04004e00` | `0x00` |
+| **ours, SCRATCH7** | `0x04001547` | **0x1547 = 5447** | — | **`0x47`** |
+
+Both shipped builds sit in one family on both fields: `ucode_version` low 16 is a
+small revision (69, 80), and meta `fw_version` has a **zero low byte**. **Our word
+matches neither shape.** Whichever of the two fields `DMUB_GPINT__GET_FW_VERSION`
+returns — and `dmub_cmd.h:1523` confirms that command is 1, which is what boot
+276 sent — `0x04001547` is out of family: a revision of 5447 against 69 and 80, or
+a low byte of `0x47` where both images have `0x00`.
+
+So all three dotted readings this project has carried are retired, and not merely
+as a choice of base:
+
+- **`4.0.15.47`** (hex digits), what the card carried in five places. Applied to
+  the shipped images it yields `4.0.0.50` and `4.0.0.45` — a **zero** third
+  component, so ours having `15` there is out of family under its own convention.
+- **`4.0.21.71`** (decimal bytes), what `dmubbl.m:211` prints. Yields `4.0.0.80`
+  and `4.0.0.69`; same problem.
+- **`4.0.5447`** (three fields), which I was going to introduce this milestone on
+  the strength of a macro that does not exist.
+
+**The fact is the word, `0x04001547`.** That much 3dmc already had right; what is
+new is that it is now the only reading with a source, and that the word is
+*anomalous*, which 3dmc could not have known.
+
+### What that does to 3dmc's hypothesis
+
+3dmc proposed that the running DMCUB is a pre-OS display image rather than a DAL
+driver image, which would explain why it answers `QUERY_DP_ALT` and `GET_FW_
+VERSION` and ignores `QUERY_FEATURE_CAPS` and `SET_PHY_FSM`. The version anomaly
+is **consistent with** that and is **not** proof of it, and the distinction
+matters because this is the third milestone in this family to be offered a
+plausible mechanism by two numbers (rule 17). What the anomaly establishes is
+narrower and still worth having: **the firmware running on this machine is not
+either of the two images linux-firmware ships for this chip**, on a comparison
+with an attested control on each side. It does not establish what it *is*, and
+nothing here shows that loading a shipped image would make the PHY move.
+
+`dal_fw 1` on both shipped images is a field we cannot yet read on ours: it lives
+in the image's meta, in memory, and we have never located the running image. That
+is the one cheap-looking next read and it is not actually cheap, because finding
+it means knowing where the firmware was loaded, which is the same question the
+replacement work has to answer anyway.
+
+### Cost and state
+
+No boots, no reboots, no hardware, and the hosttest is untouched by any of it.
+Seven commits pushed. The image is on disk, pinned and validated; the sizes the
+replacement needs are known; the load entry points are named. The first step of
+that work remains a **read** and not a boot — whether a DMCUB reset drops the
+panel OTG0 is currently driving — and it is now the only step between here and
+the one mechanism Linux actually uses on this chip.
