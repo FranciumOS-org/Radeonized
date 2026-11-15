@@ -10204,6 +10204,156 @@ static void rbgpu_dal_mark(uint32_t mark) {
     rbgpu_diag_set_str("dal_trail", g_dal_trail);
 }
 
+// ---------------------------------------------------------------------------
+// 3ext (2026-11-15): IS APPLE'S FIXED-DISPLAY BINDING REACHED AT ALL?
+//
+// 3rmb established that 660m-Metal gets the USB-C external display working on
+// this same silicon without touching one PHY register: `extbind` hooks
+// `AmdRadeonFramebuffer::initializeFixedDisplayBinding` and binds the external
+// DP link to FB:1 the way the original binds the panel to FB:0. Their PHY comes
+// out of reset because APPLE'S framebuffer performs the link enable. We replace
+// Apple's framebuffer, so that sequence never runs - 3rmb's sentence is that we
+// were not missing a register or a command, we were missing a code path we had
+// deliberately replaced.
+//
+// That makes two paths. Adopting their architecture outright means Apple's
+// framebuffer owns the panel too, which trades away a panel path that works
+// today. The hybrid is to keep `RBAMDFramebuffer` on the panel and let Apple's
+// Wrangler run under 2pi's PRIVATE match category - which boot 584 already
+// measured coexisting, `RBAMDFramebuffer 1 / AmdGpuWrangler 1`, both attached.
+//
+// THE HYBRID HAS ONE UNMEASURED PREREQUISITE, AND THIS IS IT. Boot 584 recorded
+// that the Wrangler started and returned true, and recorded NOTHING about
+// whether it went on to create `AmdRadeonFramebuffer` children, which is what
+// `extbind` hooks a method of. Rule 46's second clause exactly: checking that a
+// delegate exists is not checking that it is REACHED. If this function never
+// runs in our configuration the hybrid is dead and the fork is the big one; if
+// it runs, the binding is implementable with no PHY work at all.
+//
+// So this hook BINDS NOTHING. It counts, it reads, it calls through. Rule 16 -
+// the instrument is a suspect, and a hook placed in Apple's framebuffer
+// initialisation is exactly the kind that costs a boot, so it does the least
+// that can answer the question.
+//
+// WHAT THE FUNCTION DOES, read off THIS machine's own binary (49 instructions,
+// `__ZN35AMDRadeonX6000_AmdRadeonFramebuffer29initializeFixedDisplayBindingEv`,
+// VM address 0xbf691e6 on 25G342 - and that is a VM address, not a file offset,
+// which cost one confused `dd`):
+//
+//     cmpb $0x0, 0x1e0(%rdi) / jne out     a guard byte gates the whole body
+//     movq $0xff, -0x20(%rbp)              linkIdx = 0xff, the "none" sentinel
+//     callq *0x880(mgr, 1, &linkIdx)       find the fixed link for type 1;
+//                                          the CALLEE writes linkIdx back
+//     testl %eax,%eax / jne out            non-zero means no fixed display
+//     callq *0x8e8(mgr, linkIdx)           -> the link object
+//     callq *0x1b8(link, 0, 0); *0x188()   -> al = connected?
+//     then, on BOTH display objects at self+0x81d0 and self+0x81c8:
+//         movb %al,     0x719(%rcx)        connected
+//         movl $1,      0xd0(%rcx)         fixed/bound
+//         movl linkIdx, 0xec(%rcx)         link index
+//     orb $0x20, 0x89a4(%rbx)              the done flag
+//     xorl %eax,%eax / retq                BOTH exits return 0, always
+//
+// Both exits returning a constant zero is why the signature below is safe: the
+// return carries no information to corrupt, and we pass through whatever the
+// original produced rather than inventing one.
+//
+// The binding itself is therefore three field stores on two objects plus one
+// flag bit, which is why 3rmb's "no PHY register" holds and why Apple's own
+// link-enable has to be what releases the PHY afterwards.
+//
+// EVERY OFFSET HERE IS A 25G342 OFFSET I DERIVED FROM OUR OWN BINARY, not one
+// taken from 660m-Metal's `tahoe_symbols_25G229.hpp` - their kext is pinned to a
+// different build. Rule 41: a constant is only a constant on the OS it was
+// measured on, so the reads are gated on RB_OSD_KEXTOFF and refuse with a code
+// rather than reading a wrong address on an unmeasured OS.
+#define RB_FDB_OFF_GUARD   0x1e0u    /* the byte whose non-zero skips the body */
+#define RB_FDB_OFF_DISP_A  0x81d0u   /* first display object pointer           */
+#define RB_FDB_OFF_DISP_B  0x81c8u   /* second display object pointer          */
+#define RB_FDB_OFF_FLAGS   0x89a4u   /* the dword holding the done flag        */
+#define RB_FDB_FLAG_DONE   0x20u
+#define RB_FDB_DISP_CONN   0x719u    /* byte:  connected                      */
+#define RB_FDB_DISP_BOUND  0xd0u     /* dword: fixed/bound                    */
+#define RB_FDB_DISP_LINK   0xecu     /* dword: link index                     */
+
+using t_rbFdb = uint32_t (*)(void *);
+static t_rbFdb  orig_fdb_3ext = nullptr;
+static uint32_t g_fdb_calls   = 0;
+
+/* Rule 19: a NULL check is not a pointer check, and a refusal must publish the
+ * value it refused. Kalloc'd floor, plus alignment, because a misaligned word
+ * here would fault just as a low one would. */
+static bool rbgpu_fdb_ptr_ok(uintptr_t v) {
+    return v >= 0xffffff8000000000ULL && (v & 7u) == 0;
+}
+
+/* Reads the three bound fields off one display object, publishing under the
+ * given prefix. Returns false and publishes the refused pointer when the slot
+ * does not hold a usable one - so "object B said nothing" is distinguishable
+ * from "object B was never read" (rule 14). */
+static void rbgpu_fdb_read_disp(uintptr_t self, uint32_t off,
+                                const char *kConn, const char *kBound,
+                                const char *kLink, const char *kWhy) {
+    auto slot = *reinterpret_cast<volatile uintptr_t *>(self + off);
+    if (!rbgpu_fdb_ptr_ok(slot)) {
+        rbgpu_diag_set_num(kWhy, 1);                       /* 1 = unusable ptr */
+        rbgpu_diag_set_num(kConn, static_cast<uint64_t>(slot));
+        return;
+    }
+    rbgpu_diag_set_num(kWhy,   0);
+    rbgpu_diag_set_num(kConn,
+        *reinterpret_cast<volatile uint8_t  *>(slot + RB_FDB_DISP_CONN));
+    rbgpu_diag_set_num(kBound,
+        *reinterpret_cast<volatile uint32_t *>(slot + RB_FDB_DISP_BOUND));
+    rbgpu_diag_set_num(kLink,
+        *reinterpret_cast<volatile uint32_t *>(slot + RB_FDB_DISP_LINK));
+}
+
+static uint32_t hooked_fdb_3ext(void *self) {
+    /* Published FIRST and unconditionally, because the whole question is
+     * whether this line executes at all, and an instrument that only reports
+     * once it has also succeeded at reading offsets cannot answer it. */
+    rbgpu_diag_set_num("fdb_calls", ++g_fdb_calls);
+
+    const uintptr_t s      = reinterpret_cast<uintptr_t>(self);
+    const bool      selfOk = rbgpu_fdb_ptr_ok(s);
+    const int       major  = getKernelVersion();
+    const bool      offOk  = rb_os_derived(major, RB_OSD_KEXTOFF) != 0;
+
+    rbgpu_diag_set_num("fdb_self_ok", selfOk ? 1 : 0);
+    rbgpu_diag_set_num("fdb_off_ok",  offOk  ? 1 : 0);
+    if (!selfOk) { rbgpu_diag_set_num("fdb_self", static_cast<uint64_t>(s)); }
+    if (!offOk)  { rbgpu_diag_set_num("fdb_osmajor",
+                                      static_cast<uint64_t>(major)); }
+
+    const bool readable = selfOk && offOk;
+
+    /* The guard BEFORE the call is the one reading that explains a silent
+     * no-op: a non-zero byte here means the body is skipped and the two exits
+     * are indistinguishable from the outside, both returning zero. */
+    if (readable) {
+        rbgpu_diag_set_num("fdb_guard",
+            *reinterpret_cast<volatile uint8_t *>(s + RB_FDB_OFF_GUARD));
+    }
+
+    const uint32_t ret = orig_fdb_3ext(self);
+    rbgpu_diag_set_num("fdb_ret", ret);
+
+    /* After, so a binding that DID happen is read rather than inferred from the
+     * return - which is a constant and therefore says nothing (rule 13). */
+    if (readable) {
+        const uint32_t fl =
+            *reinterpret_cast<volatile uint32_t *>(s + RB_FDB_OFF_FLAGS);
+        rbgpu_diag_set_num("fdb_flags", fl);
+        rbgpu_diag_set_num("fdb_done",  (fl & RB_FDB_FLAG_DONE) ? 1 : 0);
+        rbgpu_fdb_read_disp(s, RB_FDB_OFF_DISP_A, "fdb_a_conn", "fdb_a_bound",
+                            "fdb_a_link", "fdb_a_why");
+        rbgpu_fdb_read_disp(s, RB_FDB_OFF_DISP_B, "fdb_b_conn", "fdb_b_bound",
+                            "fdb_b_link", "fdb_b_why");
+    }
+    return ret;
+}
+
 __attribute__((noinline))
 void RGPU::processX6000FB(KernelPatcher &patcher, size_t id,
                           mach_vm_address_t address, size_t size) {
@@ -10351,6 +10501,30 @@ void RGPU::processX6000FB(KernelPatcher &patcher, size_t id,
                   "promoted personality is active it could KEEP the "
                   "framebuffer it cannot drive. Remove -rbgpudalfbreal.");
         rbgpu_diag_set_num("dalfb_srouted", 0);
+    }
+
+    /* 3ext: the fixed-display binding instrumentation. Installed in EVERY DAL
+     * configuration, not just the private-category one, because "it was never
+     * reached" is only a reading if the instrument was present in the
+     * configuration that would have reached it (rule 39), and `-rbgpudal`
+     * alone - where Apple's Wrangler never starts - is a legitimate zero.
+     *
+     * fdb_calls is seeded to 0 HERE so that a boot which routes successfully
+     * and never calls through is distinguishable from a boot where the route
+     * failed and from one where this build was not loaded at all. Rule 14:
+     * absence is not a result, and a missing ioreg key reads as 0xffffffff. */
+    KernelPatcher::RouteRequest fdb(
+        "__ZN35AMDRadeonX6000_AmdRadeonFramebuffer29initializeFixedDisplayBindingEv",
+        hooked_fdb_3ext, orig_fdb_3ext);
+    if (patcher.routeMultiple(id, &fdb, 1, address, size)) {
+        rbgpu_diag_set_num("fdb_routed", 1);
+        rbgpu_diag_set_num("fdb_calls",  0);
+    } else {
+        patcher.clearError();
+        rbgpu_log("3ext: FAILED to route initializeFixedDisplayBinding - the "
+                  "hybrid-path prerequisite CANNOT be read this boot. Nothing "
+                  "is broken by this; the measurement is simply absent.");
+        rbgpu_diag_set_num("fdb_routed", 0);
     }
 
     rbgpu_dal_mark(700);   /* every DAL route installed; the remap is in force */
