@@ -919,11 +919,13 @@ bool RembrandtGPUPeer::start(IOService *provider) {
      * and `dalfb_armed` say which of the two halves was missing, because "the
      * arg was absent", "the key was absent", "the key would not clear so we
      * refused" and "it ran" must not read the same. */
+    static bool g_rbDalfbOneshot = false;   /* 3ret-i: the promoted branch took it */
     const bool dalfbArg = checkKernelArgument("-rbgpudalfbreal");
     rbgpu_diag_set_num("dalfb_asked", dalfbArg ? 1 : 0);
     if (!dalStock && dalfbArg) {
         uint32_t osWhy = 0;
         const bool oneshot = rbgpu_nvram_consume_oneshot("rbgpu-dalfb", &osWhy);
+        g_rbDalfbOneshot = oneshot;
         rbgpu_diag_set_num("dalfb_oneshot_why", osWhy);
         rbgpu_diag_set_num("dalfb_armed", oneshot ? 1 : 0);
         if (oneshot) {
@@ -944,11 +946,51 @@ bool RembrandtGPUPeer::start(IOService *provider) {
                       "`sudo nvram rbgpu-dalfb=1` and reboot.", osWhy);
         }
     }
+    /* 3ret-i: THE PRIVATE-CATEGORY WRANGLER GETS THE SAME GUARD.
+     *
+     * Boot 583 showed why `-rbgpudalfbreal` cannot answer the units question:
+     * our `RBAMDFramebuffer` matches `IOProviderClass IOPCIDevice` with
+     * `IOMatchCategory IOFramebuffer` on IGPU, which is the same provider and
+     * the same category the promoted Wrangler contests. It won, ours never
+     * attached, its `start()` returned true and it wrote ZERO registers - so
+     * nothing drove the panel on a machine that was otherwise alive. 2pk's own
+     * comment predicted the risk ("the panel may well survive; if it does not,
+     * the rescue is to remove -rbgpudalfbreal") and it is now resolved on the
+     * negative side, with a measurement.
+     *
+     * `-rbgpudalfb` is 2pi's variant: a PRIVATE match category, so it does not
+     * contest `IOFramebuffer` and our framebuffer keeps the panel. That makes
+     * it the one configuration that can exercise DAL without costing the
+     * display. It is lower risk, not no risk - a crawl that outlives the
+     * sentinel's deadlines would still loop - so it takes the same arm as its
+     * dangerous sibling: the one-shot key and the held latch.
+     *
+     * The key is SHARED (`rbgpu-dalfb`) on purpose. The two tokens are
+     * mutually exclusive in practice and one key means one re-arm step rather
+     * than two, so a half-armed configuration is not reachable (rule 34). The
+     * consume is skipped if the promoted branch above already took it. */
     if (!dalStock && checkKernelArgument("-rbgpudalfb")) {
+        bool privOk = g_rbDalfbOneshot;
+        if (!privOk) {
+            uint32_t pWhy = 0;
+            privOk = rbgpu_nvram_consume_oneshot("rbgpu-dalfb", &pWhy);
+            rbgpu_diag_set_num("dalfbpriv_oneshot_why", pWhy);
+        }
+        rbgpu_diag_set_num("dalfbpriv_armed", privOk ? 1 : 0);
+        /* NOT a `return`: this is the middle of the peer's start() and
+         * returning would abort the peer itself. Skip the publish only. */
+        if (privOk) {
+        rbgpu_sentinel_hold("the DAL private-category Wrangler (-rbgpudalfb)");
         pciDevice->setProperty("LoadDisplayWrangler", kOSBooleanTrue);
         rbgpu_log("2pi: published LoadDisplayWrangler - Apple's framebuffer "
-                  "will start in a PRIVATE match category, so IONDRVFramebuffer "
-                  "keeps the panel and every DAL write is still dropped");
+                  "will start in a PRIVATE match category, so it does not "
+                  "contest IOFramebuffer and RBAMDFramebuffer keeps the panel "
+                  "(3ret-i: boot 583 measured what happens when it does)");
+        } else {
+            rbgpu_log("3ret-i: -rbgpudalfb is set but the one-shot DECLINED, "
+                      "so LoadDisplayWrangler is NOT published. Arm it with "
+                      "`sudo nvram rbgpu-dalfb=1` and reboot.");
+        }
     }
 
     // 2cs: LoadAccelerator only on an armed boot. Without it Apple's
