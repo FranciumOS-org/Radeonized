@@ -70429,3 +70429,101 @@ is a known-good boot and not an experiment.
 The arm is `-rbgpuretirevbl` and the instrument afterwards is
 `vblret_vbl` climbing and `vblret_autodrv` becoming non-zero — both monotonic
 (rule 31), neither a snapshot of the dialled value.
+
+---
+
+## 3vt (2026-11-15) — 660m-Metal's VRAM finding is REAL AND DOES NOT REPRODUCE HERE, with a control; and the card's "4 GB" is wrong
+
+The user asked whether our VRAM handling is optimised, pointing at
+660m-Metal's. Read their `vtrim.cpp` (GPL-2.0, licence re-checked) and then
+measured the same thing on this machine. The answer is a clean negative with a
+working control, and a separate discrepancy that matters more.
+
+### Their finding, which is a genuine piece of work
+
+`vtrim.cpp`'s audit: **IOAcceleratorFamily2's reusable orphaned-VRAM pool has
+no size limit and no collector.** On 25G229 `IOGraphicsAccelerator2::start`
+initialises it with `-1`, and the reusable collector prunes only the
+system-memory pool, so the video pool is emptied **only on demand** — AMD's
+`allocateLargeBlocks` fails with *"AMD ERROR! Failed to allocate size"*, the
+family evicts orphans and retries. Their live reading: **orphans 2.2 GB, in use
+1.9 GB, free 92 MB, and 8142 failed allocations in 51 minutes, peaking at
+570/s.** Their fix runs Apple's own non-waiting eviction step from a kernel
+thread before the pool exhausts, under the accelerator lock Apple's collector
+takes, capped at 128 MB per hold.
+
+An allocation failing 570 times a second is a stall signature, so this was a
+live candidate for the user's frame-delivery complaint. It is not what is
+happening here.
+
+### The measurement on this machine
+
+```
+orphanedReusableVidMemoryBytes  426283008   (406 MB, 1623 entries)
+inUseVidMemoryBytes             395964416   (378 MB)
+vramFreeBytes                  1325236224   (1264 MB)
+orphanedReusableVidMemoryHitRate       81
+vramEvictionWaitTime                    0
+```
+
+**1.26 GB free and eviction wait time zero**, against their 92 MB and a
+failure storm. And the decisive one, searched over the whole boot with a
+control in the same command (rule 26 — a search is an instrument):
+
+```
+'Failed to allocate size|AMD ERROR'  ->      0
+'kernel|WindowServer'                -> 188064
+```
+
+**Zero allocation failures.** The control proves the search works.
+
+Two samples twenty seconds apart turn the snapshot into a rate (rule 31,
+monotonic rather than a re-read of a dialled value): orphans 409 → 430 MB,
+count 1583 → 1644, and **`vramFreeBytes` went UP**, 1320 → 1332 MB. So the
+pool is **churning at an 81 % hit rate, not growing toward exhaustion**. That
+is the pool working as designed.
+
+So: their problem is real on their machine, the mechanism is credible, and the
+symptom is absent here. `vtrim` is a **preventive** measure for this project,
+not a fix for anything measured, and it is expensive: every offset in their
+file is keyed to 25G229's `IOAcceleratorFamily2` by LC_UUID, and we run 25G342
+(rule 41 — a constant is only a constant on the OS it was measured on), so all
+of it would need re-deriving. It stays unbuilt, and this entry is the reason,
+so nobody re-opens it on a guess (rule 39's third clause).
+
+**One thing to watch, named so it is checkable later:** the pool genuinely has
+no collector, so a long heavy session is a different regime from this one.
+`vramFreeBytes` falling with `vramEvictionWaitTime` rising, or one line of
+`Failed to allocate size`, moves this straight back to live. Neither is present.
+
+### THE REAL FINDING: THE CARVE-OUT IS 2 GB, AND THE CARD SAYS 4
+
+`system_profiler` reports **`VRAM (Total): 2 GB`**. CLAUDE.md's "IT WORKS"
+paragraph says *"`AMD Radeon 680M` / 4 GB / Metal 3 in System Profiler"*. The
+accelerator's own budget agrees with the machine, not the card: free + in use +
+orphaned = 1332 + 396 + 430 MB = **2059 MB**.
+
+It is not our label failing to arm. `fbvram_on 1`, `fbvram_routed 1`,
+`ax0_vram` / `ax1_vram` / `ax2_vram` all 1, and `g_vram_mb` defaults to
+**4096**, with `-rbgpufbvram` in the default-on table. So the label is armed
+and routed and the number reported is still 2 GB — which is what 660m-Metal's
+README states outright for this silicon: *"macOS uses the real size set in the
+BIOS"*, and they record a kext built with `kVramMb = 2048` showing 4 GB because
+the BIOS said 4 GB. **The firmware's UMA Frame Buffer Size wins.**
+
+So this machine's chassis firmware is set to a **2 GB** UMA carve-out. Rule 47
+again, in the form CLAUDE.md already states for Eco mode: the chassis firmware
+is part of the configuration, and this is a second part of it nobody has been
+reading.
+
+**Not established: that it changed.** The only record of 4 GB is the card, and
+the card is explicitly the suspect in its own header. But it is one setting in
+ASUS setup, in the same place as the iGPU-only/Eco mode that is already
+required, it is free to check, and halving the GPU's memory is exactly the
+class of change that would make frame delivery worse under load without
+touching a line of code — which is what the user reported.
+
+Two independent configuration differences are now on the table for one
+complaint: 3ret's missing `-rbgpuretirevbl`, and this. They are not
+alternatives; both are checkable, and 3ret's is the one with a measured +94 %
+behind it.
