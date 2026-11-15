@@ -599,11 +599,14 @@ table (`0xa480`, rev 2.1, 81 entries) has slot 39 `dig1transmittercontrol` =
 **`0x0000`**, with every display-encoder entry 0 — so the firmware servicing
 our command is **DMCUB's image** (`0x04001547`, CW0/CW1), not the ROM. `dmubbl`
 had printed this since 2E2 and a handoff of mine said to read the ROM anyway.
-**And no sibling project has the answer:** **nullarc** (780M, Phoenix, DCN
-3.1.4 — the nearest chip to ours, MIT/GPL-2.0 + PolyForm-NC) lists external
-displays under *"Not yet"* and has **no DPCS material**; **Cobalt64** (MIT,
-RDNA 4) reads the whole RDPCSTX block — ~35 registers against our five — but
-writes no reset release; **UnifiedRed** (BSD-3-Clause) is DCE 11 era.
+**"NO SIBLING PROJECT HAS THE ANSWER" WAS TRUE WHEN WRITTEN AND IS NOW FALSE
+— 660m-Metal HAS IT (3rmb, 2026-11-14).** This line sat here uncorrected for a
+day and misdirected 3dmc on 2026-11-15; the card is the suspect, the journal is
+authoritative. Of the others: **nullarc** (780M, Phoenix, DCN 3.1.4, MIT/GPL-2.0
++ PolyForm-NC) lists external displays under *"Not yet"* and has **no DPCS
+material**; **Cobalt64** (MIT, RDNA 4) reads the whole RDPCSTX block — ~35
+registers against our five — but writes no reset release; **UnifiedRed**
+(BSD-3-Clause) is DCE 11 era.
 
 **309 / BOOT 481: 308'S CANDIDATE IS DEAD, AND THE SURVEY CANNOT SEE ITS OWN
 SUBJECT.** `EXT_LD_DONE` and `SRAM_BYPASS` are set on the live panel and
@@ -1128,9 +1131,43 @@ games and volumetric shaders render, ~100 fps. `tools/msaa/`,
 milestones after the fix - the card is the suspect, the journal is
 authoritative.
 
+**THE EXTERNAL DISPLAY IS ANSWERED, AND THE ANSWER IS ARCHITECTURAL (3rmb,
+2026-11-14 — READ THAT ENTRY BEFORE SPENDING A BOOT ON 300-310).** `660m-Metal`
+(`https://github.com/rthh21/660m-Metal`, **GPL-2.0, readable**) has the USB-C
+external display **working on this same silicon** — Radeon 660M, `1002:1681`,
+GC 10.3.3, DCN 3.1.2, DP alt mode into an HDMI converter, the configuration
+every boot of this line already ran in. **Their fix touches NO PHY REGISTER.**
+Under `iMac20,1` SMBIOS `displaypolicyd` never commits a link to a framebuffer,
+so the monitor is detected and never given one; `extbind` hooks
+`AmdRadeonFramebuffer::initializeFixedDisplayBinding` and binds the external DP
+link to **FB:1** the way the original binds the panel to FB:0, marking it fixed
+so plug/unplug go through the driver's own connection-change path.
+**So their PHY comes out of reset because APPLE'S OWN
+`AMDRadeonX6000Framebuffer` PERFORMS THE LINK ENABLE**, with their plugin
+remapping DCN 3.1.2 registers underneath it. That is the architectural
+difference: **they patch Apple's framebuffer so Apple's DAL and DMUB drive DIG2;
+we REPLACE it with `RBAMDFramebuffer` and drive DIG2 ourselves.** 310d's
+conclusion (no PHY bringup on DCN31, the VBIOS table the only mechanism, `ran`
+only a mailbox ack) was derived from **Linux's** `dc` and is correct about
+Linux; it is not a statement about Apple's driver, which is a separate codebase
+with its own link-enable sequence, and on this evidence that sequence **does**
+release the PHY. **We were not missing a register or a command. We were missing
+a code path we had deliberately replaced.** (3dmc's inventory fits this rather
+than fighting it: Apple's DAL has **no DPCS file at all**, so Apple's release
+cannot come from DPCS code — it comes from the VBIOS/DMCUB transmitter path its
+`dcn20_link_encoder` + `bios_parser2` + `AmdDalDmcubService` invoke, which means
+the atom transmitter command CAN move this PHY when issued inside the full
+sequence.) **Two read-side hazards from their source, before any more RDPCS
+work:** undefined offsets in `seg2 0x2928..0x2d8e` **wedge the RDPCS bus**
+(their `phyvalid.hpp` is a generated bitmap of the defined ones), and UNIPHY1-4
+(`0x2a00-0x2d8e`, where our PHY1-4 live) reportedly **never answer the CPU** —
+so our own five-register surveys are a named suspect. Their kext is pinned to
+macOS 25G229; this machine runs 25G342.
+
 **Open:** the rest of the external-display chain — `docs/EXTERNAL-DISPLAY.md`
-for the state, `docs/HANDOFF-NEXT.md` for the next step. **THE BLOCKER IS
-NAMED: PHY2 IS HELD IN RESET** (307 — `PHY_RESET` 1 against the live panel's
+for the state, `docs/HANDOFF-NEXT.md` for the next step. Superseded as an
+explanation by 3rmb above, but the measurements stand: **PHY2 IS HELD IN
+RESET** (307 — `PHY_RESET` 1 against the live panel's
 0, no clock, no FIFO, firmware loaded), and **the atom transmitter ENABLE does
 not release it**, in an in-boot A/B with a four-instance control. Everything
 downstream — no clock recovery, DPCD `0x202` `0x00`, `0x205` bit 0 clear,
@@ -1181,8 +1218,11 @@ and Apple's kext's only non-string hit is a `cmpl $0x444D5542, -0x40(%rsi)`
 **verifier**. The running image is the **pre-OS firmware's**, and nothing in
 macOS replaces it — which is exactly what `amdgpu` does do, loading
 `yellow_carp_dmcub.bin` and programming CW0/CW1 itself.
-**So the one mechanism Linux actually uses is the one thing never tried here:
-REPLACE THE DMCUB IMAGE.** **3dmc-b HAS THE IMAGE** —
+**DO NOT START THE IMAGE REPLACEMENT — 3rmb OUTRANKS IT (see below).** What
+follows is a sized FALLBACK, not the next step: a working implementation on the
+same silicon releases this PHY without touching firmware, so a DMCUB swap is a
+large risk against an explanation that is already beaten. Kept because the
+numbers were paid for. **3dmc-b HAS THE IMAGE** —
 **`sh tools/fetch_dmcub.sh`**, pinned to linux-firmware tag `20250917`, digest
 `e758135298cc...be3f`, into the **gitignored** `firmware/linux/`. It is a
 SEPARATE script from `fetch_linux_ref.sh` on purpose: **LICENSE.amdgpu, not

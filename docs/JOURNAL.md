@@ -72074,3 +72074,77 @@ replacement needs are known; the load entry points are named. The first step of
 that work remains a **read** and not a boot — whether a DMCUB reset drops the
 panel OTG0 is currently driving — and it is now the only step between here and
 the one mechanism Linux actually uses on this chip.
+
+## 3dmc-c — the correction: 3rmb already answered this, I did not read it, and the card told me there was no answer
+
+3dmc and 3dmc-b were written on 2026-11-15 to find the mechanism that would
+release PHY2. **3rmb had found it on 2026-11-14**, one entry and one day earlier,
+and I did not read it. The recurring error, in its "read the evidence already in
+hand" form, committed against an entry written the previous day.
+
+What 3rmb establishes, from `660m-Metal`'s own source (GPL-2.0, readable), on
+**the same silicon** — Radeon 660M, `1002:1681`, GC 10.3.3, DCN 3.1.2, DP alt
+mode into an HDMI converter, the configuration every boot of this line already
+ran in: **their external display works, and their fix touches no PHY register.**
+`extbind` hooks `AmdRadeonFramebuffer::initializeFixedDisplayBinding` and binds
+the external DP link to FB:1 as the original binds the panel to FB:0. Their PHY
+comes out of reset because **Apple's own `AMDRadeonX6000Framebuffer` performs the
+link enable**, with their plugin remapping DCN 3.1.2 registers underneath it. We
+replace that framebuffer, so that sequence never runs. 3rmb's sentence is the
+whole of it: *we were not missing a register or a command, we were missing a code
+path we had deliberately replaced.*
+
+### What this does to 3dmc and 3dmc-b
+
+The **measurements** stand; one **inference** does not.
+
+- **Retired as an explanation:** 3dmc's "this DMCUB implements a subset, and that
+  is why the PHY cannot be driven". The subset readings are real — type 6
+  `QUERY_FEATURE_CAPS` ignored in boot 275, VBIOS sub-type 29 `SET_PHY_FSM`
+  ignored in boot 485, both against a firmware shown alive by GPINT — but as a
+  *cause* for the PHY they are now beaten by a better-supported account, and a
+  working implementation on identical silicon outranks a firmware inference. The
+  atom transmitter command (sub-type 1) is not shown to be missing from the
+  image; on 3rmb's evidence it is a command whose effect depends on the sequence
+  it is issued inside, which we never run.
+- **Retired as the next step:** "replace the DMCUB image". It is a large,
+  genuinely risky change — a microcontroller reset under a live firmware-lit
+  panel — aimed at an explanation that is already outranked. `tools/fetch_dmcub.sh`
+  and the sizes it validated are kept as a sized fallback, because they were
+  paid for and are correct, but **nothing should spend a boot on them.**
+- **Strengthened, and this is the one real contribution of 3dmc:** the Apple DAL
+  inventory. Apple's vendored DAL has **117 source paths, stops at
+  `dcn302_resource.c`, and contains no DPCS file of any kind.** Read on its own
+  that looked like "Apple cannot bring up a DP-alt PHY", which is how I used it.
+  Read against 3rmb it says something more useful and less obvious: **Apple's
+  release cannot be coming from DPCS code, because there is none** — so it comes
+  from the VBIOS/DMCUB transmitter path invoked by Apple's `dcn20_link_encoder`,
+  `bios_parser2` and `AmdDalDmcubService`, all three of which are present. Which
+  means **the atom transmitter command CAN move this PHY**, and 307's "the atom
+  ENABLE does not release it" is a statement about our call site, not about the
+  command. That is a conclusion neither entry could reach alone.
+- **Unaffected:** the version work. `0x04001547` is anomalous against both
+  shipped images whatever the PHY turns out to need, and the three dotted forms
+  stay retired.
+
+### The card is the suspect, again, and this time it caused the error
+
+`CLAUDE.md` carried **"And no sibling project has the answer"** — true when
+written, falsified by 3rmb on 2026-11-14, and still sitting there on 2026-11-15
+with no mention of 3rmb, `extbind` or 660m-Metal anywhere in the file. I read
+that line at the start of the session and acted on it. This is the same failure
+the card documents about itself for 311/312, where it called WebGL broken for
+five milestones after the fix landed.
+
+Both are now fixed: the stale claim is corrected in place and labelled with the
+date it misdirected, and 3rmb's answer is on the card ahead of the 307-310
+material, with the two read-side hazards their source states — **undefined
+offsets in `seg2 0x2928..0x2d8e` wedge the RDPCS bus**, and UNIPHY1-4 reportedly
+never answer the CPU, which makes our own five-register surveys a named suspect.
+
+### Cost
+
+Two entries' worth of work that was not needed to answer the question, against
+one genuine finding (the DAL inventory, reinterpreted) and one genuine
+correction (the version). No boots, no hardware. The avoidable part was one
+grep of the previous day's journal entry.
