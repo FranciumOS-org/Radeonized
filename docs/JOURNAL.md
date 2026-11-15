@@ -72250,3 +72250,87 @@ nothing it could not reach, and the boot came up accelerated and complete.
 `rbgpu-safe` reads **1** at the end of this boot: the 3ret-e hold is in force by
 design, so the NEXT boot comes up stock until `sudo nvram rbgpu-safe=0` clears
 it. That is the rescue working, not a fault.
+
+## 3ext-b — one cell of 3ext's table was an INFERENCE, and it decides the whole fork
+
+3ext concluded that the match category is the variable: the real
+`IOFramebuffer` category creates framebuffers and displaces our panel, the
+private one coexists and creates none. **Only the second half of that is
+measured.** Re-reading my own table before recommending a rewrite off it:
+
+- **Measured (boot 586):** private category, `AmdRadeonFramebuffer` **0**
+  instances, by a **class-wide** `ioreg -rl -c`, with `IOResources 1` as the
+  control in the same sample. That stands.
+- **NOT measured:** whether the **promoted** Wrangler creates any either. Boots
+  582 and 583 never completed and nobody counted. Boot 583's capture does exist
+  and I checked it — and it **cannot answer the question**: `igpu-children.txt`
+  is a **depth-one walk of IGPU's DIRECT children** (seven lines: our peer,
+  `AMDSupport`, `AmdGpuWrangler`, `AMDRadeonHWServicesNavi`,
+  `AmdRadeonControllerNavi21`, `AMDNavi21GraphicsAccelerator`), and an
+  `AmdRadeonFramebuffer` hangs off the Wrangler or the controller, **not off
+  IGPU**. Its absence from that list is not absence (rule 14). `framebuffer.plist`
+  cannot answer it either: it matches `-c IOFramebuffer`, which is precisely the
+  category in question.
+
+My first attempt to check it was itself broken, and the control is what said so:
+`grep -oE "<class [A-Za-z0-9_]+"` returned **nothing** against a seven-line file,
+so the counts of 1 and 0 it produced were against a format I had guessed at
+(rule 26). Reading the file settled it instead.
+
+**The two worlds diverge completely, which is why this is worth a boot before a
+rewrite:**
+
+- If the promoted Wrangler **does** create framebuffers, the category is the
+  variable, 3ext's conclusion stands, and Apple's framebuffer owning the panel
+  is the route.
+- If it creates **none either**, the category is **not** the variable, something
+  else blocks framebuffer creation outright, and **adopting 660m-Metal's
+  architecture hits the same wall** — after trading away a working panel path.
+
+### The instrument, and it needs no kext change
+
+`tools/plugin_check.sh` now captures **class-wide instance counts** for
+`AMDRadeonX6000_AmdRadeonFramebuffer`, `AMDRadeonX6000_AmdGpuWrangler`,
+`RBAMDFramebuffer` and `IOResources`, each through the existing bounded
+`rb_ioreg` helper (2er: ioreg can block forever, so nothing here runs
+unguarded), each to its own file so a timeout shows as a **missing file** rather
+than a zero. Counted by `^+-o`, since `-c` selects by class and each matched
+object opens exactly one such line. **`IOResources` is the control**: it exists
+in every boot, so a 0 there voids every other count, and the script says so.
+
+This is a tool change, not a kext change — no rebuild, no new boot-arg, and the
+promoted boot is the already-measured configuration from 583, where **SSH stayed
+up and `plugin_check.sh` ran while the panel was dark.**
+
+**Two defects of mine, both caught by running it against boot 586 rather than
+reasoning about it (rule 16, rule 48):** `grep -c` **prints 0 and exits 1** when
+there are no matches, so my `|| echo '?'` appended a second line *after* the
+zero and the `.n` file became `0\n?`, which would have broken the control
+comparison it feeds — and the first count in this experiment is a legitimate
+zero, so the defect was guaranteed to fire exactly where it mattered. Replaced
+with `|| :`, which swallows the status without adding output. The break-test also
+showed a **non-existent class reads 0, not an error**, so a bare 0 cannot
+distinguish absent-class from absent-instance; the `IOResources` control is what
+licenses reading it at all. Verified against boot 586: `0 / 1 / 1 / 1`, matching
+the live registry exactly.
+
+### The arm, read rather than assumed
+
+The two configurations are already a clean single-variable A/B, which the
+captures themselves establish:
+
+```
+boot 583  wdt=-1 -rbgpuretirevbl -rbgpudal -rbgpudalpass rbgpudalenc=dword
+          -rbgpudalremap -rbgpudalfbreal        <- promoted, NO -rbgpudalfb
+boot 586  wdt=-1 -rbgpuretirevbl -rbgpudal -rbgpudalpass rbgpudalenc=dword
+          -rbgpudalremap -rbgpudalfb            <- private,  NO -rbgpudalfbreal
+```
+
+One token differs. Both also need the `rbgpu-dalfb` one-shot set, which boot 585
+proved the hard way: the arg was present, the key was spent, and the whole
+configuration was silently inert (rule 9).
+
+Expected outcome of the promoted boot is a **dark panel and a boot that does not
+complete** — that is 582 and 583, already paid for, and the 3ret-e sentinel hold
+makes the following boot come up stock, so it costs one boot and no recovery
+trip. `rbgpu-safe` was cleared to 0 at the end of 586.

@@ -1170,12 +1170,18 @@ called** — with `dalfb_start_ret 1` and `dal_trail ...703 704`, so the Wrangle
 children, so there is no object for `extbind`'s method to be called on.** Two
 independent instruments, same boot; `fdb_calls` is seeded 0 at route time so the
 zero is a reading (rule 14). Apple's kext logged **nothing** against 293 of our
-own lines in the same window (rule 36 controlled). **The conflict is through the
-ONE IOKit mechanism:** the real `IOFramebuffer` category creates framebuffers
-**and displaces our panel** (582, 583 — dark, boot never completes); the private
-category **coexists and creates none** (584, 586). The property that allows
-coexistence is the property that prevents ownership, and there is nothing in
-between. This sharpens 3ret-j: it is not only that nothing asks the private
+own lines in the same window (rule 36 controlled). **ONE CELL OF THAT TABLE IS NOT MEASURED, AND IT
+DECIDES THE WHOLE FORK (3ext-b).** Measured: the private category **coexists and
+creates none** (584, 586, class-wide `ioreg -rl -c`). **NOT measured: whether
+the real `IOFramebuffer` category creates any either.** Boots 582/583 never
+completed and nobody counted; boot 583's `igpu-children.txt` is **one level deep
+and lists IGPU's DIRECT children only**, so `AmdRadeonFramebuffer` being absent
+from it says nothing — those objects hang off the Wrangler or the controller
+(rule 14). So "the category is the variable" is an **inference**, and the two
+worlds diverge completely: if the real category DOES create framebuffers, Path B
+is dead and Path A is the route; if it creates **none either**, the category is
+not the variable, something else blocks creation outright, and **Path A hits the
+same wall after a rewrite.** Do not commit to Path A until this is read. This sharpens 3ret-j: it is not only that nothing asks the private
 Wrangler for a mode — **there is nothing to ask**, which is the single cause of
 `dal_writes 0` across four boots in three configurations. **So `extbind` is NOT
 portable here**, and the fork collapses to Apple's framebuffer owning the panel

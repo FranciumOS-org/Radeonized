@@ -96,6 +96,58 @@ rb_ioreg 10 "$out/peer.plist" -w0 -p IOService -c RembrandtGPUPeer -r -d1 -l -a
 rb_ioreg 10 "$out/framebuffer.plist" -w0 -p IOService -c IOFramebuffer -r -d1 -l -a
 sync
 
+# 3ext-b: CLASS-WIDE INSTANCE COUNTS, which is the one question a wedged
+# promoted boot exists to answer and which no earlier capture could.
+#
+# boot 586 established that under 2pi's PRIVATE match category Apple's
+# AmdGpuWrangler starts, completes, returns true and creates ZERO
+# AMDRadeonX6000_AmdRadeonFramebuffer children, so extbind's method is never
+# called. What is NOT established is whether the PROMOTED Wrangler (the real
+# IOFramebuffer category, -rbgpudalfbreal) creates any either - and the whole
+# architectural fork turns on it. If it does, the match category is the variable
+# and Apple's framebuffer owning the panel is the route. If it creates none
+# either, the category is not the variable, something else blocks creation
+# outright, and that route hits the same wall.
+#
+# WHY THE EXISTING FILES CANNOT ANSWER IT. igpu-children.txt is a depth-one walk
+# of IGPU's DIRECT children, and an AmdRadeonFramebuffer hangs off the Wrangler
+# or the controller rather than off IGPU, so its absence there is not absence
+# (rule 14). framebuffer.plist matches -c IOFramebuffer, which an object denied
+# that category need not be reachable through. Only a class-wide search answers
+# the question, and it must be BOUNDED like every other ioreg here (2er).
+#
+# Counted by '^+-o' rather than by any property, because -c selects by class and
+# each matched object begins exactly one such line. Each count is written with
+# its own file so a timeout is visible as a missing file instead of a zero.
+echo
+echo "--- 3ext-b: class-wide instance counts (0 is a READING, not an absence)"
+for _cls in AMDRadeonX6000_AmdRadeonFramebuffer \
+            AMDRadeonX6000_AmdGpuWrangler \
+            RBAMDFramebuffer \
+            IOResources ; do
+    rb_ioreg 10 "$out/count-$_cls.txt" -rl -c "$_cls"
+    if [ -f "$out/count-$_cls.txt" ]; then
+        # `grep -c` PRINTS 0 and EXITS 1 when there are no matches, so a
+        # `|| echo '?'` here appends a SECOND line after the 0 and the .n file
+        # becomes "0\n?", which breaks the control comparison below. Caught by
+        # running this loop against boot 586, where the first count is a
+        # legitimate 0 (rule 16: the instrument is a suspect). `|| :` swallows
+        # the status without adding output, and keeps this safe under `set -e`.
+        _n=$(grep -c '^+-o' "$out/count-$_cls.txt" 2>/dev/null || :)
+        echo "  $_cls: $_n"
+        echo "$_n" > "$out/count-$_cls.n"
+    else
+        echo "  $_cls: NO FILE - the bounded ioreg did not finish"
+    fi
+done
+# IOResources is the control: it is present in every boot, so a 0 there means
+# the search is broken and NONE of the counts above may be read (rule 26).
+if [ -f "$out/count-IOResources.n" ] && [ "$(cat "$out/count-IOResources.n")" = "0" ]; then
+    echo "  *** CONTROL FAILED: IOResources counted 0, so every count above is"
+    echo "      void. Do not read them as findings."
+fi
+sync
+
 # 2v0: THE DISPLAY LOG NOW GOES FIRST. It is the measurement these boots
 # exist to take, and twice it has been the thing that was missing - once
 # to a +28 s window (2u5) and once to a hung kmutil ahead of it (boot 180).
