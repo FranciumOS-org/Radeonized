@@ -20,6 +20,7 @@
 #include "rb_smu13.h"
 // 2pm: the generated dcn302 -> dcn312 register deny list (tools/re/dcn_denylist.py)
 #include "rb_dcn_deny.h"
+#include "rb_dcn_addr.h"
 #include "rb_fwhdr.h"   /* 3fxe: slice the embedded AMD firmware containers */
 #include "rb_atombios.h" /* 3vb-c: is this buffer an ATOM VBIOS?            */
 #include "rb_vfct.h"     /* 3vb-c: find our image inside the ACPI VFCT     */
@@ -9716,13 +9717,93 @@ static uint8_t  g_dal_enc     = 0;         // 0 unknown, 1 dword, 2 byte
 static uint64_t g_dal_passed  = 0;
 static uint64_t g_dal_denied  = 0;
 
-// Returns true if this write should reach the chip. Records either way.
-static bool rbgpu_dal_allow(uint32_t reg) {
+// 3dcn-c: REDIRECTING INSTEAD OF DROPPING, which is what addresses 2po.
+//
+// 2pm could only choose between letting a moved write through and dropping it,
+// because it had no destination to send one to. 2po measured where that ends:
+// *"Apple's dcn302 DAL cannot bring up DCN 3.1.2 by filtering writes. DCHUBBUB
+// is why"* - 46 DCHUBBUB writes dropped, and DCN has no hub without them.
+// `src/common/rb_dcn_addr.h` supplies the third outcome: all 46 of those
+// offsets HAVE a 3.1.2 destination, as do 198 offsets in total. The 29 with no
+// destination are still blocked, because the old offset lands on a real but
+// different register here (`0x089` is `DOMAIN4_PG_STATUS` there and
+// `DOMAIN16_PG_CONFIG` on this chip).
+//
+// IT IS A SEPARATE ARM, `-rbgpudalremap`, and 2pm's deny-only policy stays
+// reachable without it. That is deliberate: deny-only is the configuration
+// boots 144 and 145 ran, so it is the control for this one, and a new policy
+// that silently replaced it would make those readings unrepeatable.
+//
+// THE UNITS ARE STILL DECLARED, NOT ASSUMED. 2pn measured that
+// `AmdRegisterAccess::hwReadReg32(uint)` carries a RAW BASE_IDX 2 DWORD OFFSET
+// - four observed values resolve 4 for 4 that way and 0 for 4 as absolute
+// addresses. That is a different function from `writeReg32`, so it is evidence
+// about reads and not proof about writes, and `rbgpudalenc=` is still
+// required. Rule 34: the arm is part of the experiment.
+static bool     g_dal_remap   = false;     // -rbgpudalremap
+static uint64_t g_dal_wrr     = 0;         // writes redirected
+static uint64_t g_dal_rdr     = 0;         // reads redirected
+static uint64_t g_dal_blk     = 0;         // writes blocked (no destination)
+static uint64_t g_dal_untr    = 0;         // units wrong: cannot translate
+
+// Returns true if this write should reach the chip, and writes the offset to
+// use into *reg_out ON EVERY OUTCOME - the unchanged input when the answer is
+// "drop it", so the trace reports what was refused and not merely that
+// something was (rule 14).
+static bool rbgpu_dal_allow(uint32_t reg, uint32_t *reg_out) {
+    if (reg_out) { *reg_out = reg; }
     if (!g_dal_pass || g_dal_enc == 0) {
         g_dal_denied++;
         return false;                      // the default is still: drop it
     }
     const uint32_t dw = (g_dal_enc == 2) ? (reg >> 2) : reg;
+
+    if (g_dal_remap) {
+        // The decode, the lookup and the re-encode are ONE call in
+        // src/common, not three steps here, because the re-encode is where
+        // the hazard is: `arg >> 2` then `to << 2` silently realigns a
+        // misaligned byte address. rb_dcn_dal_action_enc() refuses that
+        // instead, and the hosttest covers it.
+        uint32_t use = reg;
+        const uint32_t act = rb_dcn_dal_action_enc(reg, g_dal_enc, &use);
+        if (act == RB_DCN_ACT_REDIRECT) {
+            if (reg_out) { *reg_out = use; }
+            g_dal_wrr++;
+            if (g_dal_wrr <= 16)
+                rbgpu_log("3dcn-c: REDIRECT write %#x -> %#x (dword %#x)",
+                          reg, use, dw);
+            if (g_dal_wrr == 1 || (g_dal_wrr & 0xff) == 0)
+                rbgpu_diag_set_num("dal_wrr", g_dal_wrr);
+            return true;
+        }
+        if (act == RB_DCN_ACT_BLOCK) {
+            g_dal_blk++;
+            if (g_dal_blk <= 16)
+                rbgpu_log("3dcn-c: BLOCK write dword %#x - no 3.1.2 "
+                          "destination and the offset is a different "
+                          "register here", dw);
+            rbgpu_diag_set_num("dal_blk", g_dal_blk);
+            return false;
+        }
+        if (act == RB_DCN_ACT_UNTRANSLATABLE) {
+            // Only reachable with rbgpudalenc=byte and a misaligned
+            // argument, which says the declared units are wrong. Drop it and
+            // say so loudly rather than translate it wrongly.
+            g_dal_untr++;
+            if (g_dal_untr <= 16)
+                rbgpu_log("3dcn-c: UNTRANSLATABLE write arg %#x under "
+                          "units=%u - DROPPED. A register address is "
+                          "4-aligned, so rbgpudalenc= is probably wrong.",
+                          reg, g_dal_enc);
+            rbgpu_diag_set_num("dal_untr", g_dal_untr);
+            return false;
+        }
+        g_dal_passed++;
+        if (g_dal_passed == 1 || (g_dal_passed & 0xff) == 0)
+            rbgpu_diag_set_num("dal_passed", g_dal_passed);
+        return true;
+    }
+
     if (rb_dcn_is_denied(dw)) {
         g_dal_denied++;
         if (g_dal_denied <= 16)
@@ -9735,6 +9816,28 @@ static bool rbgpu_dal_allow(uint32_t reg) {
     if (g_dal_passed == 1 || (g_dal_passed & 0xff) == 0)
         rbgpu_diag_set_num("dal_passed", g_dal_passed);
     return true;
+}
+
+// The offset a READ should use. Reads are REDIRECTED and never blocked: a
+// blocked read would have to hand the DAL a fabricated value, which is a
+// different and much worse experiment than letting it read the register the
+// offset really names. A BLOCK offset therefore passes through, which is what
+// happens today in every boot, and it is read-only.
+static uint32_t rbgpu_dal_rd_off(uint32_t reg) {
+    if (!g_dal_remap || !g_dal_pass || g_dal_enc == 0) { return reg; }
+
+    uint32_t use = reg;
+
+    if (rb_dcn_dal_action_enc(reg, g_dal_enc, &use) != RB_DCN_ACT_REDIRECT) {
+        return reg;        // PASS, BLOCK and UNTRANSLATABLE all read as-is
+    }
+
+    g_dal_rdr++;
+    if (g_dal_rdr <= 16)
+        rbgpu_log("3dcn-c: REDIRECT read %#x -> %#x", reg, use);
+    if (g_dal_rdr == 1 || (g_dal_rdr & 0xff) == 0)
+        rbgpu_diag_set_num("dal_rdr", g_dal_rdr);
+    return use;
 }
 
 static void rbgpu_dal_record(uint32_t reg, uint32_t val, const char *how) {
@@ -9751,16 +9854,18 @@ static void rbgpu_dal_record(uint32_t reg, uint32_t val, const char *how) {
 }
 
 static void hooked_dal_w2_2ph(void *self, uint32_t reg, uint32_t val) {
+    uint32_t use = reg;
     rbgpu_dal_record(reg, val, "2");
-    if (rbgpu_dal_allow(reg))
-        orig_dal_w2_2ph(self, reg, val);
+    if (rbgpu_dal_allow(reg, &use))
+        orig_dal_w2_2ph(self, use, val);
 }
 
 static void hooked_dal_w4_2ph(void *self, uint32_t reg, uint32_t val,
                               uint8_t a, uint32_t b) {
+    uint32_t use = reg;
     rbgpu_dal_record(reg, val, "4");
-    if (rbgpu_dal_allow(reg))
-        orig_dal_w4_2ph(self, reg, val, a, b);
+    if (rbgpu_dal_allow(reg, &use))
+        orig_dal_w4_2ph(self, use, val, a, b);
 }
 
 // 2pj: THE REGISTER SURFACE IS WIDER THAN ONE CLASS, and boot 141 proved the
@@ -9812,36 +9917,38 @@ static void rbgpu_dal_count(const char *key, uint64_t *n) {
 }
 
 static uint32_t hooked_dal_hwr_2pj(void *self, uint32_t reg) {
-    uint32_t v = orig_dal_hwr_2pj(self, reg);
+    uint32_t v = orig_dal_hwr_2pj(self, rbgpu_dal_rd_off(reg));
     rbgpu_dal_count("dal_r_hw", &g_dal_r_hw);
     rbgpu_dal_trace('r', reg, v);
     return v;
 }
 static uint32_t hooked_dal_atomr_2pj(void *self, void *ctx, uint32_t reg) {
-    uint32_t v = orig_dal_atomr_2pj(self, ctx, reg);
+    uint32_t v = orig_dal_atomr_2pj(self, ctx, rbgpu_dal_rd_off(reg));
     rbgpu_dal_count("dal_r_atom", &g_dal_r_atom);
     return v;
 }
 static void hooked_dal_atomw_2pj(void *self, void *ctx, uint32_t reg, uint32_t val) {
     rbgpu_dal_count("dal_w_atom", &g_dal_w_atom);
     rbgpu_dal_record(reg, val, "A");
-    if (rbgpu_dal_allow(reg))
-        orig_dal_atomw_2pj(self, ctx, reg, val);
+    uint32_t use = reg;
+    if (rbgpu_dal_allow(reg, &use))
+        orig_dal_atomw_2pj(self, ctx, use, val);
 }
 static uint32_t hooked_dal_biosr_2pj(void *self, void *ctx, uint32_t reg) {
-    uint32_t v = orig_dal_biosr_2pj(self, ctx, reg);
+    uint32_t v = orig_dal_biosr_2pj(self, ctx, rbgpu_dal_rd_off(reg));
     rbgpu_dal_count("dal_r_bios", &g_dal_r_bios);
     return v;
 }
 static void hooked_dal_biosw_2pj(void *self, void *ctx, uint32_t reg, uint32_t val) {
     rbgpu_dal_count("dal_w_bios", &g_dal_w_bios);
     rbgpu_dal_record(reg, val, "B");
-    if (rbgpu_dal_allow(reg))
-        orig_dal_biosw_2pj(self, ctx, reg, val);
+    uint32_t use = reg;
+    if (rbgpu_dal_allow(reg, &use))
+        orig_dal_biosw_2pj(self, ctx, use, val);
 }
 
 static uint32_t hooked_dal_r3_2pi(void *self, uint32_t reg, uint32_t a, uint8_t b) {
-    uint32_t v = orig_dal_r3_2pi(self, reg, a, b);   // passed through untouched
+    uint32_t v = orig_dal_r3_2pi(self, rbgpu_dal_rd_off(reg), a, b);
     g_dal_reads++;
     if (g_dal_reads == 1 || (g_dal_reads & 0xff) == 0)
         rbgpu_diag_set_num("dal_reads", g_dal_reads);
@@ -9870,6 +9977,10 @@ static bool hooked_ctl_start_2ph(void *self, void *provider) {
     rbgpu_diag_set_num("dal_start_ret", ret ? 1 : 0);
     rbgpu_diag_set_num("dal_writes", g_dal_writes);
     rbgpu_diag_set_num("dal_reads", g_dal_reads);
+    rbgpu_diag_set_num("dal_wrr",    g_dal_wrr);
+    rbgpu_diag_set_num("dal_rdr",    g_dal_rdr);
+    rbgpu_diag_set_num("dal_blk",    g_dal_blk);
+    rbgpu_diag_set_num("dal_untr",   g_dal_untr);
     rbgpu_diag_set_num("dal_r_hw",   g_dal_r_hw);
     rbgpu_diag_set_num("dal_r_atom", g_dal_r_atom);
     rbgpu_diag_set_num("dal_r_bios", g_dal_r_bios);
@@ -9917,6 +10028,10 @@ static bool hooked_wr_start_2pk(void *self, void *provider) {
               (unsigned long long)g_dal_r_bios);
     rbgpu_diag_set_num("dalfb_start_ret", ret ? 1 : 0);
     rbgpu_diag_set_num("dal_writes", g_dal_writes);
+    rbgpu_diag_set_num("dal_wrr",    g_dal_wrr);
+    rbgpu_diag_set_num("dal_rdr",    g_dal_rdr);
+    rbgpu_diag_set_num("dal_blk",    g_dal_blk);
+    rbgpu_diag_set_num("dal_untr",   g_dal_untr);
     rbgpu_diag_set_num("dal_r_hw",   g_dal_r_hw);
     rbgpu_diag_set_num("dal_w_atom", g_dal_w_atom);
     rbgpu_diag_set_num("dal_w_bios", g_dal_w_bios);
@@ -10979,6 +11094,23 @@ void RGPU::init() {
                   ? (g_dal_enc == 1 ? "ARMED units=dword" : "ARMED units=byte")
                   : "off - every write dropped",
               RB_DCN_DENY_COUNT);
+
+    // 3dcn-c: the remap depends on the pass-through arm and on the units, so
+    // it refuses rather than arming half of itself (rule 34).
+    g_dal_remap = checkKernelArgument("-rbgpudalremap");
+    if (g_dal_remap && !(g_dal_pass && g_dal_enc)) {
+        rbgpu_log("3dcn-c: -rbgpudalremap REFUSED - it needs -rbgpudalpass "
+                  "and rbgpudalenc=, which are not both set. Falling back to "
+                  "2pm's policy: every moved write DROPPED.");
+        rbgpu_diag_set_num("dal_remap_refused", 1);
+        g_dal_remap = false;
+    }
+    rbgpu_diag_set_num("dal_remap", g_dal_remap ? 1 : 0);
+    rbgpu_log("3dcn-c: dcn302->dcn312 remap %s (%u redirects, %u blocked; "
+              "reads redirected, never blocked)",
+              g_dal_remap ? "ARMED by -rbgpudalremap"
+                          : "off - 2pm deny-only, which is 2po's configuration",
+              (unsigned)RB_DCN_REMAP_COUNT, 29u);
 
     g_dalfb_real = checkKernelArgument("-rbgpudalfbreal");
     rbgpu_log("2pk: Wrangler promotion %s - it will take IOFramebuffer, let "

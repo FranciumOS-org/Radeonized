@@ -70231,3 +70231,86 @@ configuration could not work has been removed, the policy that removes it is
 built and tested on the host, and whether the display comes up is unknown.
 2po's entry lists more than DCHUBBUB, and 3rmb lists the PHY writes and the
 VBIOS augmentation that 660m-Metal needed on top of a remap.
+
+---
+
+## 3dcn-c (2026-11-14) — the policy is wired into the DAL hooks, and the next boot is a bring-up ATTEMPT
+
+3dcn-b built the three-outcome policy and tested it on the host. Nothing was
+connected: `rbgpu_dal_allow()` still called `rb_dcn_is_denied()` and still
+dropped every moved write, which is 2pm's policy and 2po's configuration.
+
+### What changed
+
+`rbgpu_dal_allow()` gained an out-parameter, so a hook can call the original
+accessor with a **different offset** instead of only choosing whether to call
+it. Four write hooks use it — `writeReg32` 2-arg and 4-arg,
+`AmdBiosParser::atomWriteRegister32`, `AmdBiosParserHelper::writeReg32` — and
+four read hooks route their offset through `rbgpu_dal_rd_off()`:
+`hwReadReg32`, `atomReadRegister32`, the VBIOS parser read, and the 3-arg read
+2pi left passing through untouched.
+
+**Reads are redirected and never blocked.** Blocking a read would mean handing
+the DAL a fabricated value, which is a different and much worse experiment
+than letting it read the register its offset really names. A BLOCK offset
+therefore reads through, exactly as in every boot so far, and it is read-only.
+
+**The arm is new and separate: `-rbgpudalremap`.** 2pm's deny-only policy
+stays reachable without it, deliberately — deny-only is what boots 144 and 145
+ran, so it is this boot's control, and a policy that silently replaced it would
+make those readings unrepeatable (rule 39's third clause). It refuses unless
+`-rbgpudalpass` and `rbgpudalenc=` are both set, publishing
+`dal_remap_refused` rather than arming half of itself (rule 34). Rule 30
+checked: no existing token has `-rbgpudalremap` as a prefix.
+
+**The units are still declared, not assumed.** 2pn measured `hwReadReg32` as a
+raw BASE_IDX 2 dword offset. That is a different function from `writeReg32`, so
+it is evidence about reads and not proof about writes, and `rbgpudalenc=` is
+still required.
+
+### The hazard the wiring introduced, and where it ended up
+
+The plugin first did its own decode and re-encode: `arg >> 2` to look up and
+`to << 2` to rebuild. For a misaligned byte address that **discards the low two
+bits and returns a different address than it was given** — not a redirect, a
+silent realignment, invisible to a caller reading only the action. A register
+address is 4-aligned by construction, so a misaligned one also says the
+declared units are wrong, which makes refusing the more informative answer.
+
+So the decode, the lookup and the re-encode are now **one call in
+`src/common`** — `rb_dcn_dal_action_enc(arg, enc, &out)`, with a fourth action
+`RB_DCN_ACT_UNTRANSLATABLE` for a misaligned byte argument or undeclared
+units, `*out` left at the unchanged input. That put the hazard where rule 48
+can reach it: four break-it checks, **all four fired** — the misalignment
+refusal (6 FAIL), the undeclared-units refusal (3), the re-encode shift (399)
+and `*out` on a refusal (4). The round-trip case walks all 198 entries in byte
+units and asserts the re-encode is the exact inverse of the decode.
+
+Counters: `dal_wrr` writes redirected, `dal_rdr` reads redirected, `dal_blk`
+writes blocked, `dal_untr` untranslatable. Plugin UUID **9D896396**.
+
+### WHAT THE NEXT BOOT CAN AND CANNOT BE
+
+It cannot be a working display, and the ordering matters enough to spend two
+boots on it rather than one.
+
+**Boot A — remap armed, NO Wrangler promotion.** `-rbgpudal -rbgpudalpass
+rbgpudalenc=dword -rbgpudalremap`. This is 2pn's configuration (boot 143,
+controller only, display intact) plus the remap. It cannot bring up a display,
+because without the promotion nothing drives DAL far enough to try — 2pn got
+four reads out of it. What it does buy, for no risk to a working desktop, is
+the one thing that would waste boot B: whether `dal_untr` is zero. A non-zero
+`dal_untr` means `writeReg32` does not carry dword offsets and the whole table
+is being applied in the wrong units, which is exactly 3dcn's own error one
+level down. It also gives the first count of how many of these accesses the
+policy actually touches.
+
+**Boot B — add `-rbgpudalfbreal`.** This is the configuration that panicked in
+2pk and hung in 2pl and 2po, with the DCHUBBUB blocker removed. It is a
+bring-up attempt and a hang is a likely outcome; the sentinel is the recovery,
+so `-rbgpunosentinel` must be OFF for it even though boot A wants it on.
+
+And the honest limit: 2po's entry names more than DCHUBBUB, and 3rmb lists the
+PHY write suppression and the VBIOS augmentation 660m-Metal needed on top of a
+remap, none of which is built. One named blocker has been removed. Whether
+anything else stands behind it is unknown.

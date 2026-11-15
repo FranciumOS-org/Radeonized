@@ -67,6 +67,8 @@
 #define RB_DCN_ACT_PASS     0u  /* same register here; let it through      */
 #define RB_DCN_ACT_REDIRECT 1u  /* moved; *out holds the 3.1.2 offset      */
 #define RB_DCN_ACT_BLOCK    2u  /* no destination and the offset is unsafe */
+#define RB_DCN_ACT_UNTRANSLATABLE 3u /* units undeclared, or a misaligned byte
+                                      * address - the question cannot be asked */
 
 /* The BASE_IDX every offset here is understood in. An access known to be in
  * another segment must not be passed to these functions. */
@@ -121,6 +123,49 @@ static inline uint32_t rb_dcn_dal_action(uint32_t off302, uint32_t *out)
     }
     if (out) { *out = off302; }
     return rb_dcn_off_dangerous(off302) ? RB_DCN_ACT_BLOCK : RB_DCN_ACT_PASS;
+}
+
+/* The units the hook's register argument is declared to be in. 2pn measured
+ * `hwReadReg32` as dword; `writeReg32` is a different function and is still
+ * declared rather than assumed, so both encodings exist here. */
+#define RB_DCN_ENC_NONE  0u
+#define RB_DCN_ENC_DWORD 1u
+#define RB_DCN_ENC_BYTE  2u
+
+/* The decision for one access expressed in the hook's own units, with `*out`
+ * in those same units.
+ *
+ * A BYTE address that is not 4-aligned is REFUSED rather than translated,
+ * because the obvious code - `arg >> 2` to look up and `to << 2` to rebuild -
+ * discards the low two bits and hands back a DIFFERENT address than it was
+ * given. That is not a redirect, it is a silent realignment, and a caller
+ * reading only the action would never see it. It also means the declared units
+ * are wrong, since a register address is 4-aligned by construction, so the
+ * refusal is the more informative answer. Undeclared units refuse the same
+ * way: rule 14, a refusal is a code.
+ *
+ * `*out` is written on EVERY outcome including the refusals, where it is the
+ * unchanged input. */
+static inline uint32_t rb_dcn_dal_action_enc(uint32_t arg, uint32_t enc,
+                                             uint32_t *out)
+{
+    uint32_t dw, to, act;
+
+    if (out) { *out = arg; }
+
+    if (enc == RB_DCN_ENC_BYTE) {
+        if (arg & 3u) { return RB_DCN_ACT_UNTRANSLATABLE; }
+        dw = arg >> 2;
+    } else if (enc == RB_DCN_ENC_DWORD) {
+        dw = arg;
+    } else {
+        return RB_DCN_ACT_UNTRANSLATABLE;
+    }
+
+    to = dw;
+    act = rb_dcn_dal_action(dw, &to);
+    if (out) { *out = (enc == RB_DCN_ENC_BYTE) ? (to << 2) : to; }
+    return act;
 }
 
 /* 1 if `tbl` is sorted by `from` with no duplicates, i.e. if a binary search

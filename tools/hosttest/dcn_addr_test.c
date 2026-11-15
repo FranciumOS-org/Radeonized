@@ -184,11 +184,75 @@ int dcn_addr_tests(void)
     A(rb_dcn_dal_action(0x0a1u, 0) == RB_DCN_ACT_REDIRECT);
     A(rb_dcn_dal_action(0x089u, 0) == RB_DCN_ACT_BLOCK);
 
+    /* 10b. THE HOOK'S OWN UNITS, and the hazard that made this entry point
+     * exist. The plugin receives one `uint32_t` whose encoding is declared by
+     * `rbgpudalenc=`, so the lookup has to be bracketed by a decode and a
+     * re-encode, and the obvious pair - `arg >> 2` then `to << 2` - DISCARDS
+     * the low two bits of a misaligned byte address and returns a different
+     * address than it was handed. Refusing is the right answer twice over:
+     * the translation would be wrong, and a register address is 4-aligned by
+     * construction, so a misaligned one says the declared units are wrong. */
+    out = 0xdeadu;
+    A(rb_dcn_dal_action_enc(0x0a1u, RB_DCN_ENC_DWORD, &out)
+      == RB_DCN_ACT_REDIRECT);
+    A(out == 0x089u);
+    /* The same register in byte units: 0x0a1 * 4 -> 0x089 * 4. */
+    A(rb_dcn_dal_action_enc(0x0a1u << 2, RB_DCN_ENC_BYTE, &out)
+      == RB_DCN_ACT_REDIRECT);
+    A(out == (0x089u << 2));
+    /* Round trip: the re-encode is the exact inverse of the decode. */
+    {
+        uint32_t i;
+        for (i = 0; i < (uint32_t)RB_DCN_REMAP_COUNT; i++) {
+            const uint32_t b = rb_dcn_remap_tbl[i].from << 2;
+            A(rb_dcn_dal_action_enc(b, RB_DCN_ENC_BYTE, &out)
+              == RB_DCN_ACT_REDIRECT);
+            A(out == (rb_dcn_remap_tbl[i].to << 2));
+            A((out >> 2) == rb_dcn_remap_tbl[i].to);
+        }
+    }
+    /* All three misalignments refuse, and `out` is the UNCHANGED input - not
+     * a realigned one, which is the whole point (rule 14). */
+    {
+        uint32_t k;
+        for (k = 1u; k <= 3u; k++) {
+            const uint32_t b = (0x0a1u << 2) | k;
+            out = 0xdeadu;
+            A(rb_dcn_dal_action_enc(b, RB_DCN_ENC_BYTE, &out)
+              == RB_DCN_ACT_UNTRANSLATABLE);
+            A(out == b);
+        }
+    }
+    /* Undeclared units refuse rather than guessing dword. 0x0a1 would have
+     * REDIRECTED under a guess, so this case can tell the two apart. */
+    out = 0xdeadu;
+    A(rb_dcn_dal_action_enc(0x0a1u, RB_DCN_ENC_NONE, &out)
+      == RB_DCN_ACT_UNTRANSLATABLE);
+    A(out == 0x0a1u);
+    A(rb_dcn_dal_action_enc(0x0a1u, 99u, &out) == RB_DCN_ACT_UNTRANSLATABLE);
+    /* BLOCK and PASS survive the encoding, and in byte units `out` comes back
+     * re-encoded to the input rather than to a dword. */
+    A(rb_dcn_dal_action_enc(0x089u << 2, RB_DCN_ENC_BYTE, &out)
+      == RB_DCN_ACT_BLOCK);
+    A(out == (0x089u << 2));
+    A(rb_dcn_dal_action_enc(0x1b41u << 2, RB_DCN_ENC_BYTE, &out)
+      == RB_DCN_ACT_PASS);
+    A(out == (0x1b41u << 2));
+    A(rb_dcn_dal_action_enc(0x1b41u, RB_DCN_ENC_DWORD, 0) == RB_DCN_ACT_PASS);
+    /* A dword offset high enough that << 2 overflows is still handled: the
+     * encodings are independent, and dword mode never shifts. */
+    A(rb_dcn_dal_action_enc(0xffffffffu, RB_DCN_ENC_DWORD, &out)
+      == RB_DCN_ACT_PASS);
+    A(out == 0xffffffffu);
+
     /* 11. The three actions are distinct values, so a trace that records one
      * number identifies the decision. */
     A(RB_DCN_ACT_PASS != RB_DCN_ACT_REDIRECT);
     A(RB_DCN_ACT_PASS != RB_DCN_ACT_BLOCK);
     A(RB_DCN_ACT_REDIRECT != RB_DCN_ACT_BLOCK);
+    A(RB_DCN_ACT_UNTRANSLATABLE != RB_DCN_ACT_PASS);
+    A(RB_DCN_ACT_UNTRANSLATABLE != RB_DCN_ACT_REDIRECT);
+    A(RB_DCN_ACT_UNTRANSLATABLE != RB_DCN_ACT_BLOCK);
 
     /* 12. Redirection is NOT an involution and must not be applied twice: at
      * least one `to` is itself a `from`, which is exactly why a caller that
