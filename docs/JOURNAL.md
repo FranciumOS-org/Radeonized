@@ -72546,3 +72546,134 @@ an Apple framebuffer on this machine reads its one input.
 `extbind` is not portable here, for a reason now measured rather than inferred:
 660m-Metal's hook is on a method of an object that this machine never
 constructs.
+
+---
+
+## 3ext-d — the chain from the VBIOS table to the dark panel, named at every link, no boots
+
+Tags: `3ext-d`, `3ext-c`, `3rmb`, `2E1`
+
+3ext-c ended on "who writes `AmdRadeonController + 0x120`". The answer was two
+greps away, and it changes what the field is.
+
+### +0x120 is the LINK count, not a framebuffer count
+
+The whole-file sweep in 3ext-c looked for `mov` stores and so missed the one
+instruction that writes it. Sweeping **every mnemonic** that touches
+`0x120(%r...)` returns a single `incb`, at `0xbfa069e`, inside
+`AMDRadeonX6000_AmdRadeonController::createLinks()`:
+
+```
+0xbfa062c  movl   $0xd8, %esi          # zero a 0xd8-byte stack buffer
+0xbfa0634  callq  bzero
+0xbfa0640  movl   $0x6, (%rbx)         # rbx = -0x104(%rbp): in/out count, seeded 6
+0xbfa0646  movq   0x7908(%r14), %rdi   # the enumerator
+0xbfa0656  callq  *0x190(%rax)         # <- asks it for the connectors
+0xbfa066e  cmpl   $0x0, (%rbx)
+0xbfa0671  je     0xbfa06b7            # ZERO -> create nothing, return 0
+0xbfa067c  movl   %ebx, -0x120(%rbp)   # loop: descriptor index
+0xbfa068c  callq  AmdLink::createLink(AmdLink::LinkInitInfo const&)
+0xbfa0691  movq   %rax, 0x128(%r14,%rbx,8)   # link array at controller+0x128
+0xbfa069e  incb   0x120(%r14)                # <- the count, one per link
+0xbfa06ae  addq   $0x24, %r15                # descriptor stride
+```
+
+The arithmetic is internally consistent and that is worth stating as a check
+rather than a remark: the buffer is `0xd8` bytes, the descriptor stride is
+`0x24`, and `0xd8 / 0x24 = 6` — the seeded maximum. So `controller + 0x120` is
+the number of **links** successfully created, `+0x128` is the link array, and
+3ext-c's `createFbStubs(movzbl 0x120(%rbx))` makes **one framebuffer stub per
+link**. The earlier reading of the field as a framebuffer count was right about
+what consumes it and wrong about what it counts.
+
+### The enumerator is Apple's VBIOS parser, and the slot is named
+
+`controller + 0x7908` is assigned in each ASIC's
+`createControllerCoreServices()` — ours is
+`AmdRadeonControllerNavi21::createControllerCoreServices` at `0xbf5e7a3` — from
+
+```
+callq  AMDRadeonX6000_AmdBiosParserHelper::createBiosParser(AtomBiosInitData&)
+movq   %rax, 0x7908(%rbx)
+testq  %rax, %rax / je <error>
+```
+
+so the object is `AMDRadeonX6000_AmdBiosParserHelper`, and it is non-NULL in any
+boot that gets past that line. Reading its vtable out of the extracted Mach-O
+(the project's `vtslots.py` reads `BootKernelExtensions.kc` and this kext lives
+in `SystemKernelExtensions.kc`, so the vtable at `__ZTV34...AmdBiosParserHelper`
+= `0xc1e6800` was resolved directly, address point + offset, raw entries masked
+against `nm`):
+
+```
+0x180  AmdBiosParserHelper::getFwReservedSizeInBytes() const
+0x188  AmdBiosParserHelper::getConnectorCount() const
+0x190  AmdBiosParserHelper::getConnectorList(unsigned int&, AmdLinkDescriptor*) const
+0x198  AmdBiosParserHelper::getCommandTableRevision(unsigned int, unsigned char*, unsigned char*)
+0x1a0  AmdBiosParserHelper::executeCommandTable(unsigned int, void*)
+```
+
+The call in `createLinks` is slot `0x190`: **`getConnectorList`**, by reference
+count seeded at 6, into an array of six `AmdLinkDescriptor`.
+
+### The complete chain
+
+```
+AmdBiosParserHelper::getConnectorList(&n = 6, AmdLinkDescriptor[6])
+   n == 0  ->  createLinks() creates nothing and returns 0
+           ->  controller+0x120 stays 0
+   start() ->  createFbStubs(0)  ->  testb/je skips the loop
+           ->  no AmdRadeonFramebuffer is ever constructed  (3ext-c, boot 588: 0)
+           ->  CGXMappedDisplayStart: FB: 0 of 0 opened
+           ->  CGXDisplayDriverInitialize: No Display drivers loaded
+           ->  dark panel
+```
+
+Every link is a named function or a named field, and the terminal observation is
+Apple's own log line from boot 588.
+
+### And the table it reads is on this disk, with six paths in it
+
+`tools/re/vbios_dispobj.py` against `firmware/680m-vbios.rom` — the same image
+3vb-e proved the ACPI VFCT route reproduces bit for bit:
+
+```
+displayobjectinfo 0x2294   table size 205  rev 1.4  supporteddevices 0x0eca  paths 6
+  path 0  eDP          UNIPHY_A  phyid 0  hpdsel 1   DP_IS_USB_C 0
+  path 1  DISPLAYPORT  UNIPHY_B  phyid 1  hpdsel 2   DP_IS_USB_C 0
+  path 2  DISPLAYPORT  UNIPHY_C  phyid 2  hpdsel 3   DP_IS_USB_C 1   <- the external port
+  path 3  DISPLAYPORT  UNIPHY_D  phyid 3  hpdsel 4   DP_IS_USB_C 1
+  path 4  DISPLAYPORT  UNIPHY_E  phyid 4  hpdsel 5   DP_IS_USB_C 1
+  path 5  GENERIC:0x03           no encoder, no HPD
+```
+
+**Six paths against Apple's seed of exactly 6** — the strongest available
+evidence that this is the table that call reads, and it did not come from
+reasoning about names. Five of the six are real connectors, path 2 being the
+USB-C port that 300-310 spent eleven milestones on.
+
+So the parser is handed a well-formed rev 1.4 table containing the panel's own
+eDP path and returns a count that produces zero links. Four readings of that are
+open and none is established: `createLinks` may never be called at all, because
+the controller's `start()` could fail before reaching it (3ext-c already flagged
+that the controller's own `start()` return has never been measured); the parser
+may not have the image, though `createBiosParser` returning non-NULL is not the
+same as `readAtomBios` having succeeded; `getConnectorList` may filter on
+`supporteddevices`, a device tag or a table revision it does not accept; or it
+may succeed and the failure is in `createLink`.
+
+### What to measure next
+
+Two instruments, one boot, both on objects we already hook: route
+`AmdRadeonController::createLinks` and publish the in/out count before and after
+the `*0x190` call, and read `controller + 0x120` and `getConnectorCount()`
+directly. That separates all four readings above in a single armed boot, and it
+is the first experiment in this line whose subject is a count rather than a
+register. Note for whoever writes it: `createLinks` is not in the `fdb`
+configuration's path at all unless the controller reaches it, so the route must
+publish a seeded call counter the way `fdb_calls` does (rule 14), or a zero will
+be unreadable.
+
+Nothing here shows that a non-zero count lights a panel. It shows that the
+single input to the only code that can create an Apple framebuffer on this
+machine is a connector list, and that the table behind it is present and sane.

@@ -1213,15 +1213,46 @@ other by `initializeInternals` clearing `0xc0..0x118` then `movb $0x0, 0x120`.
 sweep returns only that zeroing plus one in `AmdDalHelper::instantiateDalInterface`
 that is **a stack local at `-0x158(%rbp)`, not this field** (rule 46), and the
 five `movl` stores are all `AmdAgdcServices::setSPINotificationsState`'s. No
-setter symbol exists. **So the line is now: who writes `AmdRadeonController +
-0x120`, and why is it zero on this chip** — one byte, in an object we already
-hook, in a class whose `start()` we have routed. Suspects: `AMDSupport` (in
-IGPU's children, **not yet extracted**), a subclass path, a structure copy.
-**Not claimed:** the controller's own `start()` return has never been measured
-(`dal_start_ret` / `dalfb_start_ret` are DAL's and the Wrangler's), and
-`createFbStubs` returns `%r14d` = the loop index, so a zero count may make it
-fail — sharper than anything above and not yet evidence; nor does anything show
-a non-zero byte would light a panel.
+setter symbol exists. 
+**3ext-d NAMED EVERY LINK OF THE CHAIN, STILL NO BOOTS — AND `+0x120` IS THE
+LINK COUNT, NOT A FRAMEBUFFER COUNT.** 3ext-c's sweep looked for `mov` stores
+and missed the one instruction that writes it: sweeping **every mnemonic** on
+`0x120(%r...)` returns a single `incb`, at `0xbfa069e` inside
+**`AmdRadeonController::createLinks()`** — `movl $0x6, (%rbx)` seeds an in/out
+count, `callq *0x190(%rax)` on `controller + 0x7908` fills it, **`cmpl $0x0 /
+je` creates nothing on zero**, then per link `AmdLink::createLink(LinkInitInfo
+const&)` -> `movq %rax, 0x128(%r14,%rbx,8)` (**link array at +0x128**) ->
+`incb 0x120(%r14)`. Self-consistent: buffer `0xd8`, stride `0x24`,
+`0xd8/0x24 = 6` = the seed. So `createFbStubs` makes **one framebuffer stub per
+LINK**. `controller + 0x7908` is **`AmdBiosParserHelper`**
+(`AmdRadeonControllerNavi21::createControllerCoreServices`, `0xbf5e7a3`, from
+`createBiosParser(AtomBiosInitData&)`), and its vtable (`0xc1e6800`, read out of
+the extracted Mach-O because `vtslots.py` only reads the **Boot** collection)
+names the slot: `0x188` `getConnectorCount() const`, **`0x190`
+`getConnectorList(unsigned int&, AmdLinkDescriptor*) const`**. `AMDSupport` is
+eliminated — it never names `AmdRadeonController` (control: 5373 symbols).
+**The chain, every link named, ending in Apple's own log line from boot 588:**
+`getConnectorList(&n=6, AmdLinkDescriptor[6])` -> n 0 -> `createLinks` returns 0
+-> `+0x120` stays 0 -> `createFbStubs(0)` skips its loop -> **no
+`AmdRadeonFramebuffer`** -> `FB: 0 of 0 opened` -> `No Display drivers loaded`
+-> dark panel.
+**AND THE TABLE IT READS IS ON THIS DISK WITH SIX PATHS IN IT.**
+`tools/re/vbios_dispobj.py firmware/680m-vbios.rom`: `displayobjectinfo
+0x2294`, **rev 1.4**, `supporteddevices 0x0eca`, **paths 6** — path 0 eDP
+UNIPHY_A, paths 1-4 DP on UNIPHY_B..E (**path 2 = UNIPHY_C = phyid 2 =
+`DP_IS_USB_C 1`**, 300-310's port), path 5 generic. **Six paths against Apple's
+seed of exactly 6.** So a well-formed table containing the panel's own eDP path
+yields zero links. **Four readings are open and NONE is established:**
+`createLinks` may never be called (the **controller's** `start()` return has
+never been measured — `dal_start_ret`/`dalfb_start_ret` are DAL's and the
+Wrangler's, and `createFbStubs` returns `%r14d` = the loop index); the parser
+may lack the image (`createBiosParser` non-NULL is not `readAtomBios` OK);
+`getConnectorList` may filter on `supporteddevices`, a device tag or a revision;
+or `createLink` may be what fails. **Next: two instruments, ONE boot** — route
+`createLinks` and publish the in/out count either side of the `*0x190` call,
+plus `+0x120` and `getConnectorCount()` — with a **seeded call counter** like
+`fdb_calls`, or a zero is unreadable (rule 14). Nothing shows a non-zero count
+lights a panel.
 **Two read-side hazards from their source, before any more RDPCS
 work:** undefined offsets in `seg2 0x2928..0x2d8e` **wedge the RDPCS bus**
 (their `phyvalid.hpp` is a generated bitmap of the defined ones), and UNIPHY1-4
