@@ -2899,6 +2899,69 @@ static void rbgpu_sentinel_clear_now(const char *why, uint32_t by) {
                    "the read-back FAILED, so the next boot may come up stock");
 }
 
+/* 3ret-c: A READ-ONLY LOOK AT THE SENTINEL LATCH, for gates that run before
+ * the peer starts.
+ *
+ * WHY THIS EXISTS RATHER THAN A SECOND CALL TO `rbgpu_sentinel_begin()`: that
+ * function CLEARS the latch as a side effect, in the "clear first, then run
+ * stock" order 2dg paid for. A second caller would consume the latch before
+ * the peer ever saw it, which would turn the recovery mechanism into a
+ * one-shot that the earliest caller wins. This one only reads, and it caches
+ * separately from `g_rbSafeLatch` so it cannot perturb that either.
+ *
+ * WHAT IT IS FOR: the opt-in experiments armed in `RGPU::init()` are read with
+ * raw `checkKernelArgument`, and `rbgpu_stock()` does not include the latch,
+ * so the boot sentinel did not reach them at all - a hanging experiment in
+ * boot-args repeated on every boot with nothing to stop it. `RGPU::init()`
+ * also runs before the peer, so the latch has not been read yet when the DAL
+ * arms are parsed, which is why this does its own read.
+ *
+ * Codes, on every path (rule 14):
+ *   0  no latch - the previous boot survived, so an experiment may run
+ *   1  LATCHED - the previous boot did not survive; decline
+ *   2  `-rbgpunosentinel` - there is no latch to honour, so do not invent one
+ *   3  /options unreachable - DECLINE, because an experiment that cannot find
+ *      its own recovery must not run. This fails towards not running, which is
+ *      the opposite direction from the feature gates, and deliberately so: a
+ *      default that fails safe stays on, an EXPERIMENT that fails safe stays
+ *      off.
+ */
+uint32_t rbgpu_safe_latched_ro(void) {
+    static int cached = -1;
+    if (cached >= 0) { return (uint32_t)cached; }
+
+    if (checkKernelArgument("-rbgpunosentinel")) {
+        cached = 2;
+        return 2;
+    }
+    IORegistryEntry *options = g_rbgpuOptions;
+    if (!options) {
+        options = IORegistryEntry::fromPath("/options", gIODTPlane);
+        if (!options) {
+            cached = 3;
+            return 3;
+        }
+        g_rbgpuOptions = options;
+    }
+
+    bool latched = false;
+    if (OSObject *val = options->getProperty("rbgpu-safe")) {
+        latched = true;
+        if (auto data = OSDynamicCast(OSData, val)) {
+            if (data->getLength() >= 1 &&
+                *static_cast<const char *>(data->getBytesNoCopy()) == '0') {
+                latched = false;
+            }
+        } else if (auto str = OSDynamicCast(OSString, val)) {
+            if (str->isEqualTo("0")) {
+                latched = false;
+            }
+        }
+    }
+    cached = latched ? 1 : 0;
+    return (uint32_t)cached;
+}
+
 // Returns true if this boot is a recovery boot (the latch was set).
 bool rbgpu_sentinel_begin(void) {
     if (checkKernelArgument("-rbgpunosentinel")) {

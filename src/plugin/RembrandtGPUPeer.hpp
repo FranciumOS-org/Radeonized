@@ -45,6 +45,10 @@ bool rbgpu_nvram_armed(const char *var, uint32_t *why);
 // exists, a "0" in `rbgpu-tick` or `rbgpu-fb` is our own spent one-shot.
 bool rbgpu_gen_present(void);
 bool rbgpu_sentinel_begin(void);
+// 3ret-c: read-only latch look for gates that run before the peer starts.
+// 0 not latched, 1 latched, 2 -rbgpunosentinel, 3 /options unreachable.
+// It does NOT clear the latch, unlike rbgpu_sentinel_begin().
+uint32_t rbgpu_safe_latched_ro(void);
 
 bool rbgpu_nvram_consume_oneshot(const char *var, uint32_t *why);
 // 2ey: an independent 250 ms NVRAM heartbeat (`nvram rbgpu-beat`), so the

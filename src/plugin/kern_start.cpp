@@ -11072,10 +11072,49 @@ void RGPU::init() {
     // the write hooks, deliberately - the hooks must exist before DAL runs,
     // and an interlock on the controller's start() refuses to run it if they
     // did not land.
-    g_dal_on = checkKernelArgument("-rbgpudal");
+    /* 3ret-c: THE BOOT SENTINEL DID NOT REACH THIS EXPERIMENT, AND NOW IT
+     * DOES.
+     *
+     * Every DAL arm below was read with raw `checkKernelArgument`, and
+     * `rbgpu_stock()` does not include the sentinel latch, so a configuration
+     * that hung repeated on every boot with nothing to stop it:
+     * `-rbgpudalfbreal` is the Wrangler promotion that PANICKED in 2pk and
+     * HUNG in 2pl and 2po. The recovery documented for a dead boot - "a boot
+     * that does not survive 60 s makes the next one stock" - was simply not
+     * true of these four tokens. Rule 21: a recovery procedure has to be
+     * tested in the situation it exists for, and this one had not been.
+     *
+     * `rbgpu_recovery_boot()` does not cover them either: it is called from
+     * `RembrandtGPUPeer::start`, and this is `RGPU::init()`, which runs
+     * earlier and never consults it. So Recovery was not a guaranteed way
+     * back from these tokens, and 3rec-b's Recovery boot was measured WITHOUT
+     * them - rule 39, a reading from a configuration that does not exhibit
+     * the thing does not locate it.
+     *
+     * So: one read-only look at the latch, declining on 1 (latched) and on 3
+     * (/options unreachable), and the code is PUBLISHED, because a boot that
+     * declined the experiment and a boot that ran it and saw nothing must not
+     * read the same (rule 14). */
+    const uint32_t dal_latch = rbgpu_safe_latched_ro();
+    const bool dal_ok = (dal_latch == 0 || dal_latch == 2);
+    rbgpu_diag_set_num("dal_latch", dal_latch);
+    if (!dal_ok && (checkKernelArgument("-rbgpudal") ||
+                    checkKernelArgument("-rbgpudalfbreal"))) {
+        rbgpu_log("3ret-c: DAL experiment DECLINED, latch code %u (%s). The "
+                  "tokens are still in boot-args and will run again once a "
+                  "boot survives 60 s; take them out with "
+                  "`sudo tools/efi.sh bootarg remove -rbgpudal -rbgpudalpass "
+                  "rbgpudalenc=dword -rbgpudalremap -rbgpudalfbreal`.",
+                  dal_latch,
+                  dal_latch == 1 ? "the previous boot did not survive"
+                                 : "/options unreachable, so no recovery is "
+                                   "readable and an experiment must not run");
+    }
+
+    g_dal_on = dal_ok && checkKernelArgument("-rbgpudal");
     rbgpu_log("2ph: DAL dry run %s (records and DROPS every register write)",
               g_dal_on ? "ARMED by -rbgpudal" : "off (add -rbgpudal)");
-    g_dal_pass = checkKernelArgument("-rbgpudalpass");
+    g_dal_pass = dal_ok && checkKernelArgument("-rbgpudalpass");
     char encbuf[12] = {};
     if (PE_parse_boot_argn("rbgpudalenc", encbuf, sizeof(encbuf)) && encbuf[0]) {
         if (!strncmp(encbuf, "dword", 5)) g_dal_enc = 1;
@@ -11097,7 +11136,7 @@ void RGPU::init() {
 
     // 3dcn-c: the remap depends on the pass-through arm and on the units, so
     // it refuses rather than arming half of itself (rule 34).
-    g_dal_remap = checkKernelArgument("-rbgpudalremap");
+    g_dal_remap = dal_ok && checkKernelArgument("-rbgpudalremap");
     if (g_dal_remap && !(g_dal_pass && g_dal_enc)) {
         rbgpu_log("3dcn-c: -rbgpudalremap REFUSED - it needs -rbgpudalpass "
                   "and rbgpudalenc=, which are not both set. Falling back to "
@@ -11112,7 +11151,7 @@ void RGPU::init() {
                           : "off - 2pm deny-only, which is 2po's configuration",
               (unsigned)RB_DCN_REMAP_COUNT, 29u);
 
-    g_dalfb_real = checkKernelArgument("-rbgpudalfbreal");
+    g_dalfb_real = dal_ok && checkKernelArgument("-rbgpudalfbreal");
     rbgpu_log("2pk: Wrangler promotion %s - it will take IOFramebuffer, let "
               "DAL run with writes dropped, then DECLINE so IONDRVFramebuffer "
               "keeps the panel",

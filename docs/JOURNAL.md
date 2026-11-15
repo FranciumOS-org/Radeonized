@@ -70604,3 +70604,112 @@ arriving, and this is the token whose absence *was* the regression. Two
 break-it checks, both fired (2 and 1 FAILs) — and a third, removing the token
 while leaving the old count, fired nothing, because that restores the asserted
 state rather than breaking a guard. Plugin **C2B6FF33**, not installed.
+
+---
+
+## 3ret-c (2026-11-15) — THE BOOT SENTINEL DID NOT REACH THE OPT-IN EXPERIMENTS, AND THE DOCUMENTED RECOVERY WAS NOT TRUE OF THEM
+
+Found while arming the DAL bring-up for a boot, before spending it. Nothing
+measured it; it is a source reading, and it invalidates a recovery claim this
+card has made since 2xw.
+
+### The claim, and why it was wrong
+
+CLAUDE.md's rescue list ends with: *"The **boot sentinel** needs no command: a
+boot that does not survive 60 s makes the next one stock."* For the DAL
+experiment that was false, in two independent ways.
+
+**First, the arms are read raw.** All four are `checkKernelArgument`:
+
+```
+11075:    g_dal_on     = checkKernelArgument("-rbgpudal");
+11078:    g_dal_pass   = checkKernelArgument("-rbgpudalpass");
+11100:    g_dal_remap  = checkKernelArgument("-rbgpudalremap");
+11115:    g_dalfb_real = checkKernelArgument("-rbgpudalfbreal");
+```
+
+and `rbgpu_stock()` is
+
+```c
+g_rbStock = (checkKernelArgument("-rbgpustock") ||
+             checkKernelArgument("-rbgpuoff")   ||
+             !rbgpu_os_measured()) ? 1 : 0;
+```
+
+— **the latch is not in it.** The sentinel sets `rbgpu-safe` and
+`rbgpu_sentinel_begin()` reads it into `g_rbSafeLatch`, which reaches
+`rbgpu_nvram_armed()`'s `why 6` and therefore the five NVRAM-keyed halves. It
+never reached a boot-arg experiment. So `-rbgpudalfbreal`, the Wrangler
+promotion that **panicked in 2pk and hung in 2pl and 2po**, would have run
+again on every subsequent boot with nothing to stop it. Rule 21 exactly: a
+recovery procedure has to be tested in the situation it exists for, and this
+one had not been.
+
+**Second, Recovery did not cover them either.** `rbgpu_recovery_boot()` is
+called from exactly one place, `RembrandtGPUPeer.cpp:689`, inside the peer's
+`start`. The DAL arms are parsed in `RGPU::init()` — Lilu's plugin init, which
+runs earlier and never consults it. And 3rec-b's Recovery boot (528) was
+measured **without** these tokens, so it says nothing about this
+configuration: rule 39, a reading taken where the thing is not exhibited does
+not locate it. So the second recovery in the list was unestablished rather
+than known-good.
+
+Together: an experiment whose worst case is a hang, with no automatic way back
+and no verified manual one. That is the gap, and it was found by reading the
+code rather than by losing boots to it — which is the only cheap way this one
+could have been found.
+
+### The fix
+
+`rbgpu_safe_latched_ro()` in the peer, declared in `RembrandtGPUPeer.hpp`, and
+the four arms become `dal_ok && checkKernelArgument(...)`.
+
+**It is a separate function and not a second call to
+`rbgpu_sentinel_begin()`, and that is the whole point of it.** That function
+*clears* the latch as a side effect, in the "clear first, then run stock" order
+2dg paid for. A second caller would consume the latch before the peer ever saw
+it, turning the recovery mechanism into a one-shot won by whichever caller ran
+first — the instrument destroying the thing it measures, rule 16 in a new
+place. The read-only look caches separately from `g_rbSafeLatch` so it cannot
+perturb that either.
+
+Codes, published as `dal_latch` (rule 14):
+
+| code | meaning | experiment |
+|---|---|---|
+| 0 | no latch; the previous boot survived | runs |
+| 1 | **latched**; the previous boot did not survive | **declined** |
+| 2 | `-rbgpunosentinel`, so there is no latch to honour | runs |
+| 3 | `/options` unreachable | **declined** |
+
+**3 declines, and the direction is deliberate and opposite to the feature
+gates.** Those fail safe *towards normal*, because a default that cannot read
+its own state should stay on. An experiment is the other way round: one that
+cannot find its own recovery must not run. A default that fails safe stays on;
+an experiment that fails safe stays off.
+
+The decline is also LOUD, and prints the exact `efi.sh bootarg remove` line,
+because the tokens remain in boot-args and will run again as soon as a boot
+survives 60 s — declining is a reprieve, not a disarm, and a reader must not
+mistake the one for the other.
+
+### What is NOT established
+
+Whether `/options` is reachable from `RGPU::init()`. It is created by the
+platform expert well before kext loading, and rule 27's prohibition is on
+*vnode* work rather than the registry, so it should be — but "should" is not a
+measurement, and if it is not, this boot publishes `dal_latch 3` and declines
+the experiment rather than running it. That is readable immediately, which is
+the point of publishing the code, and the fallback is `-rbgpunosentinel`
+(code 2) at the cost of the recovery it buys.
+
+Also new: **`tools/dalread.sh`**, which reads a DAL boot in the order the rules
+require — which boot this is, which artifacts loaded, what the **kernel**
+parsed, then `dal_latch` to establish the experiment ran **at all**, and only
+then its counters. A declined experiment and an experiment that ran and saw
+nothing publish very different things, and the script is ordered so they cannot
+be confused. `dal_untr` is called out by name: non-zero means `writeReg32` does
+not carry dword offsets and 3dcn-b's table is being misapplied.
+
+Plugin **C46965DB**, installed. Latch read `0` going in, so the next boot runs
+the experiment; if it dies, the boot after it declines.
