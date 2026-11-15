@@ -10100,6 +10100,43 @@ static IOReturn hooked_wr_attr_2pl(void *self, uint32_t sel, unsigned long *a,
 __attribute__((noinline))
 void RGPU::processX6000FB(KernelPatcher &patcher, size_t id,
                           mach_vm_address_t address, size_t size) {
+    /* 3ret-d: THE SENTINEL GATE, AT THE POINT OF USE.
+     *
+     * Reached on kext load, so `/options` has long been up and the peer has
+     * already recorded the latch it found. `rbgpu_stock()` is true if the
+     * sentinel latched (the previous boot did not survive 60 s), if
+     * `-rbgpustock` or `-rbgpuoff` is set, or if this OS has no measured
+     * offsets. Any of those means this experiment must not run, and the
+     * declining fact is PUBLISHED so a boot that declined and a boot that ran
+     * and saw nothing do not read the same (rule 14).
+     *
+     * Belt and braces: the peer's personality publish is gated the same way,
+     * and without `LoadDisplayController` Apple's kext does not load at all,
+     * so arriving here on a stock boot would itself be a finding. */
+    const bool dal_stock = rbgpu_stock();
+    rbgpu_diag_set_num("dal_stock", dal_stock ? 1 : 0);
+    /* `dal_latch`: 0 no latch, 1 LATCHED, 2 the peer never looked - which on
+     * this path would mean the kext loaded before the peer started and is
+     * itself worth knowing. Not the raw -1/0/1, because `rbgpu_diag_set_num`
+     * is unsigned and -1 would publish as 4294967295. */
+    const int dal_seen = rbgpu_safe_latch_seen();
+    rbgpu_diag_set_num("dal_latch", dal_seen < 0 ? 2u : (uint32_t)dal_seen);
+    if (dal_stock) {
+        rbgpu_log("3ret-d: AMDRadeonX6000Framebuffer loaded on a STOCK boot "
+                  "(latch seen %d) - NOT routing, and the personality should "
+                  "not have been published either. The DAL tokens are still "
+                  "in boot-args and will run again once a boot survives 60 s; "
+                  "take them out with `sudo tools/efi.sh bootarg remove "
+                  "-rbgpudal -rbgpudalpass rbgpudalenc=dword -rbgpudalremap "
+                  "-rbgpudalfbreal`.",
+                  dal_seen);
+        rbgpu_diag_set_num("dal_on", 0);
+        g_dal_on = false;
+        g_dal_pass = false;
+        g_dal_remap = false;
+        g_dalfb_real = false;
+        return;
+    }
     rbgpu_diag_set_num("dal_on", g_dal_on ? 1 : 0);
     if (!g_dal_on) {
         // Rule 14. Reaching here without the arg would mean the personality
@@ -11072,49 +11109,49 @@ void RGPU::init() {
     // the write hooks, deliberately - the hooks must exist before DAL runs,
     // and an interlock on the controller's start() refuses to run it if they
     // did not land.
-    /* 3ret-c: THE BOOT SENTINEL DID NOT REACH THIS EXPERIMENT, AND NOW IT
-     * DOES.
+    /* 3ret-c/3ret-d: THE BOOT SENTINEL DID NOT REACH THIS EXPERIMENT, AND
+     * THE GATE BELONGS AT THE POINT OF USE, NOT HERE.
      *
-     * Every DAL arm below was read with raw `checkKernelArgument`, and
-     * `rbgpu_stock()` does not include the sentinel latch, so a configuration
-     * that hung repeated on every boot with nothing to stop it:
+     * The defect 3ret-c found is real. Every DAL arm below is read with raw
+     * `checkKernelArgument`, and `rbgpu_stock()` was not consulted, so a
+     * configuration that hung repeated on every boot with nothing to stop it:
      * `-rbgpudalfbreal` is the Wrangler promotion that PANICKED in 2pk and
      * HUNG in 2pl and 2po. The recovery documented for a dead boot - "a boot
      * that does not survive 60 s makes the next one stock" - was simply not
      * true of these four tokens. Rule 21: a recovery procedure has to be
      * tested in the situation it exists for, and this one had not been.
+     * `rbgpu_recovery_boot()` does not cover them either - it is called from
+     * `RembrandtGPUPeer::start` and this is `RGPU::init()`, which runs earlier
+     * and never consults it.
      *
-     * `rbgpu_recovery_boot()` does not cover them either: it is called from
-     * `RembrandtGPUPeer::start`, and this is `RGPU::init()`, which runs
-     * earlier and never consults it. So Recovery was not a guaranteed way
-     * back from these tokens, and 3rec-b's Recovery boot was measured WITHOUT
-     * them - rule 39, a reading from a configuration that does not exhibit
-     * the thing does not locate it.
+     * 3ret-c's FIX was wrong, and the boot it shipped in says so in one line:
+     * latch code 3 with the experiment off, on a healthy accelerated desktop.
+     * It called a new NVRAM reader HERE, and `/options` is not reachable from
+     * `RGPU::init()`, so it declined the experiment every time. The code was
+     * published for exactly that reason (rule 14), which is the only part of
+     * 3ret-c that worked as designed.
      *
-     * So: one read-only look at the latch, declining on 1 (latched) and on 3
-     * (/options unreachable), and the code is PUBLISHED, because a boot that
-     * declined the experiment and a boot that ran it and saw nothing must not
-     * read the same (rule 14). */
-    const uint32_t dal_latch = rbgpu_safe_latched_ro();
-    const bool dal_ok = (dal_latch == 0 || dal_latch == 2);
-    rbgpu_diag_set_num("dal_latch", dal_latch);
-    if (!dal_ok && (checkKernelArgument("-rbgpudal") ||
-                    checkKernelArgument("-rbgpudalfbreal"))) {
-        rbgpu_log("3ret-c: DAL experiment DECLINED, latch code %u (%s). The "
-                  "tokens are still in boot-args and will run again once a "
-                  "boot survives 60 s; take them out with "
-                  "`sudo tools/efi.sh bootarg remove -rbgpudal -rbgpudalpass "
-                  "rbgpudalenc=dword -rbgpudalremap -rbgpudalfbreal`.",
-                  dal_latch,
-                  dal_latch == 1 ? "the previous boot did not survive"
-                                 : "/options unreachable, so no recovery is "
-                                   "readable and an experiment must not run");
-    }
-
-    g_dal_on = dal_ok && checkKernelArgument("-rbgpudal");
+     * 3ret-d moves the gate instead of re-reading the latch. These four lines
+     * are now plain "what did boot-args ask for" and gate nothing; the gate is
+     * `rbgpu_stock()` at the two places that can actually start the
+     * experiment, both of which run on KEXT LOAD, long after plugin init:
+     *
+     *   - `RembrandtGPUPeer::start` publishes `LoadDisplayController` /
+     *     `LoadDisplayWranglerFB`. Without those properties Apple's kext never
+     *     matches, DAL never loads and nothing below is ever called. That is
+     *     the real arm.
+     *   - `RGPU::processX6000FB` installs the routes, and without them
+     *     `rbgpu_dal_allow()` and `rbgpu_dal_rd_off()` never run.
+     *
+     * `rbgpu_stock()` is the right gate because `rbgpu_sentinel_begin()` sets
+     * `g_rbStock = 1` on a latched boot, so one call covers the latch,
+     * `-rbgpustock`, `-rbgpuoff` and an unmeasured OS. See the comment on
+     * `rbgpu_safe_latch_seen()` for why a second NVRAM reader was not just
+     * redundant but unsound. */
+    g_dal_on = checkKernelArgument("-rbgpudal");
     rbgpu_log("2ph: DAL dry run %s (records and DROPS every register write)",
               g_dal_on ? "ARMED by -rbgpudal" : "off (add -rbgpudal)");
-    g_dal_pass = dal_ok && checkKernelArgument("-rbgpudalpass");
+    g_dal_pass = checkKernelArgument("-rbgpudalpass");
     char encbuf[12] = {};
     if (PE_parse_boot_argn("rbgpudalenc", encbuf, sizeof(encbuf)) && encbuf[0]) {
         if (!strncmp(encbuf, "dword", 5)) g_dal_enc = 1;
@@ -11136,7 +11173,7 @@ void RGPU::init() {
 
     // 3dcn-c: the remap depends on the pass-through arm and on the units, so
     // it refuses rather than arming half of itself (rule 34).
-    g_dal_remap = dal_ok && checkKernelArgument("-rbgpudalremap");
+    g_dal_remap = checkKernelArgument("-rbgpudalremap");
     if (g_dal_remap && !(g_dal_pass && g_dal_enc)) {
         rbgpu_log("3dcn-c: -rbgpudalremap REFUSED - it needs -rbgpudalpass "
                   "and rbgpudalenc=, which are not both set. Falling back to "
@@ -11151,7 +11188,7 @@ void RGPU::init() {
                           : "off - 2pm deny-only, which is 2po's configuration",
               (unsigned)RB_DCN_REMAP_COUNT, 29u);
 
-    g_dalfb_real = dal_ok && checkKernelArgument("-rbgpudalfbreal");
+    g_dalfb_real = checkKernelArgument("-rbgpudalfbreal");
     rbgpu_log("2pk: Wrangler promotion %s - it will take IOFramebuffer, let "
               "DAL run with writes dropped, then DECLINE so IONDRVFramebuffer "
               "keeps the panel",

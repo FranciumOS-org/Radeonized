@@ -70829,3 +70829,159 @@ question is answered is a boot spent on an unvalidated premise, which is what
 these two were.
 
 Plugin **18447BB8**, not installed.
+
+---
+
+## 3ret-d — the sentinel gate was in the wrong place, and the fact it read was already in hand
+
+**2026-11-15.** The boot of 02:03:13 (plugin `18447BB8`, framebuffer
+`E0245179`) was an accelerated, healthy desktop — `AMD Radeon 680M`, Metal 3,
+`RembrandtGPUPeer` 1, `RBAMDFramebuffer` 1, the Navi21 accelerator 1, the
+Wrangler 0, `vblret_armed 1 / src 1 / sub 4` with the vblank counter moving —
+and it published **`dal_latch 3`, `dal_on 0`, `dal_pass 0`, `dal_remap 0`**.
+The five DAL tokens were in boot-args, in the safe combination, and the
+experiment did not run. The units question — does `writeReg32`'s register
+argument carry dword offsets, which is what 3dcn-b's whole table assumes — is
+still unanswered after a boot that was arranged to answer it.
+
+That is 3ret-c's own gate declining a healthy boot, and the code that says so
+was published for exactly this reason. 3ret-c's notes named the risk in those
+words: *"Whether `/options` is reachable from `RGPU::init()` ... if it is not,
+this boot publishes `dal_latch 3` and declines the experiment rather than
+running it. That is readable immediately, which is the point of publishing the
+code."* The instrument worked. The gate did not.
+
+### What 3ret-c got right
+
+The defect it found is real and is not withdrawn. Every DAL arm was read with
+raw `checkKernelArgument`, `rbgpu_stock()` was not consulted, and so the boot
+sentinel did not reach the DAL experiment **at all**. `-rbgpudalfbreal` is the
+Wrangler promotion that panicked in 2pk and hung in 2pl and 2po; a
+configuration that killed the boot would repeat on every following boot with
+nothing to stop it. The documented recovery — "a boot that does not survive
+60 s makes the next one stock" — was simply not true of these four tokens.
+`rbgpu_recovery_boot()` does not cover them either: it is called from
+`RembrandtGPUPeer::start`, and the arms are parsed in `RGPU::init()`, which
+runs earlier and never consults it. Rule 21, on a recovery procedure that had
+never been tested in the situation it exists for.
+
+### Why the fix was wrong twice over
+
+**Wrong in placement.** `rbgpu_safe_latched_ro()` was called from
+`RGPU::init()`, which runs at plugin init, before the root filesystem is
+mounted (rule 27's neighbourhood) and before `/options` is reachable in the
+IODT plane. So it took its own code-3 path — "`/options` unreachable, decline,
+because an experiment that cannot find its own recovery must not run" — and
+declined on every boot, healthy or not. The fail-safe direction was right. The
+precondition was never established.
+
+**Wrong in existence, which is the part worth keeping.** The fact was already
+carried, twice, by code the same file already had:
+
+- `g_rbSafeLatch` is assigned the **pre-clear** latch state by
+  `rbgpu_sentinel_begin()` at `RembrandtGPUPeer.cpp:3000`, immediately before
+  that function clears the latch. The state is preserved for the whole boot
+  with no second read.
+- `rbgpu_sentinel_begin()` also sets `g_rbStock = 1` on a latched boot
+  (`:3012`), so **`rbgpu_stock()` is already true for the rest of that boot**.
+
+And a second reader was not merely redundant, it was **unsound**. The peer
+calls `rbgpu_sentinel_begin()` at the top of `start()` (`:705`) and publishes
+the DAL personalities about 140 lines later in the same function body (`:845`,
+confirmed by the absence of any function boundary between them). By the time a
+gate at the publish site could read NVRAM, the latch has **already been
+cleared** — in the "clear first, then run stock" order 2dg paid for — so every
+read returns 0 and the gate is **silently inert**. Had the gate been placed at
+the point of use with the NVRAM reader still in it, it would have compiled,
+run, declined nothing, and looked exactly like a working gate. Rule 43's
+question — who else writes this, and when — asked of our own key, about our own
+reader, inside the same function.
+
+This is the recurring error in its "read the evidence already in hand" form.
+Two existing variables held the answer and a third reader was written anyway.
+
+### The fix
+
+The gate moves to the **point of use** and the fact comes from `rbgpu_stock()`.
+
+`RGPU::init()`'s four lines are now plain "what did boot-args ask for" and gate
+nothing:
+
+```c
+    g_dal_on     = checkKernelArgument("-rbgpudal");
+    g_dal_pass   = checkKernelArgument("-rbgpudalpass");
+    g_dal_remap  = checkKernelArgument("-rbgpudalremap");
+    g_dalfb_real = checkKernelArgument("-rbgpudalfbreal");
+```
+
+Two places can actually start the experiment, and both run on **kext load**,
+long after plugin init, with `/options` long up and the peer's latch reading
+already recorded:
+
+1. **`RembrandtGPUPeer::start`, the real arm.** It publishes
+   `LoadDisplayController` / `LoadDisplayWranglerFB` / `LoadDisplayWrangler`.
+   Without those properties Apple's `AMDRadeonX6000Framebuffer` never matches,
+   DAL never loads, and none of the write hooks are ever installed. One gate on
+   this publish disarms the whole experiment. It publishes `dal_asked` and
+   `dal_declined` on **both** paths, so a boot that declined and a boot where
+   the tokens were simply absent do not read the same (rule 14).
+2. **`RGPU::processX6000FB`, the route installer.** Belt and braces: without
+   the routes, `rbgpu_dal_allow()` and `rbgpu_dal_rd_off()` never run. It
+   publishes `dal_stock` and clears all four globals before returning, so a
+   later consumer cannot act on a flag whose experiment was declined. Arriving
+   here on a stock boot would itself be a finding — the personality should not
+   have been published — and the log line says so.
+
+`rbgpu_stock()` is the right gate because one call covers all four reasons an
+experiment must not run this boot: the sentinel latched, `-rbgpustock`,
+`-rbgpuoff`, and an OS with no measured offsets. `rbgpu_safe_latched_ro()` is
+**deleted**. What remains is `rbgpu_safe_latch_seen()`, which reads no NVRAM,
+clears nothing, and returns `g_rbSafeLatch` (-1 the peer has not looked, 0 no
+latch, 1 latched) purely so a declining boot can publish *which* fact declined
+it. `dal_latch` is published as 0 / 1 / 2 rather than the raw -1, because
+`rbgpu_diag_set_num` is unsigned and -1 would read as 4294967295 — rule 14's
+tool-boundary clause, which has caught a `-1` read as `0xffffffff` before.
+
+**`dal_latch 3` no longer exists.** A reader finding it in a capture is reading
+a 3ret-c boot.
+
+### The instrument was wrong too, and its own control said so
+
+`tools/dalread.sh` asserted **`AppleDisplay >= 1`** as its positive control for
+the class-presence table. `AppleDisplay` attaches only in the
+**unaccelerated** configuration. So on the accelerated boot the script exists
+to read, the control read **0** and the script declared its own search broken,
+while the search was in fact working — the nonsense-class row read 0 and
+`RembrandtGPUPeer` read 1 in the same table. Rule 39 applied to an instrument:
+a control has to hold in the configuration being measured. Replaced with
+`IOResources`, which is present in every boot that reaches userspace at all —
+a precondition of running the script — and verified on the live boot: nonsense
+class 0, `IOResources` 1.
+
+The table also lacked the row that answers the question. The DAL controller
+Apple starts under this experiment is
+**`AMDRadeonX6000_AmdRadeonControllerNavi25`** — the class
+`processX6000FB` routes `start` on — and the script listed Navi21 and Navi23.
+Added; it reads 0 on the live boot, agreeing with `dal_on 0`. The rescue tokens
+already print first, from the last entry, after `-rbgpuoff` was present as a
+whole token in `kern.bootargs` and this script never tested for it.
+
+### Not established
+
+- **Whether `rbgpu_stock()` is true at the publish site on a latched boot** has
+  been established *from source* — `g_rbStock = 1` is a direct assignment at
+  `:3012`, so a lazy `rbgpu_stock()` call that cached 0 earlier is overwritten,
+  and `:705` precedes `:845` in one function body — but it has **not been
+  measured on hardware**. Measuring it means deliberately latching the
+  sentinel, which means a boot that dies inside 60 s. No boot is being spent on
+  that; the claim is a source claim and is labelled one.
+- **The units question is still open.** `dal_untr` must read 0, or
+  `writeReg32`'s argument does not carry dword offsets and 3dcn-b's table is
+  misapplied. No boot has produced a reading.
+- **The crawl of 3dcn-d's two boots has one candidate fixed and one live.**
+  The linear scan on the DAL read path was mine and is fixed. Apple's DAL
+  genuinely reaching DCN 3.1.2 registers and spinning in `REG_WAIT` timeouts
+  is **not** eliminated. Two mechanisms existed; one being found does not make
+  it the cause (rule 17).
+
+Plugin **89685357**, not installed. Hosttest: 0 FAIL, 0 `error:`.

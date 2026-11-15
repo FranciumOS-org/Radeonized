@@ -40,10 +40,17 @@ for t in -rbgpuretirevbl -rbgpudal -rbgpudalpass rbgpudalenc=dword \
 done
 
 echo
-echo "== did the experiment run? dal_latch 0 or 2 = ran, 1 or 3 = DECLINED =="
+# 3ret-d: the gate moved to the point of use, so the keys changed.
+#   dal_stock    1 = this boot is stock, so the experiment was DECLINED
+#   dal_declined 1 = the tokens were in boot-args AND the boot was stock
+#   dal_asked    1 = the tokens were in boot-args at all
+#   dal_latch    0 no latch, 1 LATCHED, 2 the peer never looked
+# dal_latch 3 does not exist any more: it was 3ret-c reading /options from
+# RGPU::init(), where it is not reachable, and declining every healthy boot.
+echo "== did the experiment run? dal_stock 1 = DECLINED, dal_on 1 = routed =="
 ioreg -rl -c RembrandtGPUPeer 2>/dev/null \
   | tr ',' '\n' \
-  | grep -oE '"(dal_latch|dal_on|dal_pass|dal_remap|dal_remap_refused|dal_pass_refused)"=[0-9]+' \
+  | grep -oE '"(dal_latch|dal_stock|dal_asked|dal_declined|dal_on|dal_pass|dal_remap|dal_remap_refused|dal_pass_refused)"=[0-9]+' \
   | sort -u | sed 's/^/  /'
 
 echo
@@ -74,11 +81,20 @@ echo "== who owns the panel, and which classes actually STARTED =="
 # nonsense class as the control so a row of zeroes can be told from a broken
 # search.
 _tree=$(ioreg -l 2>/dev/null)
-for c in ThisClassDoesNotExistXYZ RembrandtGPUPeer RBAMDFramebuffer \
+# 3ret-d: THE POSITIVE CONTROL WAS WRONG. It asserted AppleDisplay >= 1, and
+# AppleDisplay only attaches in the UNACCELERATED configuration - so on the
+# accelerated boot this script exists to read, the control read 0 and declared
+# its own search broken. Rule 39 applied to an instrument: a control has to
+# hold in the configuration being measured. IOResources is in every boot that
+# reaches userspace at all, which is a precondition of running this script.
+for c in ThisClassDoesNotExistXYZ IOResources RembrandtGPUPeer \
+         RBAMDFramebuffer \
          AMDRadeonX6000_AMDNavi21GraphicsAccelerator \
          AMDRadeonX6000_AmdGpuWrangler \
-         AMDRadeonX6000_AmdRadeonControllerNavi21 AppleDisplay; do
+         AMDRadeonX6000_AmdRadeonControllerNavi21 \
+         AMDRadeonX6000_AmdRadeonControllerNavi25 AppleDisplay; do
     printf '  %-46s %s\n' "$c" "$(printf '%s' "$_tree" | grep -c "+-o $c")"
 done
-echo "  (the first row MUST be 0 and AppleDisplay MUST be >=1, or this"
-echo "   search is broken and the rows above say nothing)"
+echo "  (ThisClassDoesNotExistXYZ MUST be 0 and IOResources MUST be >=1, or"
+echo "   this search is broken and the rows above say nothing. AppleDisplay is"
+echo "   NOT a control: it attaches only when the panel is UNaccelerated.)"

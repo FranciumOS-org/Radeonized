@@ -842,7 +842,39 @@ bool RembrandtGPUPeer::start(IOService *provider) {
     // 2ph: the DAL dry run's personality is gated on this property, which is
     // published only with -rbgpudal. Without it Apple's framebuffer kext is
     // never even loaded, so the boot is identical to one without this code.
-    if (checkKernelArgument("-rbgpudal")) {
+    /* 3ret-d: THE SENTINEL REACHES THE DAL EXPERIMENT HERE.
+     *
+     * This is the real arm. Without `LoadDisplayController` /
+     * `LoadDisplayWranglerFB` Apple's AMDRadeonX6000Framebuffer never matches,
+     * DAL never loads, and none of `RGPU::processX6000FB`'s hooks are ever
+     * installed - so one gate on this publish disarms the whole experiment.
+     *
+     * `rbgpu_stock()` is the gate rather than a fresh NVRAM read because
+     * `rbgpu_sentinel_begin()`, called at the top of this same function, has
+     * already set `g_rbStock = 1` if the latch was set AND cleared the latch
+     * itself. A read here would see a cleared latch and be silently inert;
+     * `rbgpu_stock()` sees the fact. It also covers `-rbgpustock`,
+     * `-rbgpuoff` and an OS with no measured offsets, which are the other
+     * three reasons an experiment must not run this boot.
+     *
+     * Published on BOTH paths (rule 14): a boot that declined and a boot
+     * where the tokens were simply absent must not read the same. */
+    const bool dalStock = rbgpu_stock();
+    const bool dalAsked = (checkKernelArgument("-rbgpudal") ||
+                           checkKernelArgument("-rbgpudalfb") ||
+                           checkKernelArgument("-rbgpudalfbreal"));
+    rbgpu_diag_set_num("dal_asked", dalAsked ? 1 : 0);
+    rbgpu_diag_set_num("dal_declined", (dalAsked && dalStock) ? 1 : 0);
+    if (dalAsked && dalStock) {
+        rbgpu_log("3ret-d: the DAL tokens are in boot-args but this boot is "
+                  "STOCK (latch seen %d), so NO personality is published and "
+                  "Apple's DAL will not load. They will run again once a boot "
+                  "survives 60 s; take them out with `sudo tools/efi.sh "
+                  "bootarg remove -rbgpudal -rbgpudalpass rbgpudalenc=dword "
+                  "-rbgpudalremap -rbgpudalfbreal`.",
+                  rbgpu_safe_latch_seen());
+    }
+    if (!dalStock && checkKernelArgument("-rbgpudal")) {
         pciDevice->setProperty("LoadDisplayController", kOSBooleanTrue);
         rbgpu_log("2ph: published LoadDisplayController - Apple's DAL will be "
                   "loaded, with every register write recorded and dropped");
@@ -857,13 +889,13 @@ bool RembrandtGPUPeer::start(IOService *provider) {
     // 2pk: the PROMOTED Wrangler, which takes IOFramebuffer for real. Its
     // start() hook declines after letting DAL run, so IONDRVFramebuffer keeps
     // the panel - see the comment on hooked_wr_start_2pk.
-    if (checkKernelArgument("-rbgpudalfbreal")) {
+    if (!dalStock && checkKernelArgument("-rbgpudalfbreal")) {
         pciDevice->setProperty("LoadDisplayWranglerFB", kOSBooleanTrue);
         rbgpu_log("2pk: published LoadDisplayWranglerFB - Apple's framebuffer "
                   "will contest IOFramebuffer, run DAL with every write "
                   "dropped, then decline so the panel stays on IONDRV");
     }
-    if (checkKernelArgument("-rbgpudalfb")) {
+    if (!dalStock && checkKernelArgument("-rbgpudalfb")) {
         pciDevice->setProperty("LoadDisplayWrangler", kOSBooleanTrue);
         rbgpu_log("2pi: published LoadDisplayWrangler - Apple's framebuffer "
                   "will start in a PRIVATE match category, so IONDRVFramebuffer "
@@ -2899,67 +2931,44 @@ static void rbgpu_sentinel_clear_now(const char *why, uint32_t by) {
                    "the read-back FAILED, so the next boot may come up stock");
 }
 
-/* 3ret-c: A READ-ONLY LOOK AT THE SENTINEL LATCH, for gates that run before
- * the peer starts.
+/* 3ret-d: THE LATCH AS THE PEER FOUND IT, read-only, no NVRAM access.
  *
- * WHY THIS EXISTS RATHER THAN A SECOND CALL TO `rbgpu_sentinel_begin()`: that
- * function CLEARS the latch as a side effect, in the "clear first, then run
- * stock" order 2dg paid for. A second caller would consume the latch before
- * the peer ever saw it, which would turn the recovery mechanism into a
- * one-shot that the earliest caller wins. This one only reads, and it caches
- * separately from `g_rbSafeLatch` so it cannot perturb that either.
+ * 3ret-c wrote a second NVRAM reader for this and it was wrong twice over.
  *
- * WHAT IT IS FOR: the opt-in experiments armed in `RGPU::init()` are read with
- * raw `checkKernelArgument`, and `rbgpu_stock()` does not include the latch,
- * so the boot sentinel did not reach them at all - a hanging experiment in
- * boot-args repeated on every boot with nothing to stop it. `RGPU::init()`
- * also runs before the peer, so the latch has not been read yet when the DAL
- * arms are parsed, which is why this does its own read.
+ * It was wrong in PLACEMENT: it was called from `RGPU::init()`, where
+ * `/options` is not reachable, so it returned code 3 and DECLINED the
+ * experiment on a healthy boot. That is readable in the boot it shipped in -
+ * `dal_latch 3`, `dal_on 0` - which is what publishing the code was for.
  *
- * Codes, on every path (rule 14):
- *   0  no latch - the previous boot survived, so an experiment may run
- *   1  LATCHED - the previous boot did not survive; decline
- *   2  `-rbgpunosentinel` - there is no latch to honour, so do not invent one
- *   3  /options unreachable - DECLINE, because an experiment that cannot find
- *      its own recovery must not run. This fails towards not running, which is
- *      the opposite direction from the feature gates, and deliberately so: a
- *      default that fails safe stays on, an EXPERIMENT that fails safe stays
- *      off.
+ * It was wrong in EXISTENCE, which is the part worth keeping. The fact was
+ * already carried, twice:
+ *
+ *   - `g_rbSafeLatch` is assigned the PRE-CLEAR latch state by
+ *     `rbgpu_sentinel_begin()`, immediately before that function clears it.
+ *     So the state is preserved for the whole boot without a second read.
+ *   - `rbgpu_sentinel_begin()` also sets `g_rbStock = 1` on a latched boot,
+ *     so `rbgpu_stock()` is already true for the rest of that boot.
+ *
+ * And a second reader was not merely redundant, it was UNSOUND: the peer
+ * calls `rbgpu_sentinel_begin()` at the top of `start()` and publishes the
+ * DAL personalities ~140 lines later in the same function, so by the time a
+ * gate there could read NVRAM the latch has ALREADY been cleared and every
+ * read returns 0. The gate would have been silently inert. Rule 43's
+ * question - who else writes this, and when - asked of our own key.
+ *
+ * So the gate every opt-in experiment now uses is `rbgpu_stock()`, at its
+ * POINT OF USE rather than where the boot-arg is parsed. One call covers all
+ * four reasons an experiment must not run this boot: the sentinel latched,
+ * `-rbgpustock`, `-rbgpuoff`, and an OS with no measured offsets.
+ *
+ * This accessor remains only so a declining boot can publish WHICH fact
+ * declined it (rule 14 - a refusal is a code, not a bool):
+ *   -1  the peer has not looked yet, so the caller ran too early to gate
+ *    0  no latch - the previous boot survived
+ *    1  LATCHED - the previous boot did not survive its first 60 s
  */
-uint32_t rbgpu_safe_latched_ro(void) {
-    static int cached = -1;
-    if (cached >= 0) { return (uint32_t)cached; }
-
-    if (checkKernelArgument("-rbgpunosentinel")) {
-        cached = 2;
-        return 2;
-    }
-    IORegistryEntry *options = g_rbgpuOptions;
-    if (!options) {
-        options = IORegistryEntry::fromPath("/options", gIODTPlane);
-        if (!options) {
-            cached = 3;
-            return 3;
-        }
-        g_rbgpuOptions = options;
-    }
-
-    bool latched = false;
-    if (OSObject *val = options->getProperty("rbgpu-safe")) {
-        latched = true;
-        if (auto data = OSDynamicCast(OSData, val)) {
-            if (data->getLength() >= 1 &&
-                *static_cast<const char *>(data->getBytesNoCopy()) == '0') {
-                latched = false;
-            }
-        } else if (auto str = OSDynamicCast(OSString, val)) {
-            if (str->isEqualTo("0")) {
-                latched = false;
-            }
-        }
-    }
-    cached = latched ? 1 : 0;
-    return (uint32_t)cached;
+int rbgpu_safe_latch_seen(void) {
+    return g_rbSafeLatch;
 }
 
 // Returns true if this boot is a recovery boot (the latch was set).
