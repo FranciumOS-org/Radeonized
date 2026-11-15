@@ -50,12 +50,20 @@ echo
 echo "== did the experiment run? dal_stock 1 = DECLINED, dal_on 1 = routed =="
 ioreg -rl -c RembrandtGPUPeer 2>/dev/null \
   | tr ',' '\n' \
-  | grep -oE '"(dal_latch|dal_stock|dal_asked|dal_declined|dal_on|dal_pass|dal_remap|dal_remap_refused|dal_pass_refused)"=[0-9]+' \
+  | grep -oE '"(dal_latch|dal_stock|dal_asked|dal_declined|dal_on|dal_pass|dal_remap|dal_remap_refused|dal_pass_refused|dal_wroutes|dal_srouted|dal_start|dal_start_ret|dalfb_srouted|dalfb_grouted|dalfb_start|dalfb_start_ret)"=[0-9]+' \
   | sort -u | sed 's/^/  /'
 
 echo
-echo "== the units question: dal_untr MUST be 0, or the table is misapplied =="
-echo "== and the three-outcome counters =="
+echo "== the units question =="
+echo "  dal_untr 0 means the table was applied cleanly - BUT ONLY IF"
+echo "  dal_writes > 0. With dal_writes 0 nothing was ever classified and the"
+echo "  0 carries NO INFORMATION (rule 48: a conjunction can be correct while"
+echo "  one term says nothing). Boot 581 read exactly that: untr 0, writes 0."
+echo "  The controller's start() is construction only and makes no register"
+echo "  writes (boot 140, reproduced in 581), so the only configuration that"
+echo "  offers writes to classify is the Wrangler promotion -rbgpudalfbreal,"
+echo "  which PANICKED in 2pk and HUNG in 2pl and 2po."
+echo "== the three-outcome counters =="
 ioreg -rl -c RembrandtGPUPeer 2>/dev/null \
   | tr ',' '\n' \
   | grep -oE '"(dal_untr|dal_wrr|dal_rdr|dal_blk|dal_passed|dal_denied|dal_writes|dal_r_hw|dal_r_atom|dal_r_bios)"=[0-9]+' \
@@ -92,9 +100,19 @@ for c in ThisClassDoesNotExistXYZ IOResources RembrandtGPUPeer \
          AMDRadeonX6000_AMDNavi21GraphicsAccelerator \
          AMDRadeonX6000_AmdGpuWrangler \
          AMDRadeonX6000_AmdRadeonControllerNavi21 \
-         AMDRadeonX6000_AmdRadeonControllerNavi25 AppleDisplay; do
+         AMDRadeonX6000_AmdRadeonControllerNavi2 AppleDisplay; do
     printf '  %-46s %s\n' "$c" "$(printf '%s' "$_tree" | grep -c "+-o $c")"
 done
 echo "  (ThisClassDoesNotExistXYZ MUST be 0 and IOResources MUST be >=1, or"
 echo "   this search is broken and the rows above say nothing. AppleDisplay is"
 echo "   NOT a control: it attaches only when the panel is UNaccelerated.)"
+echo
+echo "  3ret-d: there is NO class called AmdRadeonControllerNavi25. The symbol"
+echo "  __ZN39...AmdRadeonControllerNavi25startEP9IOService demangles to"
+echo "  AmdRadeonControllerNavi2::start - 39 is the length of ...Navi2 and the"
+echo "  5 belongs to \"start\". An earlier version of this script listed Navi25"
+echo "  as a class, so it could only ever print 0, and that 0 was reported as"
+echo "  \"the controller never started\". It is a FABRICATED CONTROL. Navi21 is"
+echo "  the instance on this chip and it has no own start, so it inherits"
+echo "  Navi2::start - which is what we route. The authoritative witness that"
+echo "  the controller ran is dal_start / dal_start_ret, NOT a class row."

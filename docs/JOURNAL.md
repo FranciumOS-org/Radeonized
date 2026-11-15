@@ -70985,3 +70985,118 @@ whole token in `kern.bootargs` and this script never tested for it.
   it the cause (rule 17).
 
 Plugin **89685357**, not installed. Hosttest: 0 FAIL, 0 `error:`.
+
+---
+
+## 3ret-d, boot 581 — the gate works, the units answer is VACUOUS, and "Navi25" is not a class
+
+**2026-11-15 02:21:33, boot 581.** Plugin **89685357**, framebuffer
+`E0245179`, Lilu 1.7.3, macOS 26.7.3 (25G342). Boot-args:
+`-rbgpuretirevbl -rbgpudal -rbgpudalpass rbgpudalenc=dword -rbgpudalremap`,
+with `-rbgpudalfbreal`, `-rbgpuoff`, `-rbgpustock` and `-rbgpunosentinel` all
+absent as whole tokens, read from `kern.bootargs` rather than NVRAM (rule 43).
+
+### The gate is fixed, measured
+
+```
+dal_stock 0   dal_latch 0   dal_asked 1   dal_declined 0
+dal_on 1      dal_pass 1    dal_remap 1
+dal_wroutes 1 dal_srouted 1 dalfb_srouted 1 dalfb_grouted 1
+```
+
+`LoadDisplayController = Yes` on the PCI device, `AMDRadeonX6000Framebuffer
+(7.0.1) F527F501` loaded, every route installed. 3ret-c's `dal_latch 3` is
+gone and the experiment ran. The frame-delivery default is unaffected:
+`vblret_armed 1 / src 1 / sub 4`, `vbl` 20973 moving, `vbl_mhz 143833`, the
+desktop accelerated — `AMD Radeon 680M`, Metal 3, `RBAMDFramebuffer` owning
+the panel, the Navi21 accelerator up, the Wrangler 0.
+
+### The units question is NOT answered, and the 0 is the reason
+
+```
+dal_untr 0   dal_writes 0   dal_wrr 0   dal_blk 0
+dal_r_hw 4   dal_rdr 0      dal_r_atom 0  dal_r_bios 0   dal_reads 0
+```
+
+`dal_untr 0` is what this boot was arranged to produce, and it means nothing,
+because `dal_writes 0` sits beside it. **Not one write was ever offered to the
+policy, so nothing was ever classified.** A counter that cannot have been
+incremented reading 0 is not evidence the units are right — rule 48's clause
+that a conjunction can be correct while one term carries no information, and
+rule 14's that absence is not a result. Writing it down as "dal_untr 0, the
+table is applied correctly" would have been the error this file keeps
+recording.
+
+What *is* a real, if small, agreement: `dal_r_hw 4` with `dal_rdr 0`. Four
+reads went through `hwReadReg32` and **none of them redirected**, which is
+what `dcn_addr_test.c`'s hardware anchor asserts — 2pn's four observed offsets
+(`0xd31`, `0xde3`, `0xde7`, `0xde8`) all PASS unchanged. The table agreed with
+the hardware on the only four addresses the hardware offered it. Four
+addresses is not the table.
+
+### Why there were no writes: boot 140, reproduced
+
+`dal_start 1` and `dal_start_ret 1` — the routed controller `start()` ran and
+returned true, with `dal_writes 0`. That is boot 140's finding exactly: the
+controller attaches and starts clean on this chip with **zero** register
+writes, so `start()` is construction only and something else has to ask DAL to
+touch hardware. 2po's 46 blocked DCHUBBUB writes were measured with the
+**Wrangler promoted**. So the only configuration that offers writes to classify
+is `-rbgpudalfbreal`, which panicked in 2pk and hung in 2pl and 2po — and
+which 3ret-c/3ret-d exist to make survivable. The gate is now the precondition
+for asking the question at all, which is the right order, but the question
+needs a boot in the configuration that has the symptom (rule 39).
+
+### THE FABRICATED CONTROL: there is no AmdRadeonControllerNavi25
+
+`tools/dalread.sh` listed `AMDRadeonX6000_AmdRadeonControllerNavi25` in its
+class-presence table, it read **0**, and I reported that to the user as "the
+DAL controller never started". It is not a class. From the live kext's own
+symbol table, demangled:
+
+```
+__ZN34AMDRadeonX6000_AmdRadeonController5startEP9IOService
+    -> AMDRadeonX6000_AmdRadeonController::start(IOService*)
+__ZN38AMDRadeonX6000_AmdRadeonControllerNavi5startEP9IOService
+    -> AMDRadeonX6000_AmdRadeonControllerNavi::start(IOService*)
+__ZN39AMDRadeonX6000_AmdRadeonControllerNavi25startEP9IOService
+    -> AMDRadeonX6000_AmdRadeonControllerNavi2::start(IOService*)
+```
+
+`len("AMDRadeonX6000_AmdRadeonControllerNavi2") == 39`. The `25` is `Navi2`
+followed by the `5` of `5start`. The class is
+**`AmdRadeonControllerNavi2`**, the Navi2x family base; `Navi21` is the
+instance on this chip and has **no own `start` symbol**, so it inherits
+`Navi2::start`, which is what we route. The route string in
+`kern_start.cpp:10207` is correct and always was.
+
+So the class row could only ever print 0, for any machine, in any
+configuration. It is rule 5's trap one level up: the length prefix was
+cross-checked against `nm` when the route was written, and then *re-read* years
+later as if `Navi25` were a name. And it is rule 26 again — a search that
+cannot match is an instrument that reports a finding. Two fabricated controls
+in two consecutive entries of the same script: `AppleDisplay >= 1`, which only
+holds in the configuration the script is not for, and now a class that does not
+exist. A nonsense-class control catches a broken *search*; it does not catch a
+well-formed query for the wrong name.
+
+The authoritative witness that the controller ran is `dal_start` /
+`dal_start_ret`, which are published and were in the table all along, unread.
+The script now prints them in the "did the experiment run" section, prints the
+vacuity condition on `dal_untr` in full, and carries the demangling above as a
+comment so the next reader cannot repeat it.
+
+### Not established
+
+- Whether `LoadDisplayController` changed anything this boot.
+  `AmdRadeonControllerNavi21` was in ioreg in the 02:03 boot too, with
+  `dal_on 0` and no routes installed, so its presence is not attributable to
+  `-rbgpudal`. Whether that earlier node was the same instance, and what the
+  property added, are both open. Rule 17: two readings are not a mechanism.
+- Where the four reads came from. The route is on the base class, so any caller
+  in that image counts; the controller is a candidate, not an identification.
+- The crawl of 3dcn-d's two boots still has one live candidate — Apple's DAL
+  reaching DCN 3.1.2 registers and spinning in `REG_WAIT`. This boot cannot
+  speak to it: with zero writes, nothing was there to spin on.
+
+Plugin **89685357**, loaded. Hosttest: 0 FAIL, 0 `error:`.
