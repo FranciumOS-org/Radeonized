@@ -12,6 +12,7 @@
 
 /* 2B3: needed on BOTH sides of the guard - the hosttest compiles this file
  * too, which is the 2B1 lesson about the shim. */
+#include "rb_hidpi.h"   /* #9: needed on BOTH sides - the 2B1 lesson */
 #include "rb_hpd.h"
 #include "rb_aux.h"
 #include "rb_dpalt.h"
@@ -150,6 +151,15 @@ void RBAMDFramebuffer::publishVBLState(void)
     setProperty("RBFBPubSetsOther", pubSetsOther, 64);
     setProperty("RBFBPubMsLast", (uint64_t)(int64_t)pubMsLast, 64);
     setProperty("RBFBPollArmed", pollArmed);
+    /* #9: published unconditionally, so a boot says whether the HiRes bit was
+     * on this build's offer whatever the boot-args were, and says it even if
+     * no mode query ever arrived (rule 15). RBFBHiDpiLogicalW/H is what
+     * CoreDisplay derives from the nominal size, not a mode we publish. */
+    setProperty("RBFBHiDpiArmed", hidpiArmed);
+    setProperty("RBFBHiDpiAsks", hidpiModeAsks, 64);
+    setProperty("RBFBHiDpiGiven", hidpiFlagsGiven, 64);
+    setProperty("RBFBHiDpiLogicalW", (uint64_t)rb_hidpi_logical(geoW), 32);
+    setProperty("RBFBHiDpiLogicalH", (uint64_t)rb_hidpi_logical(geoH), 32);
     setProperty("RBFBPollReads", pollReads, 64);
     setProperty("RBFBPollChanges", pollChanges, 64);
     setProperty("RBFBPollFirstSeen", pollFirstSeen, 64);

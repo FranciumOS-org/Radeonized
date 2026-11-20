@@ -1014,7 +1014,18 @@ boot stock to be a rescue (rule 21).
 **Opt-in, each for a named reason** (details in the journal under the tag):
 `-rbgpuosforce` (arms the default table on an unmeasured OS),
 `-rbgpufbmodes` (a second display mode; mutually exclusive with
-`-rbgpufbdrr`), `-rbgpufbdpalt` (the RDPCSTX PHY read — read-only, but Linux
+`-rbgpufbdrr`),
+**`-rbgpufbhidpi`** (the HiRes mode flag, #9 / 3iss — one SDK bit,
+`kDisplayModeValidForHiResFlag`, ORed into `getInformationForDisplayMode`'s
+flags. CoreDisplay then derives a HiDPI mode **reusing the same
+`ioDisplayModeID`** with the nominal size halved and the raster unchanged, so
+there is no scaling stage. Opt-in because the derived tier is always half the
+nominal size: 1280x720 on #9's 1440p panel, **960x540 on this board**, which
+is why it is not a default. Read `src/common/rb_hidpi.h`, which also records
+why intermediate "looks like" tiers are NOT available — `IOFBScalerInfo` is a
+fixed 0x30-byte blob and `_IOFBInstallScaledResolution` reads three dwords out
+of it with no count, so it gates WHETHER scaled modes are offered and cannot
+list them. Published unconditionally as `RBFBHiDpiArmed` / `Asks` / `Given`), `-rbgpufbdpalt` (the RDPCSTX PHY read — read-only, but Linux
 marks the path "avoid if possible", hang conditioned on DMCUB not running,
 which is measured false; **2FC's `DIO_LINK*_CNTL` read shares this arm, and
 `-rbgpufbdig` / `-rbgpufbfe`, with no new token**), `-rbgpufbdmubbl` / `-rbgpufbdmubdom` /

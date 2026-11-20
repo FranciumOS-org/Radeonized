@@ -4,6 +4,7 @@
 #include "rb_backlight.h"
 #include "rb_hubp.h"
 #include "rb_defaults.h"
+#include "rb_hidpi.h"   /* #9: the HiRes-flag policy */
 #include "rb_osver.h"
 #include <libkern/version.h>
 
@@ -461,6 +462,19 @@ bool RBAMDFramebuffer::start(IOService *provider)
     pollFirstSeen = 0;
     {
         pollArmed = argOn("-rbgpufbpoll");
+    }
+
+    /* #9: HiDPI. Rule 30 - the whole token list was extracted from the tree
+     * and scanned: -rbgpufbhidpi neither prefixes nor is prefixed by any
+     * existing token (the closest, -rbgpufbhubp, differs at the fifth
+     * character). The control for that scan is that the same method does find
+     * the real pairs already in the tree, -rbgpuagdc/-rbgpuagdccaps and
+     * -rbgpudalfb/-rbgpudalfbreal, so a null here is a reading (rule 26). */
+    hidpiArmed = false;
+    hidpiModeAsks = 0;
+    hidpiFlagsGiven = 0;
+    {
+        hidpiArmed = argOn("-rbgpufbhidpi");
     }
     hubpMax = 0;
     hubpRejectAddr = 0;
@@ -1383,6 +1397,20 @@ IOReturn RBAMDFramebuffer::getInformationForDisplayMode(IODisplayModeID displayM
     info->refreshRate   = modeRate1616(displayMode);
     info->maxDepthIndex = 0;
     info->flags         = kDisplayModeValidFlag | kDisplayModeSafeFlag;
+    /* #9: with -rbgpufbhidpi, offer the mode for HiDPI derivation. The bit
+     * adds no mode and no id - CoreDisplay reuses THIS displayMode and halves
+     * the nominal size, so the backing store it then asks for is the raster
+     * the display engine is already scanning and no scaling stage exists.
+     * rb_hidpi.h holds the reasoning and why this is not the default. The
+     * counters are two, not one: asks says the method ran at all, given says
+     * the bit went out, and a boot where they differ is a boot where the arm
+     * was read inconsistently (rule 14). */
+    hidpiModeAsks++;
+    info->flags = rb_hidpi_mode_flags(info->flags, hidpiArmed ? 1 : 0,
+                                      kDisplayModeValidForHiResFlag);
+    if (hidpiArmed) {
+        hidpiFlagsGiven++;
+    }
     /* 143.83 Hz stays the default and the safe mode. 60 Hz is offered, never
      * imposed: it is ours, it is three milestones younger, and a boot that
      * comes up in it would be a boot where nothing has been measured. */

@@ -72815,3 +72815,196 @@ Prediction, recorded before the boot: `clk_routed 1`, `clk_calls 1`,
 V_NO_CONNECTOR`, with `clk_conncount 0` agreeing. A `V_CONTAMINATED` or a
 non-zero `clk_conncount` would be the more interesting outcome and is why the
 second getter is in there.
+
+## 3iss — the open GitHub issues: the revision gate (#7, #8) and HiDPI (#9)
+
+2026-11-19. Five issues were open. Two were code defects on OTHER people's
+machines, both fixable here with no boot; one is a support question; one is
+about a GUI installer that is not in this repository; and one asks something
+this machine cannot answer. This entry records all five, because a triage that
+only lists the ones that got fixed is not a triage.
+
+### #7 and #8: the PCI revision equality refused every board but this one
+
+**The defect.** `rbgpu_agdc_sample_otg()` opened with a three-way identity
+test — vendor `0x1002`, device `0x1681`, **revision `0x0a`** — and set
+`otg_err 6` on any mismatch. Two reporters hit the third term: both are
+`1002:1681` Rembrandt parts, neither is rev `0x0a`, and both therefore got a
+refusal from a sampler whose job is to read OTG timing. Nothing about that
+reading depends on the stepping.
+
+**Why the equality was there, and why it is not needed.** It was the cheapest
+available statement of "this is the chip the offsets were measured on". But the
+sampler already makes that statement STRUCTURALLY, and more strongly: it
+refuses with `otg_err 3` unless `OTG_MASTER_EN` is set on OTG0 **and** OTG1-3
+each read exactly `RB_OTG_OFF_VALUE` 0x300. A part whose DCN did not lay out
+these registers this way cannot produce that pattern, so the revision test was
+a weaker duplicate of a check that runs two lines later. The internal control
+is `RembrandtProbe`, which has read this silicon since the beginning and has
+**never** gated on revision.
+
+**The fix, and the shape deliberately NOT chosen.** An allowlist of known-good
+steppings was the obvious alternative and is wrong: it would refuse the next
+board for the same reason, and this project has exactly one stepping to measure,
+so every entry past `0x0a` would be a guess written as a fact (rule 17).
+`rb_otg_dev_supported(vendor, device)` tests the two fields that identify the
+silicon and the structural check remains the real gate. The revision is now
+**published** as `otg_rev` rather than tested, so every boot records what it
+was and a future stepping-specific defect has a reading to point at (rule 14).
+
+`RB_OTG_MASTER_EN` and `RB_OTG_OFF_VALUE` had been defined twice, in
+`rbgpu_agdc_otg.cpp` and `RBAMDFramebufferHUBP.cpp`; they moved into
+`rb_otg.h`, which is where the offsets they go with already live.
+
+**The hosttest had encoded the defect as expected behaviour.** `make hosttest`
+failed after the fix, at `otg_kernel_test.cpp:79`, asserting that a refusal
+happens on `pci.revision = 0xff`. That assertion was the bug, written down. The
+refusal loop is now three cases (vendor, device, command) and a new positive
+loop sweeps revisions `{0x0a, 0x0b, 0x02, 0x00, 0xff}`, asserting for each that
+the sample SUCCEEDS, that `otg_err` is 0, that `otg_rev` carries the value
+through, that the refresh lands in the panel's band and that the mapping is
+released. `otg_test.c` gained five predicate cases including `0x10de` — the
+dGPU vendor that both reporters have in their machines in hybrid mode — and
+pins both constants.
+
+**Break-it sweep, four breaks.** One fired only as a BUILD ERROR: breaking the
+predicate to ignore its `vendor` parameter left the parameter unused, and
+`-Werror` killed the build instead of a test failing. That is the trap this
+card names five times and it was not coverage of the assertion I had written.
+Redone as `vendor != 0xffffu && device == 0x1681u`, which keeps both parameters
+live and fired as a genuine failure through the `0x10de` case. The other three
+fired normally.
+
+**What #8 also reports, and cannot be fixed from here.** #8's machine shows
+garbled scanout, which is a separate defect on a panel this project does not
+have, and no amount of reasoning here will locate it. It asks four answerable
+questions, which are answerable from the record rather than from a boot, and
+they are answered in the reply drafted for it.
+
+### #9: one SDK bit was the whole of HiDPI
+
+**The report.** On a 2560x1440 165 Hz eDP panel (NE156QHM-NY4, Ryzen 7735H),
+`CGDisplayCopyAllDisplayModes()` returned the eight native rates and nothing
+else, the Displays pane offered no "looks like" option, and all UI drew at 1x.
+The reporter traced it to `getInformationForDisplayMode` never setting
+`kDisplayModeValidForHiResFlag`, and verified the fix by reading the kernel's
+own table back: `IOFBConfig -> IOFBModes[].DM` with `flags = 0x00800003`,
+i.e. VALID | SAFE | VALID_FOR_HI_RES.
+
+**Why one bit is enough, and why it is not a scaler.** With the flag set,
+CoreDisplay derives a HiDPI mode that **reuses the existing
+`ioDisplayModeID`**: width/height become the nominal size halved while
+pixelWidth/pixelHeight stay the real raster. No new mode, no new id, and — the
+part that matters for a framebuffer with no scaling hardware wired up — no
+scaling stage, because the backing store CoreGraphics then asks for is exactly
+the raster the display engine is already scanning. That is why it renders
+crisp rather than corrupted, and it is a different mechanism from the scaled
+resolutions `IOFBScalerInfo` gates.
+
+**The constant is the SDK's.** `kDisplayModeValidForHiResFlag = 0x00800000` is
+already in the vendored `IOGraphicsTypes.h:178`, matching the reporter's
+read-back exactly, so nothing is hand-defined. The hosttest compares the SDK's
+name against a literal `0x00800000u`, and both halves are asserted separately —
+comparing the SDK with a constant derived from the SDK would be comparing it
+with itself.
+
+**Why it is opt-in.** The derived tier is always the nominal size halved, so
+its value depends entirely on the panel: 2560x1440 gives 1280x720 (the
+reporter's case, useful), 2880x1800 gives 1440x900 (#8's panel, untested
+here), and **1920x1080 gives 960x540** — the reference board, the only panel
+this project can measure, where the one derived tier is worth nothing. Turning
+it on by default would change what every existing user is offered, on the
+strength of a measurement from a panel this project does not have, to add a
+mode that is useless on the panel it does have. `-rbgpufbhidpi` is therefore a
+token, and the token is the user's statement that their panel is big enough.
+No size threshold is enforced, because any number here would be invented
+rather than measured. The reporter also observed 2x being "noticeably less
+smooth than 1x" on window drags and Mission Control, unprofiled; that is
+recorded as a second reason not to impose it and explicitly **not** explained
+(a 2x backing is four times the pixels per composite, so some cost is
+expected, but nothing here measures how much of the jank that accounts for).
+
+**Rule 30, with its control.** The whole token list was extracted from the
+tree — 160 strings — and `-rbgpufbhidpi` collides with nothing: the nearest
+neighbours are `-rbgpufbhubp` and `-rbgpufbhubpall`, which differ at the fifth
+character. The first scan returned **0 tokens** and the second returned a
+collision with a bare `-rbgpufb`; both were the instrument, not the reading.
+The zero was a `grep` pattern beginning with `-` being eaten as a flag, and the
+`-rbgpufb` hit is prose in four comments, with no `PE_parse_boot_argn` site. The
+control that makes the final null meaningful is that the same scan finds the
+real pairs already in the tree, `-rbgpuagdc`/`-rbgpuagdccaps` and
+`-rbgpudalfb`/`-rbgpudalfbreal`.
+
+**What this does NOT do, established by reading CoreDisplay rather than
+guessing.** It adds no intermediate "looks like" tiers. `IOFBScalerInfo` is an
+`IODisplayScalerInformation`, exactly 0x30 bytes, and
+`_IOFBInstallScaledResolution` reads exactly three dwords out of it (+0x10
+features, +0x14 maxHorizontalPixels, +0x18 maxVerticalPixels) with no count and
+no loop — so the blob gates WHETHER scaled resolutions are offered and cannot
+express a list of them. A tier between halved and native would need a V2 timing
+whose scaled size exceeds the native raster plus `kIOScaleCanDownSamplePixels`,
+i.e. a real downsample stage in the display pipe. Without one, that combination
+is the corrupted-scanout case, and `rb_hidpi.h` deliberately stops short of it.
+
+**The policy is in `src/common/rb_hidpi.h`**, read-only, two inline functions,
+so the hosttest decides what the kext decides. `rb_hidpi_mode_flags()` takes
+the EXISTING flags as input rather than returning a flag word, which makes
+"disarmed is byte-identical to before" a testable statement rather than a
+claim — and that is the load-bearing assertion, since the whole argument for
+opt-in rests on it. It is tested across seven input words including
+`0xffffffff` and an already-set `0x00800003` (idempotent, because five query
+methods share `modeKnown()` and more than one path can fill an info struct).
+
+**Three diag keys, published unconditionally** (rules 14/15):
+`RBFBHiDpiArmed` says whether the bit was on this build's offer whatever the
+boot-args were, and `RBFBHiDpiAsks` / `RBFBHiDpiGiven` are two counters rather
+than one — asks says the method ran at all, given says the bit went out, and a
+boot where they differ is a boot where the arm was read inconsistently.
+`RBFBHiDpiLogicalW/H` records what CoreDisplay derives, which is not a mode we
+publish.
+
+**The 2B1 lesson again.** The publish block lives in
+`RBAMDFramebufferVBL.cpp`, which the hosttest compiles too against
+`fb_vbl_shim.hpp`, so the first build failed with five undeclared identifiers.
+The file's own comment says this in as many words; the include had to move
+above the `#ifdef RBGPU_FB_VBL_HOSTTEST` guard and the three members had to go
+into the shim. The upside is real: the publish block is now exercised by the
+host test rather than only by a boot.
+
+**Break-it sweep, five breaks, all five fired as genuine test failures and
+none via `-Werror`:** inverting the arm; always setting the bit (written as
+`(armed || 1)` so the parameter stays used and the `-Werror` trap cannot
+substitute for coverage); a wrong constant; halving turned into doubling; and a
+mask wider than the one bit, which the "exactly the HiRes bit differs" check
+catches and an "is the bit set" check would not have.
+
+`make hosttest` exits 0 with no `error:` and no `FAIL`; `make fbkext` builds;
+framebuffer UUID **64338E94**. **Not installed and not booted** — the flag is
+on a path this machine exercises (`getInformationForDisplayMode` runs on every
+boot) but the thing it is for cannot be observed on a 1080p panel, so the
+measurement that matters belongs to the reporter (rule 45).
+
+### #6 and #10: not code defects here
+
+**#6** is the Radeonize Swift GUI installer. Its source is not in this
+repository, so nothing here can be fixed for it; the manual route is
+`sudo tools/efi.sh install`, which is what the GUI wraps. An earlier fix for
+this issue is committed but unreleased, and a release needs a built DMG and a
+public reply, both of which are the user's to authorise.
+
+**#10** asks about installing on an iGPU this project does not support. That
+is a support answer, not a patch: the honest reply is that only `1002:1681`
+Rembrandt is implemented, that the structural OTG check will refuse anything
+else rather than misbehave, and that the installer and Recovery must boot
+stock (3rec-b), which they now do.
+
+### One thing NOT fixed, named rather than quietly left
+
+The token scan found real rule-30 prefix pairs already in the tree:
+`-rbgpuagdc` is a prefix of `-rbgpuagdccaps`, `-rbgpuagdcearly` and
+`-rbgpuagdcpolicy`, and `-rbgpudalfb` is a prefix of `-rbgpudalfbreal`. Rule 30
+says the kernel's parse is exact and ours are not, and this is exactly the
+hazard it describes — the `-rbgpudalfb` pair shares a one-shot and that cost
+boot 585 in this same session. Renaming them is a change to arms that
+experiments in flight depend on, so it is recorded here as a known defect
+rather than done in a commit about other people's issues.

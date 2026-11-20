@@ -881,6 +881,14 @@ private:
      * not a readback of anything we wrote, which OTG_MASTER_EN reading back 1
      * would be (rule 20). */
     bool               otgArmed;          /* -rbgpufbraster */
+    /* #9: -rbgpufbhidpi. Opt-in, read once at start() and published
+     * unconditionally so a boot records whether the bit was offered even when
+     * no mode query happened (rules 14/15). See src/common/rb_hidpi.h for why
+     * this is not a default: the derived tier is the nominal size halved, and
+     * on the reference 1080p panel that is 960x540. */
+    bool               hidpiArmed;        /* -rbgpufbhidpi (#9) */
+    uint64_t           hidpiModeAsks;     /* mode-info queries answered   */
+    uint64_t           hidpiFlagsGiven;   /* ... of those, with the bit   */
     bool               otgApertureOk;     /* the BAR covers OTG3_FRAME_COUNT */
     bool               otgReady;          /* a sample exists this boot */
     uint32_t           otgControl[RB_OTGPROG_COUNT];   /* OTGn_CONTROL, live */

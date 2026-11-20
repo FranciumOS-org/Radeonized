@@ -129,6 +129,9 @@ public:
     uint64_t retireKicks=0;
     uint64_t retireDelivered=0;
     bool hubpArmed=false;
+    bool hidpiArmed=false;            /* #9 */
+    uint64_t hidpiModeAsks=0;
+    uint64_t hidpiFlagsGiven=0;
     bool hubpAll=false;
     bool hubpReady=false;
     uint32_t hubpRefuse=0;

@@ -59,6 +59,7 @@ int dmub_tests(void);          /* 2zn */
 int osver_tests(void);
 int drr_tests(void);
 int fbmode_tests(void);
+int hidpi_tests(void);
 int dcn_addr_tests(void);
 
 static int failures;
@@ -911,6 +912,7 @@ int main(int argc, char **argv)
     failures += osver_tests();
     failures += drr_tests();
     failures += fbmode_tests();
+    failures += hidpi_tests();
     failures += dcn_addr_tests();
     test_fuzz();
 
