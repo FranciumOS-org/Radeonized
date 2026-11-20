@@ -1015,7 +1015,17 @@ boot stock to be a rescue (rule 21).
 `-rbgpuosforce` (arms the default table on an unmeasured OS),
 `-rbgpufbmodes` (a second display mode; mutually exclusive with
 `-rbgpufbdrr`),
-**`-rbgpufbhidpi`** (the HiRes mode flag, #9 / 3iss — one SDK bit,
+**`-rbgpufbnative`** (the frame clock's INITIAL period, derived — #8 / 3iss-b.
+`vblRetune()` has one caller, `modeApply()`, so until the user switches mode
+the period is whatever `start()` put there, and that was `kVBLPeriodNsFast` =
+**6 952 507 ns = this board's 143.83 Hz, on every machine** — a 90 Hz panel
+ticked at 144 Hz from boot. Neither measurement path closes it by default:
+`-rbgpufbmodes` and `-rbgpufbdrr` are both opt-in and `drrSetup()` declines
+when `modeArmed`. Opt-in because the derivation is a `measureMhz()` spin in
+`start()` — 16 frames on a `FRAME_COUNT` edge, bounded at **1.2 s of
+`IODelay`**. `src/common/rb_vblsrc.h`; `RBFBNativeDerived` is published as a
+CONJUNCTION of source and period, and `RB_VBLSRC_CONST` is 0 so an unwritten
+field agrees with "the constant stands"), **`-rbgpufbhidpi`** (the HiRes mode flag, #9 / 3iss — one SDK bit,
 `kDisplayModeValidForHiResFlag`, ORed into `getInformationForDisplayMode`'s
 flags. CoreDisplay then derives a HiDPI mode **reusing the same
 `ioDisplayModeID`** with the nominal size halved and the raster unchanged, so
