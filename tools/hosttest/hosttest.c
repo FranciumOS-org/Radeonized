@@ -60,6 +60,7 @@ int osver_tests(void);
 int drr_tests(void);
 int fbmode_tests(void);
 int hidpi_tests(void);
+int vblsrc_tests(void);
 int dcn_addr_tests(void);
 
 static int failures;
@@ -913,6 +914,7 @@ int main(int argc, char **argv)
     failures += drr_tests();
     failures += fbmode_tests();
     failures += hidpi_tests();
+    failures += vblsrc_tests();
     failures += dcn_addr_tests();
     test_fuzz();
 

@@ -887,6 +887,18 @@ private:
      * this is not a default: the derived tier is the nominal size halved, and
      * on the reference 1080p panel that is 960x540. */
     bool               hidpiArmed;        /* -rbgpufbhidpi (#9) */
+    /* #8: -rbgpufbnative. The frame clock's INITIAL period came from
+     * kVBLPeriodNsFast, this board's measured 143.83 Hz, on every machine -
+     * so on a 90 Hz panel the clock ticked at 144 Hz from boot until the user
+     * switched mode, because modeApply is vblRetune's only caller. Deriving
+     * it costs one measureMhz spin (16 frames, ~111 ms at 144 Hz, ~178 ms at
+     * 90 Hz, bounded at 1.2 s of IODelay), which is why it is opt-in rather
+     * than default: nobody who does not need it should pay a busy-wait in
+     * start(). Sources are published, not assumed (rule 14). */
+    bool               nativeArmed;       /* -rbgpufbnative (#8) */
+    uint32_t           nativeMhz;         /* measured, 0 = not measured   */
+    uint64_t           nativePeriodNs;    /* what it set, 0 = unchanged   */
+    uint32_t           nativeSrc;         /* RB_VBLSRC_*                  */
     uint64_t           hidpiModeAsks;     /* mode-info queries answered   */
     uint64_t           hidpiFlagsGiven;   /* ... of those, with the bit   */
     bool               otgApertureOk;     /* the BAR covers OTG3_FRAME_COUNT */

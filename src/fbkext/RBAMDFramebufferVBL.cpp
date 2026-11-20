@@ -13,6 +13,7 @@
 /* 2B3: needed on BOTH sides of the guard - the hosttest compiles this file
  * too, which is the 2B1 lesson about the shim. */
 #include "rb_hidpi.h"   /* #9: needed on BOTH sides - the 2B1 lesson */
+#include "rb_vblsrc.h"  /* #8: likewise on both sides */
 #include "rb_hpd.h"
 #include "rb_aux.h"
 #include "rb_dpalt.h"
@@ -657,6 +658,26 @@ void RBAMDFramebuffer::publishVBLState(void)
      * a boot can check the derivation rather than take it on trust - BaseMhz
      * and HTotal0/VTotal0 are the three inputs it came from. */
     setProperty("RBFBModeClkHz", (uint64_t)modeClkHz, 32);
+    /* #8: the derived native rate beside the constant it replaced, so the
+     * cross-boot comparison 2z0 kept the constant FOR is still a reading.
+     * Two keys, never one: a boot where they differ by more than the ~0.05 %
+     * 2y6 measured is a boot where the raster, not the drift, moved. */
+    setProperty("RBFBModeNativeRate", (uint64_t)(modeArmed && modeCount
+                                                 ? modeList[0].rate1616 : 0u),
+                32);
+    setProperty("RBFBModeRateConst", (uint64_t)kRefreshRate1616, 32);
+    /* #8: the frame clock's initial period and WHERE it came from. The
+     * source is published beside the period because the two are
+     * indistinguishable from the number alone - a boot that fell back to the
+     * constant and a boot that derived the same figure read identically - and
+     * RBFBNativeDerived is the conjunction the hosttest pins, so neither term
+     * can carry the claim on its own (rule 14). */
+    setProperty("RBFBNativeArmed", nativeArmed);
+    setProperty("RBFBNativeSrc", (uint64_t)nativeSrc, 32);
+    setProperty("RBFBNativeMhz", (uint64_t)nativeMhz, 32);
+    setProperty("RBFBNativePeriodNs", nativePeriodNs, 64);
+    setProperty("RBFBNativeDerived",
+                rb_vblsrc_derived(nativeSrc, nativePeriodNs) ? true : false);
     setProperty("RBFBModeBaseMhz", (uint64_t)modeBaseMhz, 32);
     setProperty("RBFBModeHTotal0", (uint64_t)modeHTotal0, 32);
     setProperty("RBFBModeVTotal0", (uint64_t)modeVTotal0, 32);

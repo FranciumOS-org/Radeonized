@@ -73008,3 +73008,143 @@ hazard it describes — the `-rbgpudalfb` pair shares a one-shot and that cost
 boot 585 in this same session. Renaming them is a change to arms that
 experiments in flight depend on, so it is recorded here as a known defect
 rather than done in a commit about other people's issues.
+
+## 3iss-b — #8's other two defects, both the reference-board constant again
+
+2026-11-19, no boots. #8 reports three things, and the revision gate (3iss) was
+only the first. The other two are real, were diagnosed correctly by the
+reporter, and are the same defect as issues #4 and #5: a number measured on
+this chassis standing in for one that has to be derived per machine.
+
+### The advertised native refresh was this board's constant
+
+`modeSetup()` passed `kRefreshRate1616` — `0x008fd53f`, this board's measured
+143.83 Hz — to `rb_drr_build_modes()` as the native mode's `rate1616`. On #8's
+2880x1800 90 Hz OLED the native mode therefore advertised **144 Hz**, and the
+reporter's own patch (passing `0u` so the rate derives from the measured
+raster) is the fix.
+
+`rb_drr.h` has supported and tested the derived path since 2z0; the constant
+was passed deliberately, and the reason is worth stating because it was not a
+correctness reason. 2y6 measured the refresh moving ~0.05 % between boots (DP
+spread spectrum), and every boot since 2sl had been read against the fixed
+`0x008fd53f` in the registry. That is a statement about the readability of
+**our own journal**, and it cost a reporter two boots. The constant is now
+published beside the derived value (`RBFBModeNativeRate` / `RBFBModeRateConst`,
+two keys and never one) so the cross-boot comparison it existed for is still a
+reading rather than a substitution (rule 17).
+
+Scope worth being precise about: `modeSetup()` returns early unless
+`-rbgpufbmodes` is armed, so **this changes nothing on a default boot**, here or
+anywhere.
+
+### The frame clock's initial period was this board's constant too, on every path
+
+This one the reporter did not name and is larger. `vblPeriodNs` drives the VBL
+`thread_call`, and `vblRetune()` — the only thing that ever changes it — has
+exactly one caller, `modeApply()`. So until the user switches display mode the
+period is whatever `start()` put there, and `start()` put `kVBLPeriodNsFast`:
+6 952 507 ns, i.e. 143.83 Hz. On a 90 Hz panel the frame clock ticked at
+**144 Hz from boot**, on a 90 Hz raster, with nothing on the framebuffer side
+able to correct it — which is why the reporter needed `rbgpuvblhz=89871` for
+the plugin's half and a source patch for ours.
+
+Neither measurement path closes it by default: `-rbgpufbmodes` and
+`-rbgpufbdrr` are both opt-in, and `drrSetup()` declines outright when
+`modeArmed`, so on a default boot **nothing measures the refresh at all**.
+
+`-rbgpufbnative` derives it. Two routes, both ending at the same arithmetic in
+`src/common/rb_vblsrc.h`: reuse the mode list's native entry when
+`-rbgpufbmodes` already measured the raster (no second spin), else measure once
+with `measureMhz()`. It is **opt-in rather than default** because that
+measurement is 16 frames latched on a `FRAME_COUNT` edge — ~111 ms at 144 Hz,
+~178 ms at 90 Hz, bounded at 1.2 s of `IODelay` — and that is a busy-wait
+inside `start()`. On a machine the constant already describes it buys nothing,
+so the token is the user's statement that it does not describe theirs. Rule 30
+scanned: the neighbours are `-rbgpufbnocrumb` and `-rbgpufbnotready`, neither a
+prefix either way.
+
+Deliberately **not** `vblRetune()`: nothing is armed at that point in
+`start()`, and `vblRetunes` has to keep meaning "mode switches that retuned the
+live clock". `RB_VBLSRC_CONST` is **0**, so a boot that published 0 is a boot
+where nothing about this changed, and an unwritten field agrees with "the
+constant stands" instead of contradicting it (rule 32).
+
+`RBFBNativeDerived` is published as the **conjunction**
+`rb_vblsrc_derived(src, periodNs)`, because neither term carries the claim
+alone: a source code of `MEASURED` with a zero period would otherwise read as a
+success it did not achieve, and a non-zero period says nothing about where it
+came from. `RB_VBLSRC_MEAS_FAILED` exists so that case has a code of its own.
+
+### The `vbl_mhz` key reported a value the code was not using
+
+The reporter noticed `vbl_mhz` still reading 143833 with `rbgpuvblhz=89871` set,
+and correctly disbelieved it. They were right: `rbgpu_diag_set_num("vbl_mhz",
+…)` is at `kern_start.cpp:11433` and the `rbgpuvblhz` parse is at `:11523`, so
+the key was published **~90 lines before the boot-arg was read** and always
+carried the default. An instrument reporting a value the code is not using is
+rule 16's complaint turned on itself.
+
+Republished after the parse, with `vbl_mhz_arg` beside it carrying the raw
+requested value — recorded **before** 2ou's 20000..400000 mHz bound test, so a
+**refused** value is distinguishable from an absent one instead of both reading
+as the default (rule 14). Fixing this also required bracing a braceless
+`if`/`else` that my first edit had silently broken by inserting a second
+statement into its `then` arm; the build caught it.
+
+### Three of my own asserted constants were wrong, and one check was vacuous
+
+The first `vblsrc` test run failed three ways, all mine. `kVBLPeriodNsFast` is
+**6 952 507** ns, not the 6 952 992 I asserted; 89871 mHz gives **11 127 060**
+ns, not 11 127 224. More interesting is the third: I had written the rounding
+check against 143833 mHz, where truncation and rounding **both** give
+6 952 507 — so the reference board cannot test that term at all and the check
+would have passed for the wrong reason (rule 48). The two differ by exactly
+1 ns at 89871 mHz, so the discrimination lives on #8's panel, and both halves
+are now stated explicitly so reverting to truncation fails rather than passing
+quietly.
+
+The control that matters did pass first time and unchanged:
+`rb_vblsrc_period_ns(143833)` reproduces `kVBLPeriodNsFast` **exactly**, which
+is what licenses the number it computes for any other panel. The round trip is
+asserted over the whole 20..400 Hz range at 1 Hz steps rather than at a spot,
+since one pair agreeing establishes nothing (rule 18).
+
+### Break-it sweep: eight guards, all eight fired, and three "FIRED NOTHING" were my script
+
+All eight breaks fire as genuine test failures, none via `-Werror`. Three of
+them reported FIRED NOTHING on the first pass — the bound line occurs in
+**both** functions in the file, so the one-occurrence assertion in my sweep
+script failed and the break was never applied. The instrument, not a coverage
+gap (rule 16), and it is only distinguishable because the script asserts its
+anchor count instead of replacing silently.
+
+### What is still not fixed, and will not be from here
+
+#8's **garble** — correct geometry, correct timing, linear swizzle, a
+pixel-perfect screencapture, and a physically garbled panel. One panel here,
+1920x1080; a garbled 2880x1800 OLED is not reproducible on it. The reply posted
+to the issue asks for the one measurement that costs a boot and no code: their
+dump already contains `rbgpu-wtest ... scr 0->a5a5a5a5 TOOK`, a constant
+written into the scanout aperture and read back, and **nobody has ever looked at
+the panel while it was there**. Flat grey says the address and stride the
+display engine fetches are right and the fault is downstream; stripes or shear
+says the stride is wrong and the period says by how much. That is rule 45 —
+when the deliverable is something a human observes, the observation is the
+measurement.
+
+Their VM-context material is explicitly **not** the lead: the panel's scanout
+here is physical, not GPUVM-mapped, so `ctx3` / `ptfix` / the PDE work are the
+accelerator's page tables, which their dump shows working. `ctx+0xb8` never
+being general is our own code's published text (2ih). And `rbgpu-blbuf`
+reading all-`ffffffff` has a direct control: **this board reads the same
+thing** while accelerating (`pa=87f800000 nz=1024/1024 ymatch=0`), 8 MB below
+the carve-out top where the PSP's TMR sits, and the journal's conclusion has
+been since 2jm that the probe cannot tell a protected bundle from an unbacked
+page.
+
+Plugin UUID **B165ADE0**, framebuffer UUID **31B2C56B**. `make hosttest` /
+`plugin` / `fbkext` all exit 0 with zero `error:` and zero `FAIL`; `nm -u` 0.
+**Nothing here is booted.** The two derivations are arithmetic the hosttest
+decides, and the one behaviour change on this machine — a different initial
+frame-clock period — is behind a token nothing sets.

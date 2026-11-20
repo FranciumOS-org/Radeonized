@@ -131,12 +131,25 @@ bool RBAMDFramebuffer::modeSetup(void)
     modeClkHz = rb_drr_clk_from_mhz(modeBaseMhz, htotal, vtotal);
     if (modeClkHz == 0u) { modeRefuse = MODE_REFUSE_NO_CLK; return false; }
 
-    /* 2z0: the whole list, derived from this raster. The native rate is the
-     * registry's own constant rather than a derived one - the measured refresh
-     * moves ~0.05 % between boots (2y6), and every boot since 2sl has been
-     * read against 0x008fd53f. */
+    /* 2z0 / #8: the whole list, derived from this raster - INCLUDING the
+     * native rate, which used to be the registry's own 0x008fd53f constant.
+     *
+     * The constant was this board's measured 143.83 Hz, kept so the native
+     * mode advertised the same number every boot: the measured refresh moves
+     * ~0.05 % between boots (2y6), and every boot since 2sl was read against
+     * it. That reason was about the READABILITY of our own journal, not about
+     * correctness, and it cost #8's reporter two boots: on their 2880x1800
+     * 90 Hz panel the native mode advertised 144 Hz, because the constant
+     * describes this chassis' panel and nothing else. Issues #4/#5 are the
+     * same defect in the geometry, and the answer is the same - derive it.
+     *
+     * Passing 0 makes rb_drr_build_modes use rb_drr_rate1616(measured), which
+     * rb_drr.h has supported and tested both ways since 2z0. The constant is
+     * still published beside the derived value (RBFBModeRateConst), so the
+     * cross-boot comparison the constant existed for is still available as a
+     * reading rather than as a substitution (rule 17). */
     modeCount = rb_drr_build_modes(modeClkHz, htotal, vtotal,
-                                   kRefreshRate1616, modeList,
+                                   0u, modeList,
                                    RB_DRR_MAX_MODES);
     if (modeCount == 0u) {
         modeRefuse = MODE_REFUSE_NO_LINES;

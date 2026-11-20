@@ -74,7 +74,6 @@ public:
     uint32_t modeRefuse=20, modeLastAsked=0, modeClkHz=0, modeBaseMhz=0;
     // 2z0: the derived mode list.
     struct rb_drr_mode modeList[RB_DRR_MAX_MODES]{};
-    unsigned modeCount=0;
     int modeIndexOf(int id) const {
         const int i=id-100;
         if(i<0) return -1;
@@ -130,6 +129,11 @@ public:
     uint64_t retireDelivered=0;
     bool hubpArmed=false;
     bool hidpiArmed=false;            /* #9 */
+    bool nativeArmed=false;           /* #8 */
+    uint32_t nativeMhz=0;
+    uint64_t nativePeriodNs=0;
+    uint32_t nativeSrc=0;
+    unsigned modeCount=0;
     uint64_t hidpiModeAsks=0;
     uint64_t hidpiFlagsGiven=0;
     bool hubpAll=false;

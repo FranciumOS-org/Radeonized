@@ -11520,20 +11520,35 @@ void RGPU::init() {
 
     g_vbl_on = rbgpu_arg("-rbgpuvbl");
     char vblbuf[32] {};
+    uint32_t vblraw = 0;   /* #8: the value the arg asked for, accepted or not */
     if (lilu_get_boot_args("rbgpuvblhz", vblbuf, sizeof(vblbuf) - 1) && vblbuf[0]) {
         uint32_t v = 0;
         for (const char *c = vblbuf; *c >= '0' && *c <= '9'; c++)
             v = v * 10 + static_cast<uint32_t>(*c - '0');
-        if (v >= 20000 && v <= 400000)      // 20-400 Hz, refuse nonsense
+        /* #8: recorded BEFORE the bound test, so a refused value is a reading
+         * rather than indistinguishable from an absent one. */
+        vblraw = v;
+        if (v >= 20000 && v <= 400000) {    // 20-400 Hz, refuse nonsense
             g_vbl_mhz = v;
-        else
+        } else {
             rbgpu_log("2ou: rbgpuvblhz=%s is outside 20000-400000 mHz - ignored, "
                       "keeping %u", vblbuf, g_vbl_mhz);
+        }
     }
     // 2ov: the vblank pump, separate from -rbgpuvbl so the two halves stay
     // independently attributable. The period follows the same rate.
     g_vblp_on = rbgpu_arg("-rbgpuvblpump");
     g_vblp_us = g_vbl_mhz ? static_cast<uint32_t>(1000000000ull / g_vbl_mhz) : 6953;
+    /* #8: vbl_mhz was published ~90 lines ABOVE this, BEFORE rbgpuvblhz was
+     * parsed, so the key reported the 143833 default however the boot-arg was
+     * set - which is what #8's reporter read and correctly disbelieved. An
+     * instrument that reports a value the code is not using is rule 16's
+     * complaint about itself, so it is republished here, after the parse, and
+     * the raw argument is published beside it so a REJECTED value (2ou's
+     * 20000-400000 mHz bound) is distinguishable from an absent one rather
+     * than both reading as the default. */
+    rbgpu_diag_set_num("vbl_mhz", g_vbl_mhz);
+    rbgpu_diag_set_num("vbl_mhz_arg", vblbuf[0] ? (uint64_t)vblraw : 0);
     rbgpu_log("2ov: vblank pump %s (period %u us)",
               g_vblp_on ? "ARMED by -rbgpuvblpump" : "off (add -rbgpuvblpump)",
               g_vblp_us);

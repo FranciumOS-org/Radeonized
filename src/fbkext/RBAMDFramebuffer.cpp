@@ -5,6 +5,7 @@
 #include "rb_hubp.h"
 #include "rb_defaults.h"
 #include "rb_hidpi.h"   /* #9: the HiRes-flag policy */
+#include "rb_vblsrc.h"  /* #8: the frame clock's initial period */
 #include "rb_osver.h"
 #include <libkern/version.h>
 
@@ -476,6 +477,16 @@ bool RBAMDFramebuffer::start(IOService *provider)
     {
         hidpiArmed = argOn("-rbgpufbhidpi");
     }
+
+    /* #8: rule 30 - -rbgpufbnative's neighbours are -rbgpufbnocrumb and
+     * -rbgpufbnotready, neither a prefix of it nor prefixed by it. */
+    nativeArmed = false;
+    nativeMhz = 0;
+    nativePeriodNs = 0;
+    nativeSrc = RB_VBLSRC_CONST;
+    {
+        nativeArmed = argOn("-rbgpufbnative");
+    }
     hubpMax = 0;
     hubpRejectAddr = 0;
     hubpRejectWhy = 0;
@@ -881,6 +892,35 @@ bool RBAMDFramebuffer::start(IOService *provider)
      * mode list that changed under the compositor. */
     modeSetup();
     drrSetup();       /* 2y5: needs blSetup's BAR5 map, so it follows it */
+
+    /* #8: the frame clock's initial period, derived rather than inherited
+     * from this board's constant. AFTER modeSetup, because the mode list's
+     * native entry is already a period derived from the same raster and
+     * reusing it costs no second spin; the fresh measurement is only for the
+     * default path, where neither -rbgpufbmodes nor -rbgpufbdrr ran and
+     * nothing has measured anything. Both routes end at the same arithmetic
+     * in rb_vblsrc_period_ns(), which the hosttest decides.
+     *
+     * The constant stays the last resort, and nativeSrc says which route won,
+     * so a boot cannot be read as "derived" when it silently fell back. */
+    if (nativeArmed) {
+        if (modeArmed && modeCount && modeList[0].period_ns) {
+            nativePeriodNs = modeList[0].period_ns;
+            nativeSrc = RB_VBLSRC_MODELIST;
+        } else if (blReady && blRegs) {
+            nativeMhz = measureMhz(blRegs);
+            nativePeriodNs = rb_vblsrc_period_ns(nativeMhz);
+            nativeSrc = nativePeriodNs ? RB_VBLSRC_MEASURED
+                                       : RB_VBLSRC_MEAS_FAILED;
+        } else {
+            nativeSrc = RB_VBLSRC_NO_MAP;
+        }
+        /* Not vblRetune(): nothing is armed yet, and vblRetunes must keep
+         * meaning "mode switches that retuned the live clock". */
+        if (nativePeriodNs) {
+            vblPeriodNs = nativePeriodNs;
+        }
+    }
 
     /* 2t0: the breadcrumb target. Opened once and retained, because crumb()
      * is also called from the VBL thread_call and fromPath there would be a
