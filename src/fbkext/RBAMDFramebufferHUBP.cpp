@@ -21,6 +21,7 @@
  */
 
 #include "RBAMDFramebuffer.hpp"
+#include "rb_otg.h"   /* RB_OTG_MASTER_EN / RB_OTG_OFF_VALUE */
 #include "rb_hubp.h"
 #include "rb_hpd.h"
 #include "rb_aux.h"
@@ -46,8 +47,7 @@ static const uint32_t kRbDmuSeg2 = 0x34c0;
 
 /* 2oq measured OTG0_CONTROL = 0x00011201 (OTG_MASTER_EN set) with OTG1-3 at
  * exactly 0x300. The OTG dwords come from rb_regs.h's own table. */
-#define RB_OTG_MASTER_EN  0x1u
-#define RB_OTG_OFF_VALUE  0x300u
+/* from rb_otg.h (one definition, held by the hosttest) */
 static const uint32_t kRbOtgControl[4] = { 0x1b41, 0x1bc1, 0x1c41, 0x1cc1 };
 
 /* 3fc: OTG0_H_BLANK_START_END, dword offset, same DMU segment as the

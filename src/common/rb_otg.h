@@ -214,4 +214,63 @@ static inline int rb_otg_to_v2(const struct rb_otg_timing *in,
     return RB_OTG_OK;
 }
 
+/* ---- WHICH DEVICES THIS SAMPLER WILL READ (issues #7 and #8) -------------
+ *
+ * `rbgpu_agdc_sample_otg` used to require PCI revision 0x0a as well as the
+ * vendor and device id. That equality was incidental, not designed, and it
+ * cost two reporters a corrupted desktop:
+ *
+ *  - #7, MSI Bravo 15 B7ED, Radeon 660M, 1002:1681 **rev 0x0b**: armed and
+ *    Metal came up, panel showed pink/striped garbage as soon as WindowServer
+ *    drew, `agdc_tim_err=0x3 agdc_tim_ndrv_err=0x3 otg_err=0x6` - the timing
+ *    was never sampled. Changing the one byte to 0x0b gave an accelerated
+ *    desktop with no corruption.
+ *  - #8, ASUS M6400RC, Radeon 680M, 1002:1681 **rev 0x02**, 2880x1800 90 Hz:
+ *    `otg_err=6` before, and after accepting 0x02, `otg_err=0`,
+ *    `agdc_tim_h=2880 agdc_tim_v=1800`, `agdc_tim_mhz=89840..89871`, and
+ *    AGDC request 0x921 answered. That reporter also noted that the
+ *    framebuffer's own geometry derivation - which has no revision gate at
+ *    all - had already read the same OTG0 registers correctly on rev 0x02.
+ *
+ * THE REVISION BYTE WAS NEVER THE INSTRUMENT. What makes the read meaningful
+ * is whether the words at the DMU segment decode as OTG registers, and the
+ * sampler already establishes that structurally, in the same call, further
+ * down: OTG0 must have OTG_MASTER_EN set and OTG1-3 must each read exactly
+ * RB_OTG_OFF_VALUE (0x300), or it refuses with `otg_err` 3, "not the segment
+ * we think it is". Three more checks follow it - the frame counter must
+ * actually advance (4), the derived timing must be believable (5), and the
+ * arithmetic must close on both axes (10). A board whose layout really did
+ * differ is refused by those, with a code saying which, rather than by a
+ * revision number that cannot distinguish a layout change from a stepping.
+ *
+ * The internal control for that reading is in this tree: `RembrandtProbe`
+ * matches on vendor and device only and has never gated on revision, and the
+ * framebuffer's geometry path does not either. The OTG sampler was the only
+ * revision equality in the whole source tree.
+ *
+ * So the gate is vendor and device, and the revision is PUBLISHED instead
+ * (`otg_rev`) so that every boot records what it was - rule 14, and rule 19's
+ * habit of publishing the value rather than only a verdict. An allowlist of
+ * {0x02, 0x0a, 0x0b} was the other option and is deliberately NOT what this
+ * is: it would need a release per board while adding nothing the structural
+ * check does not already do, and it would refuse a working machine on the
+ * strength of a number nobody has shown to matter.
+ *
+ * What this does NOT claim: it is not a statement that every 1002:1681 is the
+ * same silicon, and it does not address #8's garbled scanout, which survived
+ * this fix on that machine and has a different cause (its display VM context 3
+ * is never given a page-table base). It only stops a redundant check from
+ * withholding a timing the hardware was willing to give. */
+/* The two words the structural check is made of. They were duplicated,
+ * identically, in rbgpu_agdc_otg.cpp and RBAMDFramebufferHUBP.cpp; now that
+ * they carry the gate the revision byte used to carry, they belong here where
+ * the hosttest can hold them. 2oq measured OTG1-3 at exactly RB_OTG_OFF_VALUE
+ * on the reference board, and #8 reproduced it on rev 0x02. */
+#define RB_OTG_MASTER_EN  0x1u
+#define RB_OTG_OFF_VALUE  0x300u
+
+static inline int rb_otg_dev_supported(unsigned vendor, unsigned device) {
+    return vendor == 0x1002u && device == 0x1681u;
+}
+
 #endif /* RB_OTG_H */

@@ -50,8 +50,8 @@ static const uint32_t kRbOtg0VBlank     = 0x1b36;
 static const uint32_t kRbOtg0VSyncA     = 0x1b37;
 static const uint32_t kRbOtg0VSyncCntl  = 0x1b38;
 
-#define RB_OTG_MASTER_EN  0x1u
-#define RB_OTG_OFF_VALUE  0x300u   // 2oq measured OTG1-3 at exactly this
+/* RB_OTG_MASTER_EN / RB_OTG_OFF_VALUE now come from rb_otg.h, where the
+ * hosttest can hold them - they are the gate the revision byte used to be. */
 
 namespace {
 class OtgMap {
@@ -73,9 +73,18 @@ bool rbgpu_agdc_sample_otg(IOPCIDevice *device, struct rb_otg_timing *out) {
     // 2ry: callable before IONDRVSupport and AMD's SMU sw_init. Neither a
     // late source-binding callback nor g_hw is a prerequisite for firmware
     // scanout. Never enable PCI decoding or bus mastering here.
-    if (!device || device->configRead16(kIOPCIConfigVendorID) != 0x1002 ||
-        device->configRead16(kIOPCIConfigDeviceID) != 0x1681 ||
-        device->configRead8(kIOPCIConfigRevisionID) != 0x0a) {
+    if (!device) { rbgpu_diag_set_num("otg_err", 6); return false; }
+    /* #7/#8: vendor and device only. The revision equality that used to be
+     * here was incidental and withheld the timing from working rev 0x0b and
+     * rev 0x02 boards; what establishes that these words ARE OTG registers
+     * is the structural check below - MASTER_EN set plus OTG1-3 each exactly
+     * 0x300, refusing with otg_err 3 - not a stepping number. rb_otg.h
+     * carries the reasoning and both reports. The revision is PUBLISHED
+     * rather than tested, so every boot records what it was (rule 14). */
+    rbgpu_diag_set_num("otg_rev",
+                       device->configRead8(kIOPCIConfigRevisionID));
+    if (!rb_otg_dev_supported(device->configRead16(kIOPCIConfigVendorID),
+                              device->configRead16(kIOPCIConfigDeviceID))) {
         rbgpu_diag_set_num("otg_err", 6); return false;
     }
     if (!(device->configRead16(kIOPCIConfigCommand) & kIOPCICommandMemorySpace)) {

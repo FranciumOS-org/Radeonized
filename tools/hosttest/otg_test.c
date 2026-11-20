@@ -131,6 +131,26 @@ int otg_tests(void) {
                           RB_AGDC_LINK_NONE,
                              RB_AGDC_LINK_BIT3|RB_AGDC_LINK_NOLINK,
                              RB_AGDC_STREAM_NONE,RB_AGDC_STREAM_BAD) == 0);
+
+    /* ---- #7/#8: which devices the OTG sampler will read ------------------
+     * The revision byte is NOT part of this decision. Two reporters had a
+     * working panel's timing withheld by a revision equality: rev 0x0b on a
+     * 660M (#7, corrupted desktop until patched) and rev 0x02 on a 2880x1800
+     * 680M (#8, otg_err=6 until patched, then correct 2880x1800 @ ~89.86 Hz).
+     * What makes the read meaningful is the structural check in the sampler
+     * (MASTER_EN plus OTG1-3 == RB_OTG_OFF_VALUE, otg_err 3), so these cases
+     * pin that the predicate takes vendor and device ONLY, and that the
+     * revisions from both reports and the reference board are all accepted. */
+    A(rb_otg_dev_supported(0x1002, 0x1681));      /* the silicon, any stepping */
+    A(!rb_otg_dev_supported(0x1002, 0x1682));     /* a different device id     */
+    A(!rb_otg_dev_supported(0x10de, 0x1681));     /* the dGPU vendor in #7/#8  */
+    A(!rb_otg_dev_supported(0, 0));               /* an unpopulated read       */
+    A(!rb_otg_dev_supported(0xffff, 0xffff));     /* a dead bus reads all ones */
+    /* RB_OTG_OFF_VALUE is what the sampler gates on INSTEAD of the revision,
+     * so it is load-bearing for this change and not just a measured constant. */
+    A(RB_OTG_OFF_VALUE == 0x300u);
+    A((RB_OTG_MASTER_EN & 0x1u) == 0x1u);
+
 #undef A
     return bad;
 }

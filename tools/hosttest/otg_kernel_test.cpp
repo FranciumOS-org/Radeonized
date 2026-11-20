@@ -70,15 +70,37 @@ int main() {
     assert(diag.at("otg_err")==5 && mapping.releases==1);
 
     // Refuse identity/decoding failures before mapping any device memory.
-    for (unsigned which=0;which<4;which++) {
+    // The REVISION is deliberately not among these: see the block below.
+    for (unsigned which=0;which<3;which++) {
         reset(pci,mapping);
         if (which==0) pci.vendor=0xffff;
         if (which==1) pci.device=0xffff;
-        if (which==2) pci.revision=0xff;
-        if (which==3) pci.command=0;
+        if (which==2) pci.command=0;
         assert(!rbgpu_agdc_sample_otg(&pci,&timing));
-        assert(diag.at("otg_err")== (which==3 ? 7 : 6));
+        assert(diag.at("otg_err")== (which==2 ? 7 : 6));
         assert(pci.maps==0 && mapping.releases==0);
+    }
+
+    // #7/#8: THE REVISION IS NOT A GATE, IT IS A PUBLISHED VALUE.
+    // This loop used to assert that revision 0xff refuses with otg_err 6. It
+    // does not any more, and that is the fix: a revision equality withheld the
+    // timing from two working machines - rev 0x0b on a 660M (#7: armed, Metal
+    // up, panel corrupted, otg_err=6) and rev 0x02 on a 2880x1800 680M (#8:
+    // otg_err=6, then correct 2880x1800 once patched). Every revision now
+    // samples, and the published value is checked so a boot records it.
+    // What refuses a board whose layout really differs is the structural check
+    // (OTG1 != 0x300 -> otg_err 3, asserted below), not this byte.
+    {
+        const unsigned revs[] = { 0x0a, 0x0b, 0x02, 0x00, 0xff };
+        for (unsigned i=0;i<sizeof revs/sizeof revs[0];i++) {
+            reset(pci,mapping);
+            pci.revision=revs[i];
+            assert(rbgpu_agdc_sample_otg(&pci,&timing));
+            assert(diag.at("otg_err")==0);
+            assert(diag.at("otg_rev")==revs[i]);   // published, not tested
+            assert(timing.refresh_mhz>143000 && timing.refresh_mhz<145000);
+            assert(mapping.releases==1);
+        }
     }
     reset(pci,mapping); pci.mapping=nullptr;
     assert(!rbgpu_agdc_sample_otg(&pci,&timing) && diag.at("otg_err")==8);
