@@ -36,28 +36,42 @@ MIN_KERNEL = "25.0.0"
 MAX_KERNEL = "25.99.99"
 POKE = "XHCIPoke.kext"
 
-# name, Find, Replace. Derived 2026-10-30 from macOS 26.7.2 (25G332)
-# AppleUSBXHCI at __TEXT 0xffffff8002f15000; the offsets in the names are from
-# each function's own entry, so they survive a slide.
+# name, Find, Replace, enabled-by-default. Derived 2026-10-30 from macOS 26.7.2
+# (25G332) AppleUSBXHCI at __TEXT 0xffffff8002f15000; the offsets in the names
+# are from each function's own entry, so they survive a slide.
+#
+# THE THREE IsochRequest SITES ARE OFF BY DEFAULT, AND THAT IS A MEASUREMENT.
+# 3cam (2026-11-22) measured a USB UVC camera on this chassis' Rembrandt xHCI
+# returning ZERO isochronous packets with those three enabled. With them off,
+# isochronous events arrive on interrupter 2, which XHCIPoke services, and the
+# camera works. So forcing interrupter 0 is correct for the bulk and control
+# paths this table was derived for and WRONG for the isochronous path.
+#
+# Before this, `add` deleted our existing entries and re-added all nine
+# ENABLED, so running it once more - or `usbintr0 on`, or any routine
+# re-apply - silently undid that fix. A tool that re-breaks a measured fix
+# when run twice is the instrument being the suspect (rule 16), so the
+# default now lives in the table beside the bytes rather than in whoever
+# remembers to disable three rows by hand afterwards.
 SITES = (
     ("Request::prepare+0x646  mov $1<<22, trb.status",
-     "c744080800004000c744080c21040000", "c744080800000000c744080c21040000"),
+     "c744080800004000c744080c21040000", "c744080800000000c744080c21040000", True),
     ("Request::prepare+0x8a2  mov $1<<22, %ecx",
-     "b9000040004c89adc0feffff", "b9000000004c89adc0feffff"),
+     "b9000040004c89adc0feffff", "b9000000004c89adc0feffff", True),
     ("Request::prepare+0xb0b  mov $1<<22, trb.status",
-     "c744180800004000498b0424", "c744180800000000498b0424"),
+     "c744180800004000498b0424", "c744180800000000498b0424", True),
     ("Request::prepare+0xb5c  mov $1<<22, trb.status",
-     "c744080800004000c744080c00180000", "c744080800000000c744080c00180000"),
+     "c744080800004000c744080c00180000", "c744080800000000c744080c00180000", True),
     ("Request::addTD+0x48     shl $22, interrupter -> xor",
-     "41c1e4164489643208", "4531e4904489643208"),
+     "41c1e4164489643208", "4531e4904489643208", True),
     ("IsochRequest::prepare+0x6e5  mov $2<<22, trb.status",
-     "c7441108000080008944110c", "c7441108000000008944110c"),
+     "c7441108000080008944110c", "c7441108000000008944110c", False),
     ("IsochRequest::prepare+0x9f6  or  $2<<22, %eax",
-     "0d0000800089441908", "0d0000000089441908"),
+     "0d0000800089441908", "0d0000000089441908", False),
     ("IsochRequest::prepare+0xb6d  mov $2<<22, trb.status",
-     "c744080800008000c744080c00180000", "c744080800000000c744080c00180000"),
+     "c744080800008000c744080c00180000", "c744080800000000c744080c00180000", False),
     ("SparseRequest::prepare+0x127 mov $1<<22, %r8d",
-     "41b8000040004489443e08", "41b8000000004489443e08"),
+     "41b8000040004489443e08", "41b8000000004489443e08", True),
 )
 
 KC = "/System/Library/KernelCollections/BootKernelExtensions.kc"
@@ -67,10 +81,10 @@ class ConfigError(Exception):
     pass
 
 
-def entry(name, find, repl):
+def entry(name, find, repl, enabled=True):
     return {
         "Arch": "x86_64", "Base": "", "Comment": f"{TAG} | {name}", "Count": 1,
-        "Enabled": True, "Find": bytes.fromhex(find), "Identifier": IDENT, "Limit": 0,
+        "Enabled": bool(enabled), "Find": bytes.fromhex(find), "Identifier": IDENT, "Limit": 0,
         "Mask": b"", "MaxKernel": MAX_KERNEL, "MinKernel": MIN_KERNEL,
         "Replace": bytes.fromhex(repl), "ReplaceMask": b"", "Skip": 0,
     }
@@ -95,10 +109,13 @@ def add(cfg):
     lst = patch_list(cfg)
     for i in reversed(ours(lst)):               # re-add fresh, so every field is right
         del lst[i]
-    for name, find, repl in SITES:
-        lst.append(entry(name, find, repl))
+    for name, find, repl, enabled in SITES:
+        lst.append(entry(name, find, repl, enabled))
+    off = [name.split()[0] for name, _f, _r, en in SITES if not en]
     return (f"Kernel -> Patch: {len(SITES)} '{TAG}' patches, "
-            f"MinKernel {MIN_KERNEL} MaxKernel {MAX_KERNEL}")
+            f"{len(off)} of them DISABLED ({', '.join(off)}) because 3cam "
+            f"measured the camera returning zero isochronous packets with "
+            f"them on, MinKernel {MIN_KERNEL} MaxKernel {MAX_KERNEL}")
 
 
 def remove(cfg):
@@ -130,8 +147,23 @@ def status(cfg):
     out = []
     lst = patch_list(cfg)
     mine = ours(lst)
-    out.append(f"'{TAG}': {len(mine)} of {len(SITES)} patches present"
-               + (f", Enabled={sorted({lst[i].get('Enabled') for i in mine})}" if mine else ""))
+    out.append(f"'{TAG}': {len(mine)} of {len(SITES)} patches present")
+    # Rule 14: a set of booleans cannot say WHICH site is off, and the three
+    # isochronous ones being off is the camera fix while any of the other six
+    # being off is a defect. So each is named with its live state and whether
+    # that matches the table's default.
+    want = {f"{TAG} | {name}": en for name, _f, _r, en in SITES}
+    for i in mine:
+        c = str(lst[i].get("Comment", ""))
+        live = bool(lst[i].get("Enabled"))
+        exp = want.get(c)
+        mark = "" if exp is None else ("" if live == exp
+                                       else "  <-- DIFFERS from the table default "
+                                            f"({exp})")
+        out.append(f"    Enabled={live!s:5} {c.split('| ',1)[-1]}{mark}")
+    missing = [c for c in want if c not in {str(lst[i].get("Comment","")) for i in mine}]
+    for c in missing:
+        out.append(f"    ABSENT            {c.split('| ',1)[-1]}")
     other = [p for p in lst if isinstance(p, dict)
              and str(p.get("Comment", "")).startswith("XHCI interrupter 0")
              and not str(p.get("Comment", "")).startswith(TAG)]
@@ -171,7 +203,7 @@ def verify(path=KC):
     length. Returns (ok, lines)."""
     data = kext_bytes(path)
     lines, ok = [], True
-    for name, find, repl in SITES:
+    for name, find, repl, _enabled in SITES:
         f, r = bytes.fromhex(find), bytes.fromhex(repl)
         n = data.count(f)
         good = n == 1 and len(f) == len(r) and f != r
@@ -179,7 +211,7 @@ def verify(path=KC):
         lines.append(f"  {'ok  ' if good else 'FAIL'} count={n} len={len(f)}/{len(r)}  {name}")
     # and the patched form must NOT already be present: that would mean we are
     # reading an already-patched image and cannot tell a hit from a miss
-    for name, find, repl in SITES:
+    for name, find, repl, _enabled in SITES:
         if data.count(bytes.fromhex(repl)):
             ok = False
             lines.append(f"  FAIL the PATCHED bytes are already in the kext: {name}")

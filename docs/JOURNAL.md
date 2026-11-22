@@ -73255,3 +73255,111 @@ for a row. The honest caveat is that hardened runtime and library validation
 block `DYLD_INSERT_LIBRARIES` in signed CEF/Electron GPU processes, so it may
 never load, and that refusal is information about code signing rather than a
 result about the driver (rule 16).
+
+## 3cam-b — the Isoch patches are off BY DEFAULT now, and two corrections to the FaceTime handoff
+
+2026-11-22, boot 633, no reboots. A sibling session fixed the UVC camera on
+this chassis and handed over what it had measured. Two of its findings are
+recorded here because they are about this repository's own tools, and the open
+one is assessed because the assessment changes what is worth doing.
+
+### The camera finding, and the tool defect it exposes
+
+The camera returned **zero isochronous packets** while the three
+`IsochRequest::prepare` sites in `tools/xhci_intr0.py`'s table (`+0x6e5`,
+`+0x9f6`, `+0xb6d`) were enabled. With those three disabled, isochronous events
+arrive on **interrupter 2**, which `XHCIPoke` services, and the camera works.
+The other six sites — four `Request::prepare`, `addTD`, `SparseRequest` — stay
+on. So forcing interrupter 0 is right for the bulk and control paths the table
+was derived for and **wrong for the isochronous path**.
+
+**The tool would have silently undone that fix.** `add()` deleted our existing
+entries and re-added all nine with `Enabled: True`, so running `add` again, or
+`usbintr0 on`, or any routine re-apply, re-breaks the camera with no warning.
+That is the instrument being the suspect (rule 16) in its most annoying form:
+the defect only appears the *second* time the tool is used, which is exactly
+when nobody is looking at its output.
+
+Fixed by putting the default in the table beside the bytes rather than in
+whoever remembers to disable three rows by hand afterwards: `SITES` grew a
+fourth column, `entry()` takes it, and `add()` honours it. The commit message
+and the table comment both carry the measurement, so the next reader learns why
+three of nine are off rather than assuming a mistake.
+
+`status()` now names each site with its live state and flags any that
+**DIFFERS** from the table default, because a set of booleans cannot say which
+site is off — and the three isochronous ones being off is the camera fix while
+any of the other six being off is a defect. An `ABSENT` line covers a site that
+is missing entirely (rule 14: absent and disabled must not read the same).
+
+**The control is the live machine.** Run against the EFI config as the sibling
+session left it (`logs/efi-backups/20261122-180138-bootarg/config.plist`,
+read-only), `status` prints exactly the new table's default — six enabled, the
+three isochronous ones off, zero DIFFERS, zero ABSENT. So the table now encodes
+the configuration that is measured working, and `add` reproduces it instead of
+undoing it. Verified idempotent over two calls. Three break-it checks, all
+firing: an Isoch site turned back on, a required site turned off, and a site
+deleted.
+
+### Correction 1: the boot that was measured in is NOT an IONDRVFramebuffer boot
+
+The handoff's hypothesis rests on *"the display is `IONDRVFramebuffer` with no
+IOSurface"*. Boot 633 — booted 17:58:24, which brackets the 18:05-18:06
+measurements — reads **`armed 1`, `arm_why 0`**, with **`RBAMDFramebuffer` 1
+instance and `IONDRVFramebuffer` 0**. The panel was ours.
+
+The *fact* survives and the *attribution* does not. 2pd's sentence was written
+about a stock boot (boot 138) and SkyLight's branch is real —
+`if (GetIOSurface() == NULL) force software`, read as a literal branch at
+`0x7ff807d6f42d` — but what makes it fire here is that **our** framebuffer
+hands out no IOSurface either: `grep -i IOSurface src/fbkext/` returns
+**nothing**, and 2q9's `numDisplayBuffers 0` is the same fact one layer down.
+So anyone chasing `IONDRVFramebuffer` would be reading the wrong class; the gap
+is in `RBAMDFramebuffer` and in CoreDisplay's `GetNextSurface` path, which is
+where 2pd's frontier already pointed.
+
+### Correction 2: the handoff's own finding 5 argues against its hypothesis
+
+The hypothesis is that FaceTime's software H.264 encoder fails because its
+ScreenCaptureKit buffers have no CPU-readable base address (`dataBufferPtr =
+0x0` on the first frame, then `BufMgtCompCachePic() err = -8969`).
+
+But finding 5 in the same handoff is that **`screencapture -v -V 3` produced
+correct, non-black H.264 of the full screen on this machine**, and finding 2 is
+that hardware H.264 is unavailable — so that encode was the *software* encoder,
+on screen content, succeeding. If screen-capture buffers were categorically
+unmappable, that would have failed too. The hypothesis is therefore not
+supported by the evidence in hand; it is consistent with one reading and
+contradicted by another in the same document (rule 39's shape: the two
+measurements are in different configurations and the difference has not been
+named). What actually differs is the **realtime** encoder
+(`VCPRealtimeEncoder`), `usage=20`, and 1920x1088 — not SCK-versus-not.
+
+### What this is actually downstream of, and why the suggested next step is not ours
+
+The root cause we own is in finding 2: **no hardware H.264 encode**. `AppleGVA`
+fails to create the encoder, `VTVideoEncoderSelection err=-12908`, which agrees
+with this journal's VCN notes — VCN appears as engines `0x3B0[8..9]`
+(`AMDVCN3HWEngine`) and whether its firmware is in the GC autoload bundle has
+been *"a hypothesis and nothing more"* since 12963. Note that **660m-Metal
+claims VCN 3.1 decode, not encode**, so no sibling project has encode working
+on this silicon either.
+
+With no hardware encoder, FaceTime falls back to a software path that few
+machines ever exercise at `usage=20`, and it fails there. Fixing VCN encode
+would bypass the whole question; chasing the software encoder's buffer handling
+is debugging Apple's fallback, on a path that exists only because of our gap.
+That is a reordering of the suggested next steps, not a refusal of them.
+
+### And the suggested next step cannot be run the way it was handed over
+
+The handoff says its own SCStream test binary was denied by TCC, that screen
+capture cannot be prompted for an unsigned test binary, and asks for the same
+check from *"a process with Screen Recording permission"*. That is a macOS
+privacy control, and the ways to satisfy it from here all amount to borrowing
+some already-permitted application's grant. **Not done, and not attempted.**
+It is recorded as a decision for the user, with the honest options: grant the
+permission deliberately to a binary they have inspected, or drop the SCStream
+test in favour of the browser-based comparison the handoff already suggests
+(Meet or Jitsi, which bring their own encoder), which needs no new permission
+at all and discriminates the same way.
