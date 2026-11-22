@@ -73148,3 +73148,110 @@ Plugin UUID **B165ADE0**, framebuffer UUID **31B2C56B**. `make hosttest` /
 **Nothing here is booted.** The two derivations are arithmetic the hosttest
 decides, and the one behaviour change on this machine — a different initial
 frame-clock period — is behind a token nothing sets.
+
+## 3iss-c — #11: the GL cave is OFF on the reporter's OS, and ANGLE was never the variable
+
+2026-11-22, no boots. #11 (same reporter as #9) reports eaten glyphs and
+scrambled images in two unrelated apps — NetEase CEF 120 and an Electron
+build — both reaching the GPU through ANGLE's `libEGL`/`libGLESv2` with no
+`Metal.framework` loaded, while stock Chrome and Safari render the same content
+correctly on the same machine. `screencapture -x` contains the corruption, so
+the surface is wrong and not the scanout; it is identical with and without
+`-rbgpufbhidpi`, and identical between the 1280x720 HiDPI tier and 2560x1440.
+He asks whether 3gl's "second driver image" fix covers ANGLE's EGL/GLES path or
+only native OpenGL callers.
+
+**The answer is neither, and it is one line of our own code.**
+`src/common/rb_glcave.h` has `RB_GLCAVE_DARWIN 25`, and `rbgpu_glc_try()`
+sets **`glc_on 3`** and returns on any other Darwin major — *"An OS with no row
+gets no patch and says so, exactly as the Metal table does. A near miss is
+worth nothing here: every offset in the row is inside one build of one
+bundle."* His machine is **macOS 15.8.2 = Darwin 24**. So the GL cave has
+never executed on it, for any GL client of any kind.
+
+That makes his ANGLE-versus-Metal table good evidence of *something* and no
+evidence about the fix: rule 39, a measurement taken in a configuration that
+does not exhibit the mechanism cannot locate it. The configuration he is in is
+"the fix is disabled", and in that configuration every GL client is expected to
+corrupt — which is exactly what 3gl measured on this board before the cave
+existed.
+
+**And the mechanism is image-based, not API-based**, which answers the question
+he actually asked. `rbgpu_glc_image_base()` walks the client's **own dyld image
+list** and matches on the path containing `AMDRadeonX6000GLDriver`; nothing
+anywhere keys on CGL, EGL, GLES or an entry point. So anything that loads that
+image is in scope, ANGLE included. The only ANGLE configuration that would be
+out of scope is ANGLE on its **Metal** backend, which is a different image
+entirely — and his own `lsof` evidence (no `Metal.framework` in either GPU
+process) argues against that, which makes his report more useful than he
+presents it as.
+
+### The instrument he asked for already exists, and `glc_found` is the answer
+
+He asks for "an attribute or log line that tells us which driver image a given
+GL client ended up on, so I can confirm the two apps land on the unfixed one
+instead of inferring it from lsof". `RBGPUDiag` publishes
+**`glc_on`** (1 armed, 2 token off, 3 **OS has no row**),
+**`glc_calls`** (clients looked at), **`glc_found`** (clients whose own image
+list contains the GL driver — read out of the process, not inferred),
+**`glc_base`**, **`glc_patched`**, **`glc_pid`**, and
+`glc_failed`/`glc_moved`/`glc_cave_*`/`glc_det_*` for a refusal. `glc_found`
+is precisely the reading he wants, and on his OS it is unreachable because
+`glc_on 3` returns first — a gating gap, not a publish gap, and worth saying
+because the two look identical from outside (rule 14).
+
+### `tools/glrow.py` — derive the row for another OS, with this machine as the control
+
+Widening the gate needs two file offsets inside **that** OS's bundle, so the
+tool derives them: the chooser's 15-byte prologue found by **exactly one**
+occurrence in `__text` (the signature is read out of `rb_glcave.h` itself, so
+the script cannot drift from the header it feeds), and a 16-aligned zero run in
+`__TEXT,__const` long enough for the 130-byte cave.
+
+**The control is this machine.** Run with no argument it must reproduce
+`0x168b4` and `0xec3d0` exactly, and it does — printed as a self-check that
+says in as many words that a method which cannot rebuild the row known to work
+here has no licence to compute one for another OS. Rule 2 comes along free: if
+the 15 bytes match ours byte for byte then they are the same branch-free,
+non-rip-relative prologue Lilu's copy requires.
+
+### Break-it sweep: three guards fired NOTHING, and that was a result about the data
+
+Five breaks against the real bundle: corrupting the prologue signature fired,
+dropping the 16-alignment fired, and **three fired nothing** — accepting more
+than one prologue occurrence, ignoring the `__text` search bound, and accepting
+a zero run shorter than the cave needs. All three for the same reason: on *this*
+build the prologue occurs exactly once in the whole file and the first aligned
+zero run in `__const` is already long enough, so each guard is protecting
+against a build this board does not have. Rule 48's "a break that fires nothing
+is a RESULT", and the card's own form of it — the same defensive check is
+load-bearing in one decoder and inert in another, and only the data says which.
+
+Rather than leave them untested, `--selftest` builds synthetic Mach-O buffers
+that give all three inputs they can fail on: two prologues, a second occurrence
+outside the bound, a short aligned run before a long one, an unaligned long
+run, a fat header and a non-Mach-O. Eleven assertions, and re-running the same
+five breaks against it **fires all five**.
+
+One assertion was my own error first time: I asserted the chosen cave lands at
+section-relative +64, and it lands at +73, because the 16-alignment is on the
+**file** offset and not the section offset. The property restated is what is
+actually true — the short run is skipped, the result is inside the long run,
+and every byte of the chosen cave is zero.
+
+### What is NOT claimed
+
+Nothing here says a Darwin 24 row would fix his two apps. It says the fix is
+off on his OS, that the reading which would tell him is gated behind that, and
+that the offsets can be derived without guessing. A row for macOS 15 is n=1 on
+a machine this project cannot boot, so the derivation is the part that can be
+made trustworthy here and the row itself stays his measurement.
+
+The userspace wrapper is the one thing he can run today: `tools/glswizzle.c`
+has **no OS gate** and **scans** `__TEXT` for the same 32-byte prologue with an
+exactly-one-occurrence refusal, printing the file offset it finds — so
+`RBGPU_GLSWIZZLE=log` both answers the ANGLE question and hands over the number
+for a row. The honest caveat is that hardened runtime and library validation
+block `DYLD_INSERT_LIBRARIES` in signed CEF/Electron GPU processes, so it may
+never load, and that refusal is information about code signing rather than a
+result about the driver (rule 16).
