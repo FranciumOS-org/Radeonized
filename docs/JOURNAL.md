@@ -73695,3 +73695,45 @@ be careful before publishing anything:
 The next step is a read, not a write: evaluate the three H.264 conditions and
 find what `+0x368` actually is, so a property is published on the right object
 for the right codec, or the idea is dropped on evidence.
+
+## 3gva-b — the H.264 branch is UNREACHABLE on Navi21, so the MM_ idea cannot fix FaceTime
+
+2026-11-22, boot 633, no boots. 3gva left three unevaluated conditions on the
+`IOGVACodec = "VCE"` block at `0xbdc2291`, the only place AMDRadeonX6000
+advertises **H.264** encode. One of the three settles it with no hardware.
+
+The third condition is `cmpl $0x5, 0x1eb4(%rbx)` at `0xbdc2285`. That field is
+written by `setDeviceType(IOPCIDevice*)`, and
+`AMDRadeonX6000_AMDGraphicsAccelerator::setDeviceType` (`0xbdc6fea`) is five
+instructions long: `movl $0x0, 0x1eb4(%rdi)`, return true. Navi10, Navi12 and
+Navi14 each override it and each also write `$0x0`.
+**`AMDRadeonX6000_AMDNavi21GraphicsAccelerator` does not override it at all** —
+its only members in the whole binary are the metaclass boilerplate, the
+constructors, the destructors, `operator new/delete`, `getMetaClass` and
+`newHWInterface` (14 symbols, listed). So it inherits the base, and `+0x1eb4`
+is 0.
+
+A whole-file sweep of every reference to `0x1eb4` finds exactly four stores,
+all `$0x0`, all in those four `setDeviceType` bodies, plus the `cmpl $0x5`
+itself, two plain loads, and one indexed `0x1eb4(%rax,%r13,4)` pair that is a
+different base and a different array. **Nothing in AMDRadeonX6000 ever writes 5
+to that field.**
+
+So the condition is unreachable for our ASIC class, and with it the whole
+block: `IOGVACodec` and `IOGVAEncoderRestricted` are never published on a
+Navi21 accelerator. That agrees with the name — *VCE* is the pre-VCN encoder
+block, so the branch belongs to older silicon and nobody wired a VCN successor
+to it.
+
+**Consequence for 3gva's candidate:** publishing `MM_EnableHEVCDecode` and
+`MM_EnableHEVCEncode` can only ever unlock the **HEVC** keys. The H.264 keys
+are behind a dead compare. FaceTime's screen share fails in an H.264 realtime
+encoder (3ftp), so **this route cannot fix FaceTime even if it works
+perfectly.** Worth writing down before a boot was spent on it; 3gva listed
+HEVC-vs-H.264 first among its three cautions and this closes it on source.
+
+What survives: the MM_ gap is still the reason there is no hardware **HEVC**
+encoder, and that is a real capability this machine is missing for everything
+that uses HEVC. It is a separate deliverable from FaceTime and should be
+judged as one, against 3gva's two remaining cautions — advertising is not
+working, and nobody has shown `AMDRadeonVADriver2` would load.
