@@ -762,6 +762,12 @@ $(OUT)/animtest: tools/animtest.m | $(OUT)
 	      -framework AppKit -framework QuartzCore -framework CoreVideo \
 	      -framework CoreGraphics -framework CoreFoundation -framework Foundation
 
+vtcaps: $(OUT)/vtcaps
+$(OUT)/vtcaps: tools/vtcaps.m | $(OUT)
+	clang -O2 -Wall -Wextra -fobjc-arc -o $@ $< \
+	      -framework Foundation -framework VideoToolbox -framework CoreMedia \
+	      -framework CoreFoundation
+
 dstream: $(OUT)/RBDisplayStream.app
 $(OUT)/dstream: tools/dstream.m | $(OUT)
 	clang -O2 -Wall -Wextra -Wno-deprecated-declarations -fobjc-arc -o $@ $< \
