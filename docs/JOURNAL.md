@@ -73363,3 +73363,121 @@ permission deliberately to a binary they have inspected, or drop the SCStream
 test in favour of the browser-based comparison the handoff already suggests
 (Meet or Jitsi, which bring their own encoder), which needs no new permission
 at all and discriminates the same way.
+
+## 3ftp — FaceTime's screen share: the buffer is fine, the software encoder is fine, and the one thing missing is ours
+
+2026-11-22, boot 633, no reboots. The sibling session's hypothesis was that
+ScreenCaptureKit frames have no CPU-readable base address on this machine, so
+FaceTime's software H.264 encoder sees `dataBufferPtr 0x0` and fails with
+`BufMgtCompCachePic err = -8969`. It asked for that to be checked from a
+process holding Screen Recording permission, which it could not obtain for an
+unsigned test binary.
+
+### First: which capture path FaceTime actually uses, read off this disk
+
+`/System/Applications/FaceTime.app` links no capture framework at all. The
+capture lives in **`replayd`**, which links `ScreenCaptureKit`, carries
+`SCStream` / `SCContentFilter` / `SCScreenShotSession` symbols and the
+`SLSHWCapture*` family (`hWCaptureDisplayIntoIOSurfaceWithAuditToken:…`), and
+names `com.apple.FaceTime`, `avconferenced` and `sessionExcludeFaceTime`. The
+encode lives in **`avconferenced`**, which links no ScreenCaptureKit and hosts
+AVConference's `VCPRealtimeEncoder`. So FaceTime's screen share is SCK capture
+in one process and a realtime encoder in another, and the SCK question is the
+faithful one.
+
+### And the permission problem did not exist
+
+`tools/dstream.m` has been a ScreenCaptureKit client since 2x9, built into
+**`build/out/RBDisplayStream.app`** and ad-hoc codesigned with the stable
+identifier `com.rembrandtgpu.displaystream` precisely so TCC has something to
+attach a grant to. The system TCC database already lists deliberate
+`kTCCServiceScreenCapture` grants for `build/out/dstream`, `build/out/fbperf`
+and `build/out/framepump`. Nothing had to be routed around a privacy control;
+the probe went into the tool that already holds the grant the user gave it.
+
+### `dstream --probe N`
+
+Locks the first N complete frames and asks the two questions separately, each
+with its own control in the same run:
+
+- **the buffer** — `CVPixelBufferGetIOSurface`, `CVPixelBufferLockBaseAddress`,
+  `CVPixelBufferGetBaseAddress`, bytes per row, and a scatter of sampled bytes
+  so "maps but is black" is a different reading from "will not map"; and
+- **the encoder** — the SCK frame and a buffer the tool allocates itself
+  (IOSurface-backed, same geometry and format, written through its own base
+  address) pushed through the **same** `VTCompressionSession` in realtime mode.
+
+A hardware-**required** session is created first, so "no hardware H.264" is a
+code rather than an inference (rule 14).
+
+### The reading, three frames, boot 633
+
+```
+geometry:   1920x1080  format 'BGRA'  planes 0
+IOSurface:  present
+lock(ReadOnly): 0 (success)
+base address:   0x10d0fb000
+content:        17487 of 17568 sampled bytes non-zero  (has picture)
+H.264 session, hardware REQUIRED: err -12908
+H.264 session, software forced:   err 0
+encode OUR buffer: encodeFrame err 0, 1 frame out
+encode SCK buffer: encodeFrame err 0, 1 frame out
+```
+
+**The hypothesis is dead.** SCK frames map, carry a picture, and the realtime
+software H.264 encoder takes them. That agrees with the control the sibling
+session already had and had not applied to its own hypothesis — `screencapture
+-v -V 3` produced correct software-encoded H.264 of the whole screen on this
+machine.
+
+**Geometry is not the variable either.** FaceTime reported 1920x**1088** (1080
+padded to a macroblock multiple). Five software sessions, all `create 0 /
+encode err 0 / 1 frame out`: 1080 into 1080, 1088 into 1088, a 1088 session fed
+a 1080 buffer, the reverse mismatch, and 1088 without realtime.
+
+So the failure is specific to **`VCPRealtimeEncoder` inside AVConference**,
+which is not VideoToolbox's `Apple H.264 (SW)` and is not reachable from here.
+
+### What is ours, and it is a precise registry reading
+
+`VTCopyVideoEncoderList` returns **15 encoders and not one with
+`IsHardwareAccelerated`** — `kVTCouldNotFindVideoEncoderErr` (-12908) is
+attributed, not guessed. And the kernel says why, with its own controls in the
+same sample:
+
+```
+AMDRadeonX6000_AMDGFX10PM4Engine     1      AMDRadeonX6000_AMDAccelChannel   63
+AMDRadeonX6000_AMDGFX10SDMAEngine    1      AMDRadeonX6000_AMDAccelVidMemory 1700
+AMDRadeonX6000_AMDDMAHWEngine        1
+AMDVCN3HWEngine                      0
+AMDRadeonX6000_AMDAccelVCNContext    0
+AMDRadeonX6000_AMDAccelVideoContext  0
+```
+
+Read out of `IOKitDiagnostics`' `Classes` map, so a 0 is "registered and never
+instantiated", not "absent" (rule 14). Every other engine family this
+accelerator owns comes up; **the video engine is the only one that comes up
+zero**, which is the positive-control shape this line keeps asking for. That
+matches the journal's earlier note that VCN sits at engine slots `0x3B0[8..9]`
+in the array we already decode for PM4 and SDMA, and it is the first reading
+that distinguishes "VCN firmware may not be in the GC autoload bundle"
+(12963's hypothesis) from anything else.
+
+**So the fix is not in FaceTime's pipeline.** With a hardware encoder present,
+AVConference would take the hardware path and never reach the software one that
+fails. Without it, debugging `VCPRealtimeEncoder` is debugging Apple's fallback
+on a path that exists only because of our gap. VCN encode is the next
+candidate, and it is ours.
+
+### Instrument notes
+
+Three break-it checks on the new guards, all firing: a forced NULL base
+address, a content sampler that sees only zeroes, and a forced SCK encode
+failure (which correctly flips the verdict to *"ours encoded, SCK's did not —
+THE BUFFER IS THE VARIABLE"*). **The first break found a defect in my own
+verdict**: it printed `base address 0x0 <-- the reported symptom` and then
+`>>> both encoded — neither is broken`, a contradiction left for the reader to
+resolve, because the verdict ranked the encode result above the buffer reading
+when the buffer is the thing being chased. The verdict now reports an
+unmappable buffer, and an all-black mapped one, ahead of either encode line,
+and the break was re-run against the fix.

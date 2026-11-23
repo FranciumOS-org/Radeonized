@@ -766,7 +766,8 @@ dstream: $(OUT)/RBDisplayStream.app
 $(OUT)/dstream: tools/dstream.m | $(OUT)
 	clang -O2 -Wall -Wextra -Wno-deprecated-declarations -fobjc-arc -o $@ $< \
 	      -framework CoreGraphics -framework CoreFoundation -framework IOSurface \
-	      -framework Foundation -framework ScreenCaptureKit -framework CoreMedia
+	      -framework Foundation -framework ScreenCaptureKit -framework CoreMedia \
+	      -framework CoreVideo -framework VideoToolbox
 $(OUT)/RBDisplayStream.app: $(OUT)/dstream tools/dstream-Info.plist | $(OUT)
 	rm -rf $@
 	mkdir -p $@/Contents/MacOS

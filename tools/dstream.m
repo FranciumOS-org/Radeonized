@@ -42,6 +42,8 @@
 #import <Foundation/Foundation.h>
 #import <ScreenCaptureKit/ScreenCaptureKit.h>
 #import <CoreMedia/CoreMedia.h>
+#import <CoreVideo/CoreVideo.h>
+#import <VideoToolbox/VideoToolbox.h>
 #include <CoreGraphics/CoreGraphics.h>
 #include <IOSurface/IOSurfaceRef.h>
 #include <dispatch/dispatch.h>
@@ -93,6 +95,253 @@ static long fbkey(const char *key)
     return v;
 }
 
+
+/* ------------------------------------------------------------------ 3ftp
+ * --probe: is an SCK frame CPU-readable, and does a realtime H.264 encoder
+ * take it?
+ *
+ * FaceTime's screen share is two processes: replayd holds the SCK/SLSHWCapture
+ * stream (it links ScreenCaptureKit and names com.apple.FaceTime and
+ * avconferenced), and avconferenced encodes with VCPRealtimeEncoder. A sibling
+ * session measured that encode failing - dataBufferPtr 0x0 on the first frame,
+ * then BufMgtCompCachePic err -8969 - and proposed that SCK's buffers have no
+ * CPU-readable base address on this machine.
+ *
+ * That hypothesis has a control it was not tested against: screencapture -v
+ * produced correct SOFTWARE-encoded H.264 of the whole screen here. So this
+ * mode asks the two questions separately, in one run, each with its own
+ * control:
+ *
+ *   1. the BUFFER - lock an SCK frame and read its base address, against a
+ *      CVPixelBuffer this tool allocates itself with IOSurface backing, same
+ *      size and format, filled with a known pattern. If ours maps and SCK's
+ *      does not, the buffer is the variable. If both map, it is not.
+ *   2. the ENCODER - push both through the SAME VTCompressionSession in
+ *      realtime mode. A session that takes our buffer and refuses SCK's blames
+ *      the buffer; one that refuses both blames the encoder; one that takes
+ *      both says the fault is in neither and lives in FaceTime's own pipeline.
+ *
+ * It also creates a hardware-REQUIRED session first, because "no hardware
+ * H.264 encode" is the finding everything else here is downstream of, and a
+ * reading is worth more than an inference (rule 14: the refusal is a code).
+ * Nothing is written to disk; encoded bytes are counted and dropped.
+ */
+
+static int      gProbeWant;          /* frames still to probe, 0 = off */
+static int      gProbeRan;           /* frames actually probed */
+static VTCompressionSessionRef gEncSw;
+static int      gEncSwErr = -999999; /* -999999 = not attempted yet */
+static int      gEncHwErr = -999999;
+static int      gEncHwTried;
+static volatile int gCbCalls, gCbOkay;
+static volatile long gCbBytes;
+
+static void probe_cb(void *outRef, void *srcRef, OSStatus st,
+                     VTEncodeInfoFlags flags, CMSampleBufferRef sb)
+{
+    (void)outRef; (void)srcRef; (void)flags;
+    gCbCalls++;
+    if (st == noErr && sb) {
+        gCbOkay++;
+        CMBlockBufferRef bb = CMSampleBufferGetDataBuffer(sb);
+        if (bb) { gCbBytes += (long)CMBlockBufferGetDataLength(bb); }
+    }
+}
+
+/* Builds the two sessions once, at the first probed frame, so they are sized
+ * from the real buffer rather than from what we asked SCK for. */
+static void probe_encoders(size_t w, size_t h)
+{
+    if (gEncSwErr != -999999) { return; }
+
+    /* Hardware first, and REQUIRED, so the answer is a code and not a guess
+     * about which encoder got picked. */
+    const void *hwk[1] = { kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder };
+    const void *hwv[1] = { kCFBooleanTrue };
+    CFDictionaryRef hwSpec = CFDictionaryCreate(NULL, hwk, hwv, 1,
+                                 &kCFTypeDictionaryKeyCallBacks,
+                                 &kCFTypeDictionaryValueCallBacks);
+    VTCompressionSessionRef hw = NULL;
+    gEncHwErr = (int)VTCompressionSessionCreate(NULL, (int32_t)w, (int32_t)h,
+                        kCMVideoCodecType_H264, hwSpec, NULL, NULL,
+                        probe_cb, NULL, &hw);
+    gEncHwTried = 1;
+    if (hw) { VTCompressionSessionInvalidate(hw); CFRelease(hw); }
+    CFRelease(hwSpec);
+
+    /* Then the one FaceTime falls back to: software, realtime. */
+    const void *swk[1] = { kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder };
+    const void *swv[1] = { kCFBooleanFalse };
+    CFDictionaryRef swSpec = CFDictionaryCreate(NULL, swk, swv, 1,
+                                 &kCFTypeDictionaryKeyCallBacks,
+                                 &kCFTypeDictionaryValueCallBacks);
+    gEncSwErr = (int)VTCompressionSessionCreate(NULL, (int32_t)w, (int32_t)h,
+                        kCMVideoCodecType_H264, swSpec, NULL, NULL,
+                        probe_cb, NULL, &gEncSw);
+    CFRelease(swSpec);
+    if (gEncSw) {
+        VTSessionSetProperty(gEncSw, kVTCompressionPropertyKey_RealTime, kCFBooleanTrue);
+        VTSessionSetProperty(gEncSw, kVTCompressionPropertyKey_AllowFrameReordering, kCFBooleanFalse);
+        VTSessionSetProperty(gEncSw, kVTCompressionPropertyKey_ProfileLevel,
+                             kVTProfileLevel_H264_Main_AutoLevel);
+    }
+}
+
+/* The in-run control: our own IOSurface-backed buffer, same geometry and
+ * format, with a pattern written through the base address we are asking SCK
+ * for. If this one cannot be written, the probe itself is broken (rule 16) and
+ * says so rather than blaming SCK. */
+static CVPixelBufferRef probe_control_buffer(size_t w, size_t h, OSType fmt)
+{
+    const void *k[1] = { kCVPixelBufferIOSurfacePropertiesKey };
+    CFDictionaryRef empty = CFDictionaryCreate(NULL, NULL, NULL, 0,
+                                &kCFTypeDictionaryKeyCallBacks,
+                                &kCFTypeDictionaryValueCallBacks);
+    const void *v[1] = { empty };
+    CFDictionaryRef attrs = CFDictionaryCreate(NULL, k, v, 1,
+                                &kCFTypeDictionaryKeyCallBacks,
+                                &kCFTypeDictionaryValueCallBacks);
+    CVPixelBufferRef pb = NULL;
+    CVReturn cr = CVPixelBufferCreate(NULL, w, h, fmt, attrs, &pb);
+    CFRelease(attrs); CFRelease(empty);
+    if (cr != kCVReturnSuccess || !pb) { return NULL; }
+
+    if (CVPixelBufferLockBaseAddress(pb, 0) == kCVReturnSuccess) {
+        uint8_t *p = CVPixelBufferGetBaseAddress(pb);
+        size_t bpr = CVPixelBufferGetBytesPerRow(pb);
+        if (p) { for (size_t y = 0; y < h; y++) { memset(p + y * bpr, 0x40 + (int)(y & 0x3f), bpr); } }
+        CVPixelBufferUnlockBaseAddress(pb, 0);
+    }
+    return pb;
+}
+
+/* Counts non-zero bytes in a few scattered rows. A frame that locks fine and
+ * is all zeroes is black, which is a different finding from one that will not
+ * map at all - and black is the symptom being chased. */
+static void probe_content(const uint8_t *p, size_t bpr, size_t w, size_t h,
+                          long *nonzero, long *looked)
+{
+    *nonzero = 0; *looked = 0;
+    if (!p) { return; }
+    for (size_t i = 0; i < 16; i++) {
+        size_t y = (h * i) / 16;
+        const uint8_t *row = p + y * bpr;
+        size_t n = w * 4 < bpr ? w * 4 : bpr;
+        for (size_t x = 0; x < n; x += 7) { (*looked)++; if (row[x]) { (*nonzero)++; } }
+    }
+}
+
+static void probe_frame(CMSampleBufferRef sb, long frameStatus)
+{
+    gProbeRan++;
+    int idx = gProbeRan;
+    printf("\n  --- probe frame %d (SCFrameStatus %ld) ---\n", idx, frameStatus);
+
+    CVImageBufferRef ib = CMSampleBufferGetImageBuffer(sb);
+    if (!ib) {
+        printf("    image buffer:      NULL  <-- no CVPixelBuffer on this sample\n");
+        fflush(stdout);
+        return;
+    }
+    CVPixelBufferRef pb = (CVPixelBufferRef)ib;
+    size_t w = CVPixelBufferGetWidth(pb), h = CVPixelBufferGetHeight(pb);
+    OSType fmt = CVPixelBufferGetPixelFormatType(pb);
+    IOSurfaceRef surf = CVPixelBufferGetIOSurface(pb);
+    size_t planes = CVPixelBufferGetPlaneCount(pb);
+    char f4[5] = { (char)(fmt >> 24), (char)(fmt >> 16), (char)(fmt >> 8), (char)fmt, 0 };
+    for (int i = 0; i < 4; i++) { if (f4[i] < 32 || f4[i] > 126) { f4[i] = '.'; } }
+
+    printf("    geometry:          %zux%zu  format '%s' (0x%08x)  planes %zu\n",
+           w, h, f4, (unsigned)fmt, planes);
+    printf("    IOSurface:         %s\n", surf ? "present" : "NULL");
+
+    CVReturn lk = CVPixelBufferLockBaseAddress(pb, kCVPixelBufferLock_ReadOnly);
+    const uint8_t *base = NULL;
+    int allBlack = 0;
+    size_t bpr = 0;
+    if (lk == kCVReturnSuccess) {
+        base = CVPixelBufferGetBaseAddress(pb);
+        bpr = CVPixelBufferGetBytesPerRow(pb);
+    }
+    printf("    lock(ReadOnly):    %d %s\n", (int)lk,
+           lk == kCVReturnSuccess ? "(success)" : "<-- LOCK REFUSED");
+    printf("    base address:      %p %s\n", (const void *)base,
+           base ? "" : " <-- NULL, which is the reported FaceTime symptom");
+    printf("    bytes per row:     %zu\n", bpr);
+
+    if (base) {
+        long nz = 0, looked = 0;
+        probe_content(base, bpr, w, h, &nz, &looked);
+        printf("    content:           %ld of %ld sampled bytes non-zero  %s\n",
+               nz, looked, (allBlack = (nz == 0)) ? "<-- ALL BLACK" : "(has picture)");
+    }
+    if (lk == kCVReturnSuccess) {
+        CVPixelBufferUnlockBaseAddress(pb, kCVPixelBufferLock_ReadOnly);
+    }
+
+    probe_encoders(w, h);
+    if (idx == 1) {
+        printf("    H.264 session, hardware REQUIRED: err %d %s\n", gEncHwErr,
+               gEncHwErr == 0 ? "(created - hardware encode EXISTS)"
+                              : "<-- no hardware H.264 encoder on this machine");
+        printf("    H.264 session, software forced:   err %d %s\n", gEncSwErr,
+               gEncSwErr == 0 ? "(created)" : "<-- could not create either");
+    }
+
+    if (!gEncSw) { fflush(stdout); return; }
+
+    /* The control goes through the same session, immediately before the real
+     * frame, so the two differ in the buffer and in nothing else. */
+    CVPixelBufferRef ctl = probe_control_buffer(w, h, fmt);
+    int c0 = gCbOkay;
+    OSStatus ce = -1;
+    if (ctl) {
+        ce = VTCompressionSessionEncodeFrame(gEncSw, ctl,
+                CMTimeMake(idx * 2, 60), kCMTimeInvalid, NULL, NULL, NULL);
+        VTCompressionSessionCompleteFrames(gEncSw, kCMTimeInvalid);
+    }
+    int cOut = gCbOkay - c0;
+    printf("    encode OUR buffer: %s  encodeFrame err %d, %d frame(s) out\n",
+           ctl ? "control allocated" : "CONTROL ALLOCATION FAILED",
+           (int)ce, cOut);
+
+    int s0 = gCbOkay;
+    OSStatus se = VTCompressionSessionEncodeFrame(gEncSw, pb,
+                      CMTimeMake(idx * 2 + 1, 60), kCMTimeInvalid, NULL, NULL, NULL);
+    VTCompressionSessionCompleteFrames(gEncSw, kCMTimeInvalid);
+    int sOut = gCbOkay - s0;
+    printf("    encode SCK buffer: encodeFrame err %d, %d frame(s) out\n",
+           (int)se, sOut);
+
+    if (ctl) { CVPixelBufferRelease(ctl); }
+
+    if (idx == 1) {
+        const char *verdict;
+        /* The break-it sweep caught this: a NULL base address printed beside
+         * ">>> both encoded" is a contradiction a reader has to resolve by
+         * hand. The buffer reading is the one being chased, so it outranks the
+         * encode result, and an all-black frame that encodes fine is still the
+         * symptom. */
+        if (lk != kCVReturnSuccess || !base) {
+            verdict = "the SCK buffer would NOT MAP - this is the reported "
+                      "symptom, and the encode lines below it say nothing about it";
+        } else if (allBlack) {
+            verdict = "the SCK buffer maps but is ALL BLACK - capture, not encode";
+        } else if (!ctl || (ce != 0 && se != 0 && cOut == 0 && sOut == 0)) {
+            verdict = "BOTH refused - the encoder is the variable, not the buffer";
+        } else if (cOut > 0 && sOut == 0) {
+            verdict = "ours encoded, SCK's did not - THE BUFFER IS THE VARIABLE";
+        } else if (cOut > 0 && sOut > 0) {
+            verdict = "both encoded - neither the buffer nor the software encoder "
+                      "is broken here";
+        } else {
+            verdict = "mixed - read the three lines above, do not take this one";
+        }
+        printf("    >>> %s\n", verdict);
+    }
+    fflush(stdout);
+}
+
 /* SCK sink: counts and discards. Nothing is retained, copied or written. */
 @interface RBSink : NSObject <SCStreamOutput, SCStreamDelegate>
 @end
@@ -114,6 +363,9 @@ static long fbkey(const char *key)
     }
     if (st == SCFrameStatusIdle) { gIdle++; } else if (st == SCFrameStatusBlank) { gBlank++; }
     else { gComplete++; }
+    /* 3ftp: probe only COMPLETE frames - an idle frame carries no new surface,
+     * so a null base address on one would say nothing. */
+    if (gProbeWant > 0 && st != SCFrameStatusIdle) { gProbeWant--; probe_frame(sb, st); }
 }
 - (void)stream:(SCStream *)s didStopWithError:(NSError *)e
 {
@@ -215,6 +467,10 @@ int main(int argc, char **argv)
         } else if (!strcmp(argv[i], "--fps") && i + 1 < argc) {
             fps = atof(argv[++i]);
             if (fps < 1.0 || fps > 240.0) { fps = 144.0; }
+        } else if (!strcmp(argv[i], "--probe") && i + 1 < argc) {
+            gProbeWant = atoi(argv[++i]);
+            if (gProbeWant < 1) { gProbeWant = 1; }
+            if (gProbeWant > 32) { gProbeWant = 32; }
         } else if (!strcmp(argv[i], "--cgs")) {
             useCgs = 1;
         } else if (!strcmp(argv[i], "--quiet")) {
@@ -227,7 +483,12 @@ int main(int argc, char **argv)
                 "  and RBFBAmtrSets/s together.\n"
                 "    default  ScreenCaptureKit, demanding --fps frames/s (144)\n"
                 "    --cgs    CGDisplayStream instead: it only asks on CHANGE, so\n"
-                "             on an idle desktop it stalls at about 1/s (2xc)\n",
+                "             on an idle desktop it stalls at about 1/s (2xc)\n"
+                "    --probe N  (3ftp) lock the first N complete frames, read the\n"
+                "             base address, and push each through a realtime H.264\n"
+                "             encoder beside a buffer this tool allocates itself.\n"
+                "             Answers whether FaceTime's screen share fails on the\n"
+                "             BUFFER or on the ENCODER. Implies --cgs off.\n",
                 argv[0]);
             return 2;
         }
