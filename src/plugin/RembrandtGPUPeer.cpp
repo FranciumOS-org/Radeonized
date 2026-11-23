@@ -1111,6 +1111,85 @@ bool RembrandtGPUPeer::start(IOService *provider) {
                   "returns false instead of panicking)");
     }
 
+    // 3gvc: HARDWARE HEVC ENCODE. Two OSBoolean properties, opt-in.
+    //
+    // AMDRadeonX6000_AMDGraphicsAccelerator::configureDevice (0xbdc4163) does,
+    // on the service at accel+0x368:
+    //     dec = OSDynamicCast(OSBoolean, svc->getProperty("MM_EnableHEVCDecode"))
+    //     enc = OSDynamicCast(OSBoolean, svc->getProperty("MM_EnableHEVCEncode"))
+    //     if ((dec->getValue() & enc->getValue()) != 1) goto skip;
+    //     setProperty("IOGVAHEVCDecode", "1");  setProperty("IOGVAHEVCEncode", "1");
+    //     ... VTMaxEncodeLevel, VTRating, VTQualityRating,
+    //         VTSupportedProfileArray, IOGVAHEVCEncodeCapabilities
+    // and accel+0x368 is THE IOPCIDevICE, identified by its own use at
+    // 0xbdc282b/0xbdc2855: configRead16(2) = device id, configRead16(0x2e) =
+    // subsystem id. That is this peer's provider, so this is the right node.
+    //
+    // Measured absent before this existed (3gva): MM_EnableHEVCDecode and
+    // MM_EnableHEVCEncode are 0 hits in ALL of `ioreg -l`, and no IOGVA* key
+    // is on the accelerator - while ATY,intrev and ATY,cbits, which the SAME
+    // function publishes earlier, ARE there. So the function ran, reached the
+    // gate, read nothing, and skipped. They are plist data on a real Mac:
+    // AMD9500Controller.kext carries them per device inside aty_properties,
+    // and nothing in this tree supplies them for 0x16811002.
+    //
+    // WHY OPT-IN. Publishing a capability is advertising, not working (rule
+    // 20). Nothing has shown VCN encode functions here - only that nothing
+    // currently asks it to - and a hardware encoder that registers and then
+    // fails is WORSE than none, because the software fallback stops being
+    // taken. H.264 is not reachable at all on this ASIC class (3gva-b:
+    // configureDevice's H.264 branch tests accel+0x1eb4 == 5, and
+    // setDeviceType writes 0 unconditionally with no Navi21 override), so
+    // HEVC is the only lever that exists.
+    //
+    // What it is FOR: AVConference gates FaceTime's screen share on a
+    // hardware HEVC encoder - `vcpSupportsHEVCEncoder`, consumed by
+    // -[VCVideoRuleCollectionsScreenSecondaryMac setupHEVCRules]. Every link
+    // from here to that is NAMED and only this one is measured (rule 45).
+    if (checkKernelArgument("-rbgpuhevc")) {
+        // The pre-state is part of the result: a future OS that supplies these
+        // itself must be distinguishable from our write (rule 20 - publish
+        // `changed` beside `applied`), and "absent" must not read the same as
+        // "present and false" (rule 14), so each gets its own bit.
+        unsigned was = 0;
+        if (auto *o = pciDevice->getProperty("MM_EnableHEVCDecode")) {
+            was |= 1u;
+            if (auto *b = OSDynamicCast(OSBoolean, o)) { if (b->isTrue()) { was |= 4u; } }
+        }
+        if (auto *o = pciDevice->getProperty("MM_EnableHEVCEncode")) {
+            was |= 2u;
+            if (auto *b = OSDynamicCast(OSBoolean, o)) { if (b->isTrue()) { was |= 8u; } }
+        }
+
+        pciDevice->setProperty("MM_EnableHEVCDecode", kOSBooleanTrue);
+        pciDevice->setProperty("MM_EnableHEVCEncode", kOSBooleanTrue);
+
+        // Read back through the SAME call configureDevice makes, including the
+        // OSDynamicCast, because a property that is present but not an
+        // OSBoolean fails that cast and the gate would read it as absent.
+        unsigned rb = 0;
+        if (auto *b = OSDynamicCast(OSBoolean,
+                          pciDevice->getProperty("MM_EnableHEVCDecode"))) {
+            if (b->isTrue()) { rb |= 1u; }
+        }
+        if (auto *b = OSDynamicCast(OSBoolean,
+                          pciDevice->getProperty("MM_EnableHEVCEncode"))) {
+            if (b->isTrue()) { rb |= 2u; }
+        }
+
+        rbgpu_diag_set_num("hevc_armed", 1);
+        rbgpu_diag_set_num("hevc_was", was);
+        rbgpu_diag_set_num("hevc_rb", rb);
+        // The gate's own arithmetic, so the diag answers the question the
+        // driver asks rather than a weaker one it implies.
+        rbgpu_diag_set_num("hevc_gate", (rb == 3u) ? 1 : 0);
+        rbgpu_log("3gvc: -rbgpuhevc -> MM_EnableHEVCDecode/Encode on the "
+                  "IOPCIDevice; was 0x%x, reads back 0x%x, gate %s",
+                  was, rb, rb == 3u ? "PASSES" : "STILL FAILS");
+    } else {
+        rbgpu_diag_set_num("hevc_armed", 0);
+    }
+
     registerService();
     pciDevice->registerService();
 

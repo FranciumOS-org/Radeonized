@@ -1013,6 +1013,16 @@ boot stock to be a rescue (rule 21).
 
 **Opt-in, each for a named reason** (details in the journal under the tag):
 `-rbgpuosforce` (arms the default table on an unmeasured OS),
+**`-rbgpuhevc`** (hardware HEVC encode, 3gvc — sets `MM_EnableHEVCDecode`
+and `MM_EnableHEVCEncode` as OSBooleans on the **IOPCIDevice**, which is
+`accel+0x368`, the service `configureDevice` reads them from before it will
+publish `IOGVAHEVCEncode`. Measured absent: 0 hits in all of `ioreg -l`, with
+`ATY,intrev` from the same function present as the control. **Opt-in because
+advertising is not working** — nothing shows VCN encode functions here, and a
+hardware encoder that registers and then fails is worse than none. H.264 is
+unreachable on this ASIC class, so HEVC is the only lever. Read `hevc_armed` /
+`hevc_was` / `hevc_rb` / `hevc_gate`, then check `IOGVAHEVCEncode` on the
+accelerator — that, not our readback, is the verdict),
 `-rbgpufbmodes` (a second display mode; mutually exclusive with
 `-rbgpufbdrr`),
 **`-rbgpufbnative`** (the frame clock's INITIAL period, derived — #8 / 3iss-b.
