@@ -73823,3 +73823,43 @@ It does settle the user's question. **Hardware H.264 is unreachable on this
 ASIC class (3gva-b, unconditional), so HEVC is not merely the better lever —
 it is the only one that exists.** Everything else on the FaceTime path is
 Apple's code failing in a fallback that exists because of our gap.
+
+## 3gvd — the RECEIVE side is the same gap, and it is the half the user can see
+
+2026-11-22, boot 633 (pre-install), no boots. The user reported watching a
+friend's FaceTime screen share on this Mac: unwatchable, "like 144p",
+everything blending together. That is the **decode** path, which 3ftp-3gvc had
+not looked at at all — every measurement so far was about encoding our own
+screen.
+
+`VTIsHardwareDecodeSupported` on this machine:
+
+```
+H.264  no      HEVC  no      VP9  no      AV1  no
+```
+
+**Zero hardware decode of any codec**, which is the same shape as the encode
+finding and the same cause: `configureDevice` publishes `IOGVAHEVCDecode` and
+`IOGVAHEVCEncode` from the *same* gate, so both halves of `MM_Enable*` being
+absent removes decode and encode together. The four codecs reading `no`
+together is itself the control — a per-codec gap would not be uniform.
+
+And `AVConference` asks for it by name:
+`-[VCModeSpecificHardwareSettings vcpSupportsHEVCDecoder]`, the sibling of the
+`vcpSupportsHEVCEncoder` 3gvb found. A receiver advertises its capabilities and
+the **sender** encodes to match, so a Mac reporting no hardware decode is told
+to expect a stream a software decoder can survive — low resolution, low
+bitrate, heavy quantisation. That is exactly the reported symptom, and it is
+the sender's correct response to what we currently claim.
+
+**So `-rbgpuhevc` (3gvc) has two payoffs, not one**, and the decode half is the
+one with a visible test that needs no second party's screen share: whether
+`VTIsHardwareDecodeSupported` flips to YES. That single call is now the first
+thing to read after the boot, ahead of the encoder list, because it is one bool
+and it is on the path the user actually complained about.
+
+Not claimed: that the quality loss is *entirely* this. Bandwidth, the sender's
+own encoder and the call's negotiated ceiling are all untested here, and
+nothing has yet shown that publishing the booleans makes
+`VTIsHardwareDecodeSupported` return YES — that is link 4 of 3gvb's chain and
+still unmeasured.
