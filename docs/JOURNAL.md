@@ -73737,3 +73737,89 @@ encoder, and that is a real capability this machine is missing for everything
 that uses HEVC. It is a separate deliverable from FaceTime and should be
 judged as one, against 3gva's two remaining cautions — advertising is not
 working, and nobody has shown `AMDRadeonVADriver2` would load.
+
+## 3gvb — HEVC is the only lever that reaches FaceTime, and every link of the chain is now named
+
+2026-11-22, boot 633, no boots. Two questions: is hardware HEVC worth pursuing,
+and is there anything at all that could make FaceTime's screen share show a
+picture. They turn out to be the same question.
+
+### First, the buffer hypothesis is closed in FaceTime's own pixel format
+
+3ftp probed SCK frames as BGRA. FaceTime's encoder takes biplanar YCbCr, and a
+buffer that maps in one format says nothing about the other — different plane
+count, different allocation path (rule 39). `dstream --fmt` now sets the
+stream's pixel format, and the probe reports **every plane's** base address:
+
+```
+420v  planes 2  IOSurface present  lock 0  plane 0 0x10bcb5000 bpr 1920
+                                           plane 1 0x10beaf400 bpr 1920
+      content 4400 of 4400 non-zero   encode SCK buffer err 0, 1 frame out
+420f  planes 2  both planes mapped    content 4372 of 4400   encode err 0
+BGRA  planes 0  content 17489/17568   encode err 0
+```
+
+All three map, carry a picture and encode. The sibling session's hypothesis is
+now dead in the exact format its own failure was reported in.
+
+### Why the software path fails and cannot be nudged
+
+`EnableLowLatencyRateControl` — what a realtime conferencing encoder wants —
+returns **-12900 `kVTPropertyNotSupportedErr`** on the software encoder, for
+**both** H.264 and HEVC. Hardware-required session creation returns **-12908**
+for both. So low-latency rate control is a hardware-only feature on this
+machine and there is no software knob that turns it on. Software realtime
+sessions themselves create and encode fine in both codecs, which is the control
+that makes the -12900 a property refusal rather than a broken test.
+
+### AVConference asks a question we can answer
+
+`AVConference` (cache-resident, 11 281 592 bytes, dumped via `dsc.py macho`)
+contains a log line that names the whole gate:
+
+```
+%@: supportHEVC[%d] vcpSupportsHEVCEncoder[%d] screenSize[%dx%d]
+    deviceClass[%ld] VCHardwareVideoEncoderType[%ld] useSoftFramerateSwitching[%d]
+```
+
+with `-[VCModeSpecificHardwareSettings vcpSupportsHEVCEncoder]` as the asker,
+and **`-[VCVideoRuleCollectionsScreenSecondaryMac setupHEVCRules]`** as the
+consumer — `ScreenSecondary` being the screen-share stream group, distinct from
+the `ScreenAirplay*` collections beside it. 112 `HEVC` strings against 125
+`H264`, so HEVC is not vestigial here.
+
+**So FaceTime's screen share has an HEVC path, and it is gated on a hardware
+HEVC encoder existing.** That is the first thing in this line that connects the
+encoder gap to the black screen by a named mechanism rather than by inference.
+
+### The chain, every link named, none measured past the first
+
+```
+MM_EnableHEVCDecode + MM_EnableHEVCEncode   (3gva: absent, 0 in all of ioreg)
+  -> configureDevice publishes IOGVAHEVCEncode + VT capability dicts
+  -> AppleGVA offers a hardware HEVC encoder (its machine gate already passes,
+     board-id Mac-5F9802EFE386AA28, hwe true)
+  -> VTCopyVideoEncoderList gains a hardware entry (today: 15, none hardware)
+  -> vcpSupportsHEVCEncoder true
+  -> VCVideoRuleCollectionsScreenSecondaryMac setupHEVCRules
+  -> screen share negotiates HEVC instead of the H.264 realtime path that fails
+```
+
+**Link 1 is measured. Links 2-7 are named and unmeasured**, and the chain is
+only as good as its weakest, which is rule 45 in full force: a chain of named
+links is not a verified chain. In particular nothing here shows VCN encode
+*works*, only that nothing currently asks it to, and 3gva's caution stands
+unchanged — a registered-but-failing hardware encoder is worse than none,
+because the software fallback stops being taken.
+
+### What this does and does not authorise
+
+It does **not** authorise publishing the two booleans. Before that is worth a
+boot, two reads remain: what the service at `accel+0x368` actually is, so a
+property is published on the right object, and whether `AMDRadeonVADriver2`
+will load and what it demands. Both are static.
+
+It does settle the user's question. **Hardware H.264 is unreachable on this
+ASIC class (3gva-b, unconditional), so HEVC is not merely the better lever —
+it is the only one that exists.** Everything else on the FaceTime path is
+Apple's code failing in a fallback that exists because of our gap.

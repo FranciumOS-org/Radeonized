@@ -127,6 +127,7 @@ static long fbkey(const char *key)
  * Nothing is written to disk; encoded bytes are counted and dropped.
  */
 
+static unsigned gPixFmt = 'BGRA';
 static int      gProbeWant;          /* frames still to probe, 0 = off */
 static int      gProbeRan;           /* frames actually probed */
 static VTCompressionSessionRef gEncSw;
@@ -269,6 +270,13 @@ static void probe_frame(CMSampleBufferRef sb, long frameStatus)
            base ? "" : " <-- NULL, which is the reported FaceTime symptom");
     printf("    bytes per row:     %zu\n", bpr);
 
+    for (size_t pl = 0; pl < planes; pl++) {
+        void *pb0 = lk == kCVReturnSuccess
+                        ? CVPixelBufferGetBaseAddressOfPlane(pb, pl) : NULL;
+        printf("    plane %zu base:     %p  bpr %zu %s\n", pl, pb0,
+               lk == kCVReturnSuccess ? CVPixelBufferGetBytesPerRowOfPlane(pb, pl) : 0,
+               pb0 ? "" : "<-- NULL");
+    }
     if (base) {
         long nz = 0, looked = 0;
         probe_content(base, bpr, w, h, &nz, &looked);
@@ -411,7 +419,7 @@ static int sck_start(CGDirectDisplayID want, size_t w, size_t h, double fps,
         [[SCContentFilter alloc] initWithDisplay:disp excludingWindows:@[]];
     SCStreamConfiguration *cfg = [[SCStreamConfiguration alloc] init];
     cfg.width = w; cfg.height = h;
-    cfg.pixelFormat = 'BGRA';
+    cfg.pixelFormat = (OSType)gPixFmt;
     cfg.queueDepth = 6;
     cfg.showsCursor = YES;
     /* THE WHOLE POINT: demand a frame this often whether or not anything
@@ -471,6 +479,15 @@ int main(int argc, char **argv)
             gProbeWant = atoi(argv[++i]);
             if (gProbeWant < 1) { gProbeWant = 1; }
             if (gProbeWant > 32) { gProbeWant = 32; }
+        } else if (!strcmp(argv[i], "--fmt") && i + 1 < argc) {
+            /* 3gvb: FaceTime's encoder asks for biplanar YCbCr, not BGRA, and
+             * a buffer that maps in one format says nothing about the other -
+             * different plane count, different allocation path. */
+            const char *f = argv[++i];
+            if (strlen(f) == 4) {
+                gPixFmt = ((unsigned)f[0] << 24) | ((unsigned)f[1] << 16) |
+                          ((unsigned)f[2] << 8) | (unsigned)f[3];
+            }
         } else if (!strcmp(argv[i], "--cgs")) {
             useCgs = 1;
         } else if (!strcmp(argv[i], "--quiet")) {
