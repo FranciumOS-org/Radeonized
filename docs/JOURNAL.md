@@ -73438,6 +73438,12 @@ a 1080 buffer, the reverse mismatch, and 1088 without realtime.
 So the failure is specific to **`VCPRealtimeEncoder` inside AVConference**,
 which is not VideoToolbox's `Apple H.264 (SW)` and is not reachable from here.
 
+### What is ours — WITHDRAWN IN PART, see 3ftp-b
+
+**The kernel half of this section is WRONG: `AMDVCN3HWEngine` reads 2, not 0,
+and the zero came from querying a class name that does not exist (rule 26).
+3ftp-b has the corrected table. The VideoToolbox readings below stand.**
+
 ### What is ours, and it is a precise registry reading
 
 `VTCopyVideoEncoderList` returns **15 encoders and not one with
@@ -73481,3 +73487,83 @@ resolve, because the verdict ranked the encode result above the buffer reading
 when the buffer is the thing being chased. The verdict now reports an
 unmappable buffer, and an all-black mapped one, ahead of either encode line,
 and the break was re-run against the fix.
+
+## 3ftp-b — CORRECTION: the VCN engines are UP. 3ftp's "0 instances" was rule 26, in my own hands
+
+2026-11-22, same boot 633, still no reboots. **3ftp's central kernel claim is
+wrong and is withdrawn.** It reported
+
+```
+AMDVCN3HWEngine 0   AMDAccelVCNContext 0   AMDAccelVideoContext 0
+```
+
+and concluded that the video engine is the only engine family this accelerator
+brings up zero of. The first of those three numbers came from
+`ioreg -rl -c AMDVCN3HWEngine`, and **there is no class by that name** — the
+class is `AMDRadeonX6000_AMDVCN3HWEngine`. A class name that does not exist
+returns no nodes, and a count of no nodes is 0. That is rule 26 exactly, the
+search-is-an-instrument rule, committed by the person who had just quoted it
+twice in the same session. The short names in 3ftp's table were my own regex
+stripping the `AMDRadeonX6000_AMD` prefix off the `IOKitDiagnostics` listing,
+and I then fed the stripped names back in as if they were real class names.
+
+Read with the exact names out of the same `Classes` map:
+
+```
+AMDRadeonX6000_AMDVCN3HWEngine        2     AMDRadeonX6000_AMDVCNHWEngine     1
+AMDRadeonX6000_AMDVCNHWChannel        2     AMDRadeonX6000_AMDVCN2DecChannel  2
+AMDRadeonX6000_AMDVCN2EncChannel      3     AMDRadeonX6000_AMDVCN2EncRing     2
+AMDRadeonX6000_AMDVCN2EncLLQChannel   2     AMDRadeonX6000_AMDVCN2EncLLQRing  2
+AMDRadeonX6000_AMDVCN3UnifiedChannel  0     AMDRadeonX6000_AMDVCN3UnifiedRing 0
+```
+
+**Two VCN3 hardware engines exist**, with decode and encode channels and rings
+under them. The accelerator publishes all six by name in its own
+`PerformanceStatisticsAccum`:
+
+```
+HWChannel VCN0Dec   HWChannel VCN0Enc   HWChannel VCN0EncLLQ
+HWChannel VCN1Dec   HWChannel VCN1Enc   HWChannel VCN1EncLLQ
+```
+
+every one at `Commands Submitted 0`, beside `contextVideoCount 0` and a
+`context2DCount 1` that is the in-sample control for the counter meaning
+anything at all.
+
+### Which is consistent with Apple's code, read before the correction
+
+`AMDRadeonX6000_AMDNavi21Hardware::allocateHWEngines()` (`0xbe510b8`) allocates
+`Navi21PM4Engine` into `+0x3b0`, two `AMDSDMAEngine_GC_10_3_0` into `+0x3b8` and
+`+0x3c0`, two more under `testb $1, 0xc2(%rbx)`, and then **two
+`AMDVCN3HWEngine` into `+0x3f0` and `+0x3f8` with no capability gate at all** —
+the only test is the allocation's own NULL check. `AMDHardware::initializeHWEngines()`
+(`0xbe2fc1c`) then walks slots 0..0xa and calls `vt[0x118]` on each non-NULL
+one. The registry agrees with the code: `Navi21PM4Engine 1`,
+`AMDSDMAEngine_GC_10_3_0 4`, `AMDVCN3HWEngine 2`. There was never a reason to
+expect a zero there, and 3ftp's "the video engine is the only family that comes
+up zero" was an artefact of the broken query, not a reading.
+
+### What this does NOT change
+
+`VTCopyVideoEncoderList` still returns **15 encoders with not one
+`IsHardwareAccelerated`**, and a hardware-required `VTCompressionSessionCreate`
+still returns **-12908**. Both were measured with working queries and both
+stand. So does everything 3ftp established about the sibling session's
+hypothesis: SCK frames map, carry a picture, and encode fine through the
+software encoder, at 1080 and at FaceTime's 1088 and across both mismatches.
+
+### Where the gap actually is
+
+Kernel side: engines constructed, channels published, **zero commands ever
+submitted**, `contextVideoCount 0`. Userspace side: no hardware encoder
+registered with VideoToolbox. `AppleGVA.framework` and `AppleGVACore.framework`
+are both present. So nothing has ever opened a video context on a GPU whose
+video engines are sitting there idle, and the decision not to is being taken
+**above** the kernel driver, not inside it.
+
+That is a different and much better-placed question than the one 3ftp
+asked, and it is unproven: no one has yet established what AppleGVA tests
+before it offers a device, whether it reaches this accelerator at all, or
+whether a VCN3 unified channel (`AMDVCN3UnifiedChannel 0`, against
+`AMDVCN2EncChannel 3`) is the thing a video context would need and is missing.
+Those are three separate questions and this entry claims none of them.
