@@ -73567,3 +73567,131 @@ before it offers a device, whether it reaches this accelerator at all, or
 whether a VCN3 unified channel (`AMDVCN3UnifiedChannel 0`, against
 `AMDVCN2EncChannel 3`) is the thing a video context would need and is missing.
 Those are three separate questions and this entry claims none of them.
+
+## 3gva — why VideoToolbox sees no hardware encoder: two boolean properties nobody publishes
+
+2026-11-22, boot 633, **no boots spent — this is entirely static plus one
+registry read.** 3ftp-b left the question "the engines are up and idle, so who
+decides not to use them?" This answers it, end to end, with an in-sample
+control at the decisive step.
+
+### AppleGVA's own gate passes
+
+`AppleGVA.framework` is cache-resident (`dscbase.sh` on its absolute path:
+`7ffa0c57c000`, 31 exports). The one that matters is
+**`_AVFQTXENC_GetEncodeAvailability`** (`+0x5BDE4`). Its first act is a call to
+a helper at `0x7ffa0c5d5289`, and it returns 0 if that helper fails **or**
+writes a zero byte to its out-parameter. Resolving its stubs through their GOT
+slots (`jmp *disp32(%rip)` -> slot -> `dscsym.sh`) names the helper exactly:
+`CFURLCreateWithFileSystemPath`, `CFReadStreamCreateWithFile`,
+`CFReadStreamOpen`, `CFPropertyListCreateWithStream` — and its own error string
+is `GVA error: hasOfflineRenderer: CFReadStreamCreateWithFile failed`. The file
+it reads is
+`/System/Library/PrivateFrameworks/AppleGVA.framework/Resources/Info.plist`.
+
+That plist carries a **`System Support`** dictionary, 98 entries keyed by model
+identifier (28) or board-id (70), with per-machine flags including **`hwe`**
+(hardware encode), `hweBGRA`, `facetimeDecode`, `facetimeLPEnc`, `ke1` and
+`pp`. 80 of the 98 carry `hwe`.
+
+This machine presents `hw.model` **`MacBookPro16,2`**, which is **not** a key —
+but its board-id **`Mac-5F9802EFE386AA28`** is, and reads
+
+```
+{"pp":3,"burstSize":4,"facetimeDecode":true,"hwe":true,
+ "hweBGRA":true,"ke1":true,"facetimeLPEnc":true}
+```
+
+**So AppleGVA's machine gate passes, with hardware encode and FaceTime encode
+both enabled.** The SMBIOS is not the blocker here. (That is worth stating
+plainly because 3rmb's external-display answer *was* an SMBIOS story, and the
+temptation to reuse it is exactly the error this journal keeps recording.)
+
+### The blocker is two booleans on our own accelerator
+
+`AMDRadeonX6000_AMDGraphicsAccelerator::configureDevice(IOPCIDevice*)`
+(`0xbdc3e58`) is where the driver advertises video. At `0xbdc4163` it does, in
+effect:
+
+```
+svc = OSDynamicCast(<class>, this->0x368);
+dec = OSDynamicCast(OSBoolean, svc->getProperty("MM_EnableHEVCDecode"))->getValue();
+enc = OSDynamicCast(OSBoolean, svc->getProperty("MM_EnableHEVCEncode"))->getValue();
+if ((dec & enc) != 1) goto skip;           // 0xbdc4249
+setProperty("IOGVAHEVCDecode", "1");       // 0xbdc4252
+setProperty("IOGVAHEVCEncode", "1");       // 0xbdc426f
+...                                        // VTMaxEncodeLevel, VTRating,
+                                           // VTQualityRating,
+                                           // VTSupportedProfileArray,
+                                           // IOGVAHEVCEncodeCapabilities
+```
+
+(The two `callq 0x1007e` sites are `OSMetaClassBase::safeMetaCast` — the second
+argument is a metaclass global in both cases, and `vt[0x2b8]` is `getProperty`,
+`vt[0x280]` `setProperty`, `vt[0x128]` `OSBoolean::getValue`.)
+
+**Neither property exists anywhere in this machine's registry.**
+`MM_EnableHEVCDecode` / `MM_EnableHEVCEncode`: **0 hits in all of `ioreg -l`**.
+`IOGVACodec`, `IOGVAHEVCDecode`, `IOGVAHEVCEncode`, `IOGVAEncoderRestricted`:
+**0 on the accelerator node**, out of 674 lines.
+
+**And `configureDevice` definitely ran**, which is the control that makes those
+zeroes mean something rather than "the function never executed" (rule 14).
+Earlier in the same function, at `0xbdc400d` and `0xbdc4037`, it publishes
+**`ATY,intrev`** and **`ATY,cbits`**, and both are on our accelerator node in
+the same sample. So the function executed, reached the gate, read nothing, and
+took the skip.
+
+A second, independent absence agrees: `IODVDBundleName` — the key naming the
+userspace VA bundle — is **absent** from the live accelerator while
+`IOGLBundleName` and `IOOCDBundleName` are present (`"DVD"` occurs 0 times in
+674 lines; `IOAccelRevision` present as the control). It is declared in all
+five of `AMDRadeonX6000.kext`'s personalities as `AMDRadeonVADriver2`, and the
+string **does not occur in the kext binary at all**, so nothing in code
+publishes or removes it. `IOVARendererID` meanwhile reads **16908292**
+(`0x1020004`) live against **16908288** (`0x1020000`) in the plist, and
+`0xbdc221d` shows why: the driver ORs `0x1020000` with a capability word and
+sets the key itself. So the renderer id is driver-written and the bundle name
+is not — those two facts have different owners and should not be read as one.
+
+### Where the properties come from on a real Mac
+
+`MM_EnableHEVCDecode` / `MM_EnableHEVCEncode` are not written by any kext:
+`strings` finds `MM_Enable` **0** times in AMDSupport, AMDRadeonX6000HWServices,
+AMDRadeonX6800HWLibs and AMDRadeonX6000Framebuffer, and the whole system KC has
+5 hits, all literal pools in AMDRadeonX4000/X5000/X6000 — the readers. They are
+**plist data**: `AMD9500Controller.kext`'s `Info.plist` carries them inside
+per-device `aty_properties` dictionaries, true for some devices and false for
+others. (`aty_properties` is **not** a string in AMDRadeonX6000 — an earlier
+draft of this entry asserted the accelerator looks that dictionary up by name,
+and the disassembly says it reads the booleans straight off the service at
+`+0x368`. Corrected before publication.) `AMD10000Controller.kext` has no
+`MM_` keys and matches only Tahiti/Hawaii-era ids; nothing in the tree supplies
+them for `0x16811002`, and on this machine Apple's own controller creates
+nothing at all (3ext-c).
+
+### What this is and is not
+
+**Is:** a located, named, plist-shaped gap on our own accelerator node, two
+booleans wide, with the consumer identified by disassembly and the absence
+measured with a positive control in the same sample. That is a far cheaper
+object than a PHY held in reset.
+
+**Is not:** a fix for FaceTime, and this entry claims no boot. Three reasons to
+be careful before publishing anything:
+
+1. **These keys are HEVC. FaceTime's failure is H.264.** `IOGVAHEVCEncode` is
+   not `IOGVACodec`, and the H.264 branch at `0xbdc2291` has its own three
+   conditions — `vt[0x150]()` equal to `0x80000` or `0x100000`,
+   `vt[0x158]()->0x86 & 1`, and `this->0x1eb4 == 5` — none of which has been
+   evaluated on this hardware.
+2. **Publishing a capability is advertising, not working.** If VCN encode does
+   not actually function here, a registered-but-failing hardware encoder is a
+   worse state than none: software fallback paths stop being taken. Rule 20 in
+   its exact form — a key that reads back is not a capability that works.
+3. **No one has shown the VA bundle would load**, or what else
+   `AMDRadeonVADriver2` demands once it does.
+
+The next step is a read, not a write: evaluate the three H.264 conditions and
+find what `+0x368` actually is, so a property is published on the right object
+for the right codec, or the idea is dropped on evidence.
